@@ -73,7 +73,7 @@ describe('OutboundBuffer', () => {
     const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
 
     buffer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     await buffer.flush();
 
     // 流式从未成功发送 → 降级静态
@@ -86,7 +86,7 @@ describe('OutboundBuffer', () => {
     const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
 
     buffer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     buffer.cancel();
     await vi.runAllTimersAsync();
 
@@ -100,12 +100,12 @@ describe('OutboundBuffer', () => {
     const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
 
     buffer.append('文件来了 [[FILE:/etc/host');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     // 未闭合标记被拦截：此时 update 不应收到标记碎片
     expect(session.update).not.toHaveBeenCalled();
 
     buffer.append('name]] 请查收');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     await buffer.flush();
 
     const streamed = (session.update as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('');
@@ -121,9 +121,9 @@ describe('OutboundBuffer', () => {
     const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
 
     buffer.append('abc');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     buffer.append('def');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     await buffer.flush();
 
     // StreamingWriter update 全量语义：每次推送都是累积文本，最终恰为 abc + def

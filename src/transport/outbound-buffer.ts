@@ -11,8 +11,12 @@ import { chunkMarkdownText } from './chunker.js';
 import { StreamingWriter } from './streaming-writer.js';
 import { FILE_TAG_RE, FILE_TAG_MAX_HOLD, processFileMarkers, sendMarkerFile } from './file-sender.js';
 
-/** 流式输出节流间隔(ms)：连续 chunk 累积后停顿该间隔才推送 */
-const STREAM_THROTTLE_MS = 200;
+/**
+ * 流式输出节流间隔(ms)：连续 chunk 累积后停顿该间隔才推送。
+ * QQ 开放平台官方建议最小 300ms（SDK 默认 500ms）；过密的 replace 帧
+ * 会导致客户端渲染片段重复，因此不低于官方下限。
+ */
+const STREAM_THROTTLE_MS = 500;
 
 /** 未闭合文件标记的开头 */
 const FILE_TAG_OPEN = '[[FILE:';

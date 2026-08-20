@@ -35,7 +35,7 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(bot.openStream).toHaveBeenCalledTimes(1);
     expect(session.update).toHaveBeenCalledWith('hello');
@@ -49,7 +49,7 @@ describe('StreamingWriter', () => {
     writer.append('Hello');
     writer.append(' ');
     writer.append('world');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
 
     // throttle：同一 tick 内多次 append 共用一个 timer，只触发一次 update
     expect(session.update).toHaveBeenCalledTimes(1);
@@ -62,10 +62,10 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('a');
-    await vi.advanceTimersByTimeAsync(200); // 第一次 flush → update('a')
+    await vi.advanceTimersByTimeAsync(500); // 第一次 flush → update('a')
 
     writer.append('b');
-    await vi.advanceTimersByTimeAsync(200); // 第二次 flush → update('ab')
+    await vi.advanceTimersByTimeAsync(500); // 第二次 flush → update('ab')
 
     expect(session.update).toHaveBeenCalledTimes(2);
     expect(session.update).toHaveBeenNthCalledWith(1, 'a');
@@ -91,7 +91,7 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(writer.shouldFallback).toBe(true);
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
@@ -106,7 +106,7 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
 
     expect(writer.shouldFallback).toBe(true);
   });
@@ -122,11 +122,11 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('a');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     expect(writer.shouldFallback).toBe(false); // 已成功发送 1 片
 
     writer.append('b');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     // 第二次 update 失败，但 sentChunkCount 已 > 0，不降级
     expect(writer.shouldFallback).toBe(false);
   });
@@ -161,7 +161,7 @@ describe('StreamingWriter', () => {
     const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
 
     writer.append('hello');
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(500);
     expect(bot.openStream).toHaveBeenCalledTimes(1);
 
     writer.abort();
