@@ -28,6 +28,10 @@
     "plugin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tencent-connect/dsh-qqbot.git"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
