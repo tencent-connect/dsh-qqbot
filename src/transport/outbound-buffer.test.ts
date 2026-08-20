@@ -92,4 +92,43 @@ describe('OutboundBuffer', () => {
 
     expect(session.complete).toHaveBeenCalledTimes(1);
   });
+
+  it('流式：标记跨 chunk 分片到达不打碎，闭合后触发文件发送', async () => {
+    const session = createSession();
+    const sendFile = vi.fn().mockResolvedValue({ message: { id: 'm' } });
+    const bot = { ...createBot(() => session), sendFile };
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+
+    buffer.append('文件来了 [[FILE:/etc/host');
+    await vi.advanceTimersByTimeAsync(200);
+    // 未闭合标记被拦截：此时 update 不应收到标记碎片
+    expect(session.update).not.toHaveBeenCalled();
+
+    buffer.append('name]] 请查收');
+    await vi.advanceTimersByTimeAsync(200);
+    await buffer.flush();
+
+    const streamed = (session.update as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('');
+    expect(streamed).not.toContain('[[FILE:');
+    expect(streamed).toContain('文件来了');
+    expect(streamed).toContain('请查收');
+    expect(sendFile).toHaveBeenCalledWith(c2cTarget, { localPath: '/etc/hostname' }, { fileName: 'hostname' });
+  });
+
+  it('流式：增量推送不重复（pushPos）', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+
+    buffer.append('abc');
+    await vi.advanceTimersByTimeAsync(200);
+    buffer.append('def');
+    await vi.advanceTimersByTimeAsync(200);
+    await buffer.flush();
+
+    // StreamingWriter update 全量语义：每次推送都是累积文本，最终恰为 abc + def
+    const calls = (session.update as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(calls[calls.length - 1]).toBe('abcdef');
+    expect(calls[0]).not.toContain('abcabc');
+  });
 });

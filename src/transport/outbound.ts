@@ -8,7 +8,8 @@ import type { SessionManager, SessionRecord } from '../session/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
 import { chunkMarkdownText } from './chunker.js';
-import { OutboundBuffer, type QQBotSender } from './outbound-buffer.js';
+import { OutboundBuffer, type QQBotFileSender, type QQBotSender } from './outbound-buffer.js';
+import { processFileMarkers } from './file-sender.js';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.js';
 import {
   parseEvent,
@@ -21,7 +22,7 @@ import {
   type RawSessionEvent,
 } from './events.js';
 
-export type { QQBotSender } from './outbound-buffer.js';
+export type { QQBotFileSender, QQBotSender } from './outbound-buffer.js';
 export type { ToolsRegistryLike } from './tool-presenter.js';
 
 /** 出站处理器签名（注册到 ctx.on('session/event')） */
@@ -50,7 +51,7 @@ class OutboundRouter {
 
   public constructor(
     private readonly manager: SessionManager,
-    private readonly bot: QQBotSender,
+    private readonly bot: QQBotSender & QQBotFileSender,
     private readonly config: ImQQBotConfig,
     private readonly logger: Logger,
     private readonly toolsRegistry: ToolsRegistryLike | undefined,
@@ -165,9 +166,10 @@ class OutboundRouter {
     this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
+  /** 统一发送：剥离 [[FILE:]] 标记并触发文件发送，切分 + 逐 chunk 发送 + 错误记录 */
   private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
+    const cleaned = processFileMarkers(this.bot, record.replyTarget, text, this.logger);
+    const chunks = chunkMarkdownText(cleaned, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
@@ -186,7 +188,7 @@ class OutboundRouter {
  */
 export function createOutboundHandler(
   manager: SessionManager,
-  bot: QQBotSender,
+  bot: QQBotSender & QQBotFileSender,
   config: ImQQBotConfig,
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
