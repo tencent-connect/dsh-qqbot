@@ -73,7 +73,7 @@ export class OutboundBuffer {
     if (!this.writer) return;
 
     // 待推送区出现未闭合标记 → 拦截等待闭合（超长则放弃按文本推送）
-    const openIdx = this.buffer.indexOf(FILE_TAG_OPEN, this.pushPos);
+    const openIdx = this.findOpenMarkerIdx();
     if (openIdx !== -1) {
       const runaway = this.buffer.length - openIdx > FILE_TAG_MAX_HOLD;
       const hasClose = this.buffer.indexOf(']]', openIdx) !== -1;
@@ -81,6 +81,24 @@ export class OutboundBuffer {
     }
     const pending = this.consumePending();
     if (pending) this.writer.append(pending);
+  }
+
+  /**
+   * 找待推送区中标记起点：
+   *   1) 完整的 "[[FILE:" 开头；
+   *   2) 分片把开头截断在 buffer 尾部（如以 "[[F" 结尾）——此时后续帧
+   *      只含标记剩余部分，必须同样拦截，否则整个标记透传给用户。
+   * 返回 -1 表示无待定标记。
+   */
+  private findOpenMarkerIdx(): number {
+    const idx = this.buffer.indexOf(FILE_TAG_OPEN, this.pushPos);
+    if (idx !== -1) return idx;
+    const tailStart = Math.max(this.pushPos, this.buffer.length - (FILE_TAG_OPEN.length - 1));
+    const tail = this.buffer.slice(tailStart);
+    for (let i = 1; i < FILE_TAG_OPEN.length; i++) {
+      if (tail.endsWith(FILE_TAG_OPEN.slice(0, i))) return this.buffer.length - i;
+    }
+    return -1;
   }
 
   /** 获取当前累积文本 */

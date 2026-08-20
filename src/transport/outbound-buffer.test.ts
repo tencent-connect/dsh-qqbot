@@ -115,6 +115,28 @@ describe('OutboundBuffer', () => {
     expect(sendFile).toHaveBeenCalledWith(c2cTarget, { localPath: '/etc/hostname' }, { fileName: 'hostname' });
   });
 
+  it('流式：分片把 [[FILE: 前缀截断也不透传（回归）', async () => {
+    const session = createSession();
+    const sendFile = vi.fn().mockResolvedValue({ message: { id: 'm' } });
+    const bot = { ...createBot(() => session), sendFile };
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+
+    // 17 字符分片恰好把 '[[FILE:' 切在 '[[F' 处（/etc/hostname 在真实文件系统存在）
+    const text = '文件已创建。测试标记：\n\n[[FILE:/etc/hostname]]\n\n后文继续。';
+    for (let i = 0; i < text.length; i += 17) {
+      buffer.append(text.slice(i, i + 17));
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    await buffer.flush();
+
+    const streamed = (session.update as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0])).join('');
+    expect(streamed).not.toContain('[[FILE:');
+    expect(streamed).toContain('文件已创建');
+    expect(streamed).toContain('后文继续');
+    expect(sendFile).toHaveBeenCalledWith(c2cTarget, { localPath: '/etc/hostname' }, { fileName: 'hostname' });
+  });
+
   it('流式：增量推送不重复（pushPos）', async () => {
     const session = createSession();
     const bot = createBot(() => session);
