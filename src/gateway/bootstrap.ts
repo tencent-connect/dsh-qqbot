@@ -10,7 +10,7 @@ import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
-import type { QQBotSender } from '../transport/outbound-buffer.js';
+import type { QQBotFileSender, QQBotSender } from '../transport/outbound-buffer.js';
 import { buildUserAgent } from '../shared/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
@@ -61,7 +61,7 @@ export async function bootstrapGateway(
   }
 
   // 发送适配器：将 QQBot 实例适配为 QQBotSender（openStream 参数形态不同）
-  const sender: QQBotSender = {
+  const sender: QQBotSender & QQBotFileSender = {
     sendMarkdown: (target, content) => bot.sendMarkdown(target, content),
     openStream: (target) => bot.openStream({
       target: {
@@ -70,6 +70,7 @@ export async function bootstrapGateway(
         msgId: target.msgId as string,
       },
     }),
+    sendFile: (target, source, opts) => bot.sendFile(target, source, opts),
   };
 
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
