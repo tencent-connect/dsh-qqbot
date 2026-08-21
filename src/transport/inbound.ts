@@ -79,6 +79,14 @@ interface ProcessedAttachment {
   size?: number;
 }
 
+// ── followup 串行队列 ──
+//
+// 每个会话一条 FIFO 队列：新消息排到队尾，等该会话上一轮完全结束
+// （agent.whenIdle()）后才投递 followup。直接 followup 会打断正在运行
+// 的 turn——被打断的 turn 迟到的流式事件仍会带着预分配序号落盘，
+// 造成会话日志事件乱序/序号回退，最终损坏整个会话记录。
+const followupQueues = new Map<string, Promise<void>>();
+
 // ── 主处理函数 ──
 
 /**
@@ -119,7 +127,7 @@ export async function handleInbound(
     return;
   }
 
-  // ── 构建 UserMessage → followup ──
+  // ── 构建 UserMessage → followup（串行化：等该会话空闲后再发，绝不打断运行中的 turn） ──
   const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
 
   const message = createUserMessage({
@@ -127,8 +135,17 @@ export async function handleInbound(
     source: { kind: 'user' as const },
   });
 
-  record.agent.followup(message);
-  logger.info(`→ followup sent: key=${scope}:${peerId}`);
+  const key = record.sessionKey;
+  const prev = followupQueues.get(key) ?? Promise.resolve();
+  const next = prev.then(async () => {
+    // 会话已被回收/替换则放弃投递，避免发给错误的 agent
+    if (manager.getSessionRecord(scope, peerId) !== record) return;
+    await record.agent.whenIdle().catch(() => {});
+    if (manager.getSessionRecord(scope, peerId) !== record) return;
+    record.agent.followup(message);
+    logger.info(`→ followup sent: key=${scope}:${peerId}`);
+  });
+  followupQueues.set(key, next.catch(() => {}));
 
   // 群消息回复后清空历史缓存（避免下次 @ 时重复组包，对齐 openclaw-qqbot dispatch）
   if (scope === 'group') {
