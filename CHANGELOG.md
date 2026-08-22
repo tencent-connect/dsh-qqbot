@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 修复
+
+- **侧边栏会话消失**：插件创建的 QQ 会话现在会在创建/恢复时挂载到对应工作区（`workspaceRegistry`）。此前宿主只在 Web 端 `session.create` 路径挂载会话，插件会话不在任何工作区成员列表里，闲置回收后会从侧边栏消失。挂载为 fail-soft（服务缺失或失败时静默降级，不影响消息处理）。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能
