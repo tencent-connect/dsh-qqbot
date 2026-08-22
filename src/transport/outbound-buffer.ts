@@ -4,6 +4,7 @@
  * 收集流式 chunk，流式优先投递（StreamingWriter），降级为静态发送。
  * 独立文件便于单测。
  */
+import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import type { SessionRecord } from '../session/index.js';
 import type { Logger, ReplyTarget } from '../types.js';
 import { chunkMarkdownText } from './chunker.js';
@@ -20,7 +21,8 @@ export interface StreamSessionLike {
 
 /** QQ Bot 发送接口 */
 export interface QQBotSender {
-  sendMarkdown(target: ReplyTarget, content: string): Promise<unknown>;
+  /** opts.keyboard 附带内联按钮（交互式提问用，透传给平台） */
+  sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
 }
 

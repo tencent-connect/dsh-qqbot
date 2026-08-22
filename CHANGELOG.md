@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **交互式提问支持**：agent 使用 `ask_user_question` 工具提问时，QQ 端会收到编号选项文本；单选带选项的问题附带可点击按钮，点击即作答（也支持回复编号或自由文本）。Web 端的弹出框行为不受影响。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

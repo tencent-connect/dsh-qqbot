@@ -17,6 +17,7 @@ import type { Logger } from '../types.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { startMediaCleanup } from '../media/media-cleaner.js';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.js';
+import { QuestionChannel } from '../features/question-channel.js';
 
 export async function bootstrapGateway(
   ctx: Context,
@@ -61,8 +62,9 @@ export async function bootstrapGateway(
   }
 
   // 发送适配器：将 QQBot 实例适配为 QQBotSender（openStream 参数形态不同）
+  // sendMarkdown 透传 opts（承载 { keyboard } 内联按钮，交互式提问用）
   const sender: QQBotSender = {
-    sendMarkdown: (target, content) => bot.sendMarkdown(target, content),
+    sendMarkdown: (target, content, opts) => bot.sendMarkdown(target, content, opts),
     openStream: (target) => bot.openStream({
       target: {
         scope: target.scope,
@@ -75,6 +77,28 @@ export async function bootstrapGateway(
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outboundHandler as (...args: unknown[]) => void);
+
+  // ── 交互式提问通道：QQ 会话的 ask_user_question 渲染为文本/按钮，回复即答案 ──
+  const questionChannel = new QuestionChannel(manager, sender, config, logger);
+  questionChannel.install(ctx as unknown as { get(name: string): unknown });
+  manager.questionChannel = questionChannel;
+
+  // ── 按钮点击回调：解析为答案（平台要求 5 秒内 ACK） ──
+  bot.on('interaction', async (_iCtx, event) => {
+    logger.info(`im-qqbot: interaction received id=${event?.id ?? '-'} button=${event?.data?.resolved?.button_id ?? '-'} data=${event?.data?.resolved?.button_data ?? '-'} from=${event?.group_openid ? 'group:' + event.group_openid : 'c2c:' + (event?.user_openid ?? '-')}`);
+    let matched = false;
+    try {
+      matched = questionChannel.handleInteraction(event);
+    } catch (err) {
+      logger.error(`im-qqbot: interaction handling failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      await bot.acknowledgeInteraction(event.id, matched ? 0 : 3);
+      logger.info(`im-qqbot: interaction acked id=${event?.id ?? '-'} matched=${matched}`);
+    } catch (err) {
+      logger.error(`im-qqbot: interaction ack failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
 
   bot.on('error', (err: unknown) => {
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);
@@ -103,6 +127,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        questionChannel.uninstall();
         await manager.disposeAll();
         bot.stop();
       };

@@ -108,6 +108,8 @@ src/
 │   ├── scope.ts                # scope/peer 提取
 │   └── send-helper.ts          # 分块发送
 ├── commands/                   # 斜杠命令
+├── features/                   # 功能模块
+│   └── question-channel.ts     # ask_user_question → QQ 文本/按钮问答
 └── typings/                    # 外部模块声明
 ```
 
@@ -125,6 +127,7 @@ sessionKey: `qqbot:${appId}:${scope}:${peerId}`，由 SHA-256 确定性派生 Se
 - **Preset 支持** — 可通过 `agent-presets` 服务挂载预设（工具集、prompt 等）
 - **闲置回收** — 超时自动 dispose Agent，防止内存泄漏
 - **Markdown 输出** — 回复以 Markdown 格式发送，支持代码块/表格感知切分
+- **交互式提问** — `ask_user_question` 在 QQ 端渲染为编号选项文本 + 可点击按钮（单选），回复或点击即作答；其他会话保持原有弹出框行为
 
 ## 本地开发
 

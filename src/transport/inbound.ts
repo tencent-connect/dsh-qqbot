@@ -103,6 +103,14 @@ export async function handleInbound(
     msgId: msg.messageId,
   };
 
+  // ── 交互式提问通道：该会话有待答问题时，本条文本消息即答案 ──
+  //    （contentSanitizer 已剥离 @标记；斜杠命令在中间件层已被拦截，不会到这里）
+  const questionChannel = manager.questionChannel;
+  if (questionChannel && questionChannel.tryAnswer(manager.sessionKey(scope, peerId), (msg.content ?? '').trim())) {
+    logger.info(`Question answered via QQ: scope=${scope} peerId=${peerId}`);
+    return;
+  }
+
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   const agentBody = assembleAgentBody(msg, mwState, scope, logger);
 
