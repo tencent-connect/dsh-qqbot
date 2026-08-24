@@ -6,11 +6,12 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
-import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.js';
 import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
 import type { QQBotSender } from '../transport/outbound-buffer.js';
+import { QuestionChannel } from '../features/question-channel.js';
 import { buildUserAgent } from '../shared/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
@@ -63,7 +64,7 @@ export async function bootstrapGateway(
 
   // 发送适配器：将 QQBot 实例适配为 QQBotSender（openStream 参数形态不同）
   const sender: QQBotSender = {
-    sendMarkdown: (target, content) => bot.sendMarkdown(target, content),
+    sendMarkdown: (target, content, opts) => bot.sendMarkdown(target, content, opts),
     openStream: (target) => bot.openStream({
       target: {
         scope: target.scope,
@@ -76,6 +77,17 @@ export async function bootstrapGateway(
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outboundHandler as (...args: unknown[]) => void);
+
+  // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
+  const questionChannel = new QuestionChannel(manager, sender, config, logger);
+  manager.questionChannel = questionChannel;
+  questionChannel.install(ctx);
+
+  // ── 按钮点击回调（interaction） ──
+  bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
+    const matched = questionChannel.handleInteraction(event);
+    await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
+  });
 
   bot.on('error', (err: unknown) => {
     logger.error(`bot error: ${err instanceof Error ? err.message : String(err)}`);

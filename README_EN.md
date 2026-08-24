@@ -79,6 +79,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `directPrompt` | string | - | Extra system prompt for direct chats |
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min |
+| `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `debug` | boolean | `false` | Debug mode |
 
 ## Built-in Commands
@@ -137,6 +138,7 @@ Resolution strategy: in-process reuse → persisted resume → fresh create.
 - **Preset support** — mount presets (toolkits, prompts, etc.) via the `agent-presets` service
 - **Idle eviction** — auto-dispose Agents on timeout to prevent memory leaks
 - **Markdown output** — replies sent as Markdown with code-block/table-aware chunking
+- **Question interaction** — supports `ask_user_question` with inline keyboard buttons (mutually exclusive) or numbered replies, one question at a time with timeout
 
 ## Local Development
 

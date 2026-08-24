@@ -24,6 +24,7 @@ import type { SessionManager } from '../session/index.js';
 import type { Logger } from '../types.js';
 import { buildCommandList } from '../commands/index.js';
 import { attachmentProcessor } from '../middleware/attachment.js';
+import { questionAnswer } from '../middleware/question-answer.js';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
 
 export function setupMiddlewares(
@@ -89,6 +90,9 @@ export function setupMiddlewares(
     commands: buildCommandList({ manager, config }),
   });
   bot.use(slash.middleware);
+
+  // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
+  bot.use(questionAnswer(manager));
 
   // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
   bot.use(concurrencyGuard({
