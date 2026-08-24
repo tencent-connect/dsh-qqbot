@@ -1,8 +1,19 @@
-# @tencent-connect/dsh-qqbot
+<div align="center">
 
-A QQ Bot IM plugin for [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), driving the dsh agent loop with the QQ messaging platform as the frontend protocol.
+<img width="120" src="https://img.shields.io/badge/🤖-QQ_Bot-blue?style=for-the-badge" alt="QQ Bot" />
 
-[中文文档](./README.md) | English
+**A QQ Bot plugin for [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), connecting DeepSeek AI assistants to QQ private and group chats.**
+
+[![npm version](https://img.shields.io/npm/v/@tencent-connect/dsh-qqbot)](https://www.npmjs.com/package/@tencent-connect/dsh-qqbot)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/tencent-connect/dsh-qqbot)](https://github.com/tencent-connect/dsh-qqbot)
+[![QQ Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.qq.com/wiki/)
+
+<br/>
+
+**[简体中文](./README.md) | English**
+
+</div>
 
 ## Architecture
 
