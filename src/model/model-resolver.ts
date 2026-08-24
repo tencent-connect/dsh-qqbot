@@ -54,12 +54,10 @@ export class ModelResolver {
    *
    * 优先级：per-peer 偏好 > cordis.yml 显式配置 > 默认链（settings.yaml > host）
    *
-   * 注意：不能像 dsh-TUI 那样返回 undefined 让 session 沿用 requestHeader。
-   * dsh-TUI 靠 installModelSelection 从 session.requestHeader 恢复 {{model}}，
-   * 而我们未装 installModelSelection，system-prompt 的 {{model}} 变量直接读
-   * agent.options.model（agent-loop index.ts:352）——若无值会抛
+   * 这里不返回 undefined，因为未装 installModelSelection，system-prompt 的
+   * {{model}} 变量直接读 agent.options.model——若无值会抛
    * "prompt variable {{model}} has no value for this assembly"。
-   * 因此这里兜底到默认链，确保 agent.options.model 始终有值。
+   * 因此兜底到默认链，确保 agent.options.model 始终有值。
    */
   getResumeRoute(sessionKey: string): ModelRoute | undefined {
     const override = this.prefs.getOverride(sessionKey);
@@ -115,6 +113,27 @@ export class ModelResolver {
   }
 
   /**
+   * 获取指定 sessionKey 的 per-peer preset 覆盖
+   */
+  getPreset(sessionKey: string): string | undefined {
+    return this.prefs.getPreset(sessionKey);
+  }
+
+  /**
+   * 设置 per-peer preset 覆盖并持久化
+   */
+  setPreset(sessionKey: string, presetId: string): void {
+    this.prefs.setPreset(sessionKey, presetId);
+  }
+
+  /**
+   * 清除 per-peer preset 覆盖并持久化
+   */
+  clearPreset(sessionKey: string): boolean {
+    return this.prefs.clearPreset(sessionKey);
+  }
+
+  /**
    * 解析默认模型路由（不含 per-peer 偏好）
    *
    * 优先级：config 显式指定 > settings.yaml（只读） > 宿主 agentDefaultModel
@@ -137,8 +156,7 @@ export class ModelResolver {
   /**
    * 列出所有可用模型
    *
-   * 优先走 ctx.llm 服务动态发现（对齐 webui 的 buildModelCatalog），
-   * 服务不可用或失败时回退 settings.yaml 静态配置。
+   * 优先走 ctx.llm 服务动态发现，服务不可用或失败时回退 settings.yaml 静态配置。
    */
   async listModels(): Promise<ModelEntry[]> {
     const llm = this.getLlmService();
@@ -155,7 +173,7 @@ export class ModelResolver {
             entries.push({ provider: providerId, id: model.id, name: model.name });
           }
         } catch (err) {
-          // 单个 provider 失败，跳过（对齐 webui 的 failures 语义）
+          // 单个 provider 失败，跳过
           this.logger?.debug(
             `ModelResolver: provider ${providerId} 模型列表获取失败: ${err instanceof Error ? err.message : String(err)}`,
           );

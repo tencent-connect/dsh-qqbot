@@ -1,5 +1,5 @@
 /**
- * PrefsStore — per-peer 模型偏好持久化
+ * PrefsStore — per-peer 会话偏好持久化（模型 + preset）
  *
  * 隔离文件 I/O 操作，便于单元测试时 mock。
  * 存储路径：~/.dsh-qqbot/model-prefs.json
@@ -17,6 +17,8 @@ interface PrefsFile {
   overrides: Record<string, ModelRoute>;
   /** sessionKey → 最新 sessionId（fork 后更新，用于重启后恢复到 fork 后的会话） */
   sessionIds: Record<string, string>;
+  /** sessionKey → preset id（per-peer preset 覆盖） */
+  presets: Record<string, string>;
 }
 
 export class PrefsStore {
@@ -24,6 +26,8 @@ export class PrefsStore {
   private overrides = new Map<string, ModelRoute>();
   /** per-peer 最新 sessionId（fork 后更新，内存态） */
   private sessionIds = new Map<string, string>();
+  /** per-peer preset 偏好（内存态） */
+  private presets = new Map<string, string>();
   /** 隔离偏好文件路径 */
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
@@ -72,6 +76,23 @@ export class PrefsStore {
     return deleted;
   }
 
+  // ── Preset 操作 ──
+
+  getPreset(sessionKey: string): string | undefined {
+    return this.presets.get(sessionKey);
+  }
+
+  setPreset(sessionKey: string, presetId: string): void {
+    this.presets.set(sessionKey, presetId);
+    this.write();
+  }
+
+  clearPreset(sessionKey: string): boolean {
+    const deleted = this.presets.delete(sessionKey);
+    if (deleted) this.write();
+    return deleted;
+  }
+
   // ── 私有方法 ──
 
   private load(): void {
@@ -93,6 +114,13 @@ export class PrefsStore {
           }
         }
       }
+      if (data.presets && typeof data.presets === 'object') {
+        for (const [key, presetId] of Object.entries(data.presets)) {
+          if (typeof presetId === 'string' && presetId) {
+            this.presets.set(key, presetId);
+          }
+        }
+      }
     } catch (err) {
       this.debugLog?.(`loadPrefs failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -104,6 +132,7 @@ export class PrefsStore {
       const data: PrefsFile = {
         overrides: Object.fromEntries(this.overrides.entries()),
         sessionIds: Object.fromEntries(this.sessionIds.entries()),
+        presets: Object.fromEntries(this.presets.entries()),
       };
       writeFileSync(this.prefsPath, JSON.stringify(data, null, 2), 'utf8');
     } catch (err) {

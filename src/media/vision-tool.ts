@@ -1,12 +1,11 @@
 /**
  * 内置 qqbot_describe_image 视觉工具。
  *
- * 复用 dsh 生态的 llm + attachments 服务（路线 A）：
+ * 复用 dsh 生态的 llm + attachments 服务：
  *   1. 加载图片（本地绝对路径 / http URL）→ magic bytes 嗅探 mediaType
  *   2. attachments.saveImage → ImageAttachmentRef（字节不进 session log）
  *   3. createUserMessage(ImageBlock + text) → llm.stream → BlockAssembler 收集文本
  *
- * 对齐 dsh 官方辅助 LLM 调用范式（session-title-llm）与图片入模范式（apiproxy）。
  * 手写 ToolDefinition（标准 JSON Schema），避免引入 dsh-tools 的 8 个 peer 依赖。
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -153,7 +152,7 @@ async function callVision(
   return text;
 }
 
-/** 展开 `~`/`~/`/`~\` 前缀（对齐 @deepseek-ai/dsh-home-paths 的 expandHomePath） */
+/** 展开 `~`/`~/`/`~\` 前缀 */
 function expandHomePath(path: string): string {
   if (path === '~') return homedir();
   if (path.startsWith('~/') || path.startsWith('~\\')) return join(homedir(), path.slice(2));
@@ -161,7 +160,7 @@ function expandHomePath(path: string): string {
 }
 
 /**
- * 解析 DSH_HOME（对齐 dsh 官方 resolveDshHome 的优先级与跨平台处理）：
+ * 解析 DSH_HOME 的优先级与跨平台处理：
  * 显式配置 > `$DSH_HOME`（空/空白视为未设置）> `~/.dsh`，展开 `~` 后 resolve 为绝对路径。
  */
 function resolveDshHome(): string {
@@ -175,7 +174,7 @@ function resolveDshHome(): string {
 /**
  * 启动时检查 settings.yaml 里 vision 模型的 input 模态是否声明了 image。
  *
- * webui 的模型配置界面不暴露 `input` 字段，用户通过 webui 配置的视觉模型默认是纯文本，
+ * 模型配置界面不暴露 `input` 字段，用户通过界面配置的视觉模型默认是纯文本，
  * 会导致 pi-ai adapter 拒绝图片输入。这里在启动时兜底：未声明 image 时自动补 `[text, image]`。
  * 幂等（已声明则跳过），解析/写入失败仅 warn 不阻断启动。
  */
@@ -187,7 +186,7 @@ export function ensureVisionInputModal(vision: VisionConfig, logger: Logger): vo
   try {
     if (!existsSync(settingsPath)) return;
 
-    // YAML 禁止 tab 缩进（webui/编辑器可能写入），读入时把行首 tab 规范化为空格
+    // YAML 禁止 tab 缩进（配置界面/编辑器可能写入），读入时把行首 tab 规范化为空格
     const raw = readFileSync(settingsPath, 'utf8');
     const normalized = raw.replace(/^\t+/gm, (tabs) => '  '.repeat(tabs.length));
     const doc = yaml.load(normalized) as Record<string, unknown> | null;

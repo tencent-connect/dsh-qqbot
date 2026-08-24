@@ -8,6 +8,7 @@
 #   DEEPSEEK_API_KEY - DeepSeek API Key
 #   DSH_CWD         - Agent 工作目录（可选）
 #   HUNYUAN_API_KEY - 视觉模型 API Key（qqbot_describe_image 工具，hunyuan-vision）
+#   DSH_PRESET_ROOT - 系统预置 preset 目录（可选，默认 ./apps/cli/config/agent-presets）
 
 # ── 核心 spine ──
 - id: sessions
@@ -24,6 +25,17 @@
 
 - id: tools
   name: '@deepseek-ai/dsh-tools'
+
+# ── Agent Preset 服务（/preset 命令切换 preset 依赖） ──
+- id: agent-presets
+  name: '@deepseek-ai/dsh-agent-presets'
+  config:
+    default: standard
+    roots:
+      # 系统预置 preset 目录（deepseek-harness 的 apps/cli/config/agent-presets，含 standard/code/cordis/minimal）
+      - path: ${DSH_PRESET_ROOT:-./apps/cli/config/agent-presets}
+        trust: system
+    # includeUserRoot 默认 true：额外加载 $DSH_HOME/.agent-presets（用户自定义 preset）
 
 # ── 附件存储（describe_image 工具的 attachments.saveImage 依赖） ──
 - id: attachment-local

@@ -14,6 +14,8 @@ export type {
   DshAgentRegistry,
   AgentPresetsLike,
   PresetComposition,
+  PresetEntry,
+  PresetSwitchOutcome,
   SessionRecord,
   SessionStatus,
   TokenUsageStats,

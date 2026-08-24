@@ -53,7 +53,7 @@ export async function bootstrapGateway(
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──
-  // 获取 tools 服务（工具结果结构化展示，参考 dsh-TUI presentResult），可选
+  // 获取 tools 服务（工具结果结构化展示），可选
   let toolsRegistry: ToolsRegistryLike | undefined;
   try {
     toolsRegistry = ctx.get('tools') as ToolsRegistryLike | undefined;

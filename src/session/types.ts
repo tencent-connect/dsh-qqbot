@@ -23,7 +23,7 @@ export interface SessionEventLike {
 export interface DshAgent {
   readonly id: string;
   readonly ctx: Context;
-  /** 当前生命周期状态（对齐 dsh Agent.status，用于判断是否正在生成） */
+  /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
   /** 底层 session（fork 时作为 source，events 用于统计/导出） */
   readonly session: {
@@ -61,6 +61,14 @@ export interface CompactOutcome {
   message?: string;
 }
 
+/** preset 切换结果 */
+export interface PresetSwitchOutcome {
+  ok: boolean;
+  reason?: 'unavailable' | 'unknown-preset' | 'broken' | 'failed';
+  presetId?: string;
+  message?: string;
+}
+
 export interface DshAgentHandle {
   agent: DshAgent;
   dispose(): Promise<void>;
@@ -93,10 +101,19 @@ export interface DshAgentRegistry {
 /** agent-presets 服务接口（可选，部署中可能没有） */
 export interface AgentPresetsLike {
   readonly defaultId: string;
-  resolve(id?: string): Promise<{ id: string }>;
+  resolve(id?: string): Promise<{ id: string; broken?: string }>;
   mount(agentCtx: Context, id?: string): Promise<unknown>;
+  /** 列出所有可用 preset */
+  list(): Promise<Array<{ id: string; name?: string; description?: string; broken?: string }>>;
   /** 从 agent 的 preset scope 解析隔离服务（如 compaction），未挂载返回 undefined */
   serviceFor(agent: { ctx: Context }, name: string): unknown | undefined;
+}
+
+/** 可用 preset 条目（/preset 命令展示用） */
+export interface PresetEntry {
+  id: string;
+  name?: string;
+  description?: string;
 }
 
 /** preset 组合结果 */

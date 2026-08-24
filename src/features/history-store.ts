@@ -3,7 +3,6 @@
  *
  * historyBuffer 中间件需要一个跨调用可访问的 HistoryStore 实例，
  * 以便在回复完成后清空某群的历史缓存（避免下次 @ 时重复组包）。
- * 对齐 openclaw-qqbot 的 features/history-store。
  */
 import { MemoryHistoryStore } from '@tencent-connect/qqbot-nodejs';
 import type { HistoryStore } from '@tencent-connect/qqbot-nodejs';

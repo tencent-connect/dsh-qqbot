@@ -1,7 +1,7 @@
 /**
  * 入站处理器 — 经 SDK 中间件链处理后的消息 → dsh Agent followup
  *
- * 对齐 openclaw-qqbot body-assembler 的内容组装逻辑：
+ * 内容组装逻辑：
  * - Layer 1: userContent（文本 + 语音转录）
  * - Layer 2: quotePart（引用消息块）
  * - Layer 3: userMessage（带发送者标签）
@@ -130,14 +130,14 @@ export async function handleInbound(
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包，对齐 openclaw-qqbot dispatch）
+  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
   if (scope === 'group') {
     clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// Body Assembly（对齐 openclaw-qqbot 5 层组装）
+// Body Assembly（5 层组装）
 // ══════════════════════════════════════════════════════════════
 
 /**

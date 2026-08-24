@@ -182,7 +182,7 @@ class OutboundRouter {
  * 创建出站事件处理器
  *
  * 返回一个 handler 函数，应注册到 ctx.on('session/event', handler)。
- * toolsRegistry 用于工具结果的结构化展示（参考 dsh-TUI 的 presentResult）。
+ * toolsRegistry 用于工具结果的结构化展示。
  */
 export function createOutboundHandler(
   manager: SessionManager,

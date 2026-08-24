@@ -3,7 +3,7 @@
  *
  * 下载后仅通过本地绝对路径提示模型，由模型通过 qqbot_describe_image / ffmpeg / tool-fs 等工具自行分析，
  *
- * 下载目录固定为 ~/.dsh-qqbot/media（对齐 dsh-qqbot 的 prefs 目录约定），
+ * 下载目录固定为 ~/.dsh-qqbot/media，
  * 文件名用时间戳+随机数防重名，不依赖 agent cwd，便于 qqbot_describe_image / tool-fs 等工具稳定访问。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';

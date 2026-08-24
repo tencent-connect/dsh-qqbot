@@ -1,7 +1,6 @@
 /**
  * 内置 qqbot_send_file 工具 — 将本地文件发送给 QQ 用户或群。
  *
- * 参考 qqbot-cli 的 MCP send_file 工具，但适配 dsh-qqbot：
  *   - 发送目标默认自动定位（exec.agent → SessionManager.findByAgent → replyTarget），
  *     无需模型手动传 openid；显式 target 参数作为覆盖。
  *   - 按扩展名分发到 SDK 的 sendImage / sendVideo / sendVoice / sendFile。

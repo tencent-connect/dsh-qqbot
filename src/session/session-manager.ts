@@ -28,6 +28,8 @@ import type {
   DshAgentRegistry,
   AgentPresetsLike,
   PresetComposition,
+  PresetEntry,
+  PresetSwitchOutcome,
   SessionRecord,
   SessionStatus,
   TokenUsageStats,
@@ -35,7 +37,7 @@ import type {
   CompactOutcome,
 } from './types.js';
 
-/** ManualCompactionError 各 code 的友好提示（对齐 command-compact 的 expectedFailure 语义） */
+/** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
   busy: '压缩服务忙，请稍后重试',
   cancelled: '压缩已取消',
@@ -80,6 +82,37 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 动态获取 agentPresets 服务（可选，未注入时返回 undefined）
+   */
+  private getPresetsService(): AgentPresetsLike | undefined {
+    try {
+      return this.ctx.get('agentPresets') as AgentPresetsLike | undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 从 session 持久化 header 读 session 当初的 preset（started 锁定语义）。
+   * 读不到（服务缺失 / session 不存在 / 未记录 agentPreset）返回 undefined。
+   */
+  private async resolvePersistedPreset(sessionId: string): Promise<string | undefined> {
+    let persistence: { load(id: string): Promise<{ meta?: { agentPreset?: string } }> } | undefined;
+    try {
+      persistence = this.ctx.get('sessionPersistence') as typeof persistence | undefined;
+    } catch {
+      return undefined;
+    }
+    if (!persistence) return undefined;
+    try {
+      const { meta } = await persistence.load(sessionId);
+      return meta?.agentPreset;
+    } catch {
+      return undefined;
+    }
+  }
+
   // ── 模型相关（委托给 ModelResolver） ──
 
   getEffectiveModel(scope: ChatScope, peerId: string): ModelRoute | undefined {
@@ -87,7 +120,34 @@ export class SessionManager {
   }
 
   /**
-   * 切换模型（fork + 重建，对齐 dsh-TUI 的 switchModel）
+   * 获取指定 peer 的生效 preset（per-peer 覆盖 > config.preset）
+   */
+  getEffectivePreset(scope: ChatScope, peerId: string): string | undefined {
+    return this.getEffectivePresetByKey(this.sessionKey(scope, peerId));
+  }
+
+  /** 按 sessionKey 解析生效 preset */
+  private getEffectivePresetByKey(key: string): string | undefined {
+    return this.modelResolver.getPreset(key) ?? this.config.preset;
+  }
+
+  /**
+   * 列出所有可用 preset（/preset 命令用）
+   */
+  async listPresets(): Promise<PresetEntry[]> {
+    const presets = this.getPresetsService();
+    if (!presets) return [];
+    try {
+      const list = await presets.list();
+      return list.map((p) => ({ id: p.id, name: p.name, description: p.description }));
+    } catch (err) {
+      this.logger.warn(`list presets failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * 切换模型（fork + 重建会话，保留历史）
    */
   async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
     const key = this.sessionKey(scope, peerId);
@@ -99,6 +159,64 @@ export class SessionManager {
       this.logger.info(`model pref saved (no active session): key=${key} → ${route.provider}/${route.model}`);
       return;
     }
+
+    await this.rebuildSession(record, { route });
+    this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model}`);
+  }
+
+  /**
+   * 切换指定 peer 的 agent preset（per-peer 覆盖）
+   *
+   * 已开始的会话保持锁定（blank-session contract）：只持久化为新会话默认，
+   * 不 fork/rebuild 当前会话，避免历史工具调用与新 preset 工具集冲突。
+   */
+  async setPresetOverride(scope: ChatScope, peerId: string, presetId: string): Promise<PresetSwitchOutcome> {
+    const key = this.sessionKey(scope, peerId);
+
+    // 1. 校验 preset 存在 + 可加载（broken 拒绝）
+    const presets = this.getPresetsService();
+    if (!presets) return { ok: false, reason: 'unavailable' };
+    let resolved: { id: string; broken?: string };
+    try {
+      resolved = await presets.resolve(presetId);
+    } catch (err) {
+      return { ok: false, reason: 'unknown-preset', message: err instanceof Error ? err.message : String(err) };
+    }
+    if (resolved.broken !== undefined) {
+      return { ok: false, reason: 'broken', message: resolved.broken };
+    }
+
+    // 2. 持久化 per-peer 覆盖（新会话生效）
+    this.modelResolver.setPreset(key, presetId);
+
+    const hasActive = this.sessions.has(key);
+    this.logger.info(
+      `preset pref saved: key=${key} → ${presetId}${hasActive ? ' (active session locked, next session applies)' : ''}`,
+    );
+    return { ok: true, presetId };
+  }
+
+  /**
+   * 清除 per-peer preset 覆盖，回到 config.preset / 默认（新会话生效）
+   */
+  async clearPresetOverride(scope: ChatScope, peerId: string): Promise<PresetSwitchOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    this.modelResolver.clearPreset(key);
+    this.logger.info(`preset pref cleared: key=${key} (next session applies)`);
+    return { ok: true };
+  }
+
+  /**
+   * fork + 重建会话（保留历史，换 model）
+   *
+   * options.route 缺省时沿用当前生效值。preset 沿用当前生效 preset（getEffectivePresetByKey）。
+   * fork 不可用或失败时降级为 dispose（下次消息重建）。
+   */
+  private async rebuildSession(
+    record: SessionRecord,
+    options: { route?: ModelRoute },
+  ): Promise<void> {
+    const key = record.sessionKey;
 
     const sessionsService = this.getSessionsService();
     if (!sessionsService) {
@@ -121,8 +239,8 @@ export class SessionManager {
     }
 
     const childId = SessionId(randomUUID());
-
-    const composed = await this.composePreset(this.config.preset);
+    const effectiveRoute = options.route ?? this.modelResolver.getEffectiveRoute(key);
+    const composed = await this.composePreset(this.getEffectivePresetByKey(key));
     const created = await this.agents.create({
       sessionId: childId,
       seed,
@@ -132,7 +250,7 @@ export class SessionManager {
         seedLength: seed.length,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
       },
-      agentOptions: route,
+      ...(effectiveRoute ? { agentOptions: effectiveRoute } : {}),
       ...(composed.setup ? { setup: composed.setup } : {}),
     });
 
@@ -146,7 +264,7 @@ export class SessionManager {
     record.lastActivity = Date.now();
 
     void oldHandle.dispose().catch(() => {});
-    this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model} sessionId=${childId}`);
+    this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
 
   clearModelOverride(scope: ChatScope, peerId: string): void {
@@ -253,13 +371,7 @@ export class SessionManager {
   }
 
   private async composePreset(presetId?: string): Promise<PresetComposition> {
-    let presets: AgentPresetsLike | undefined;
-    try {
-      presets = this.ctx.get('agentPresets') as AgentPresetsLike | undefined;
-    } catch {
-      // agentPresets 服务未注入，降级跳过
-    }
-
+    const presets = this.getPresetsService();
     if (!presets) return {};
 
     try {
@@ -308,8 +420,10 @@ export class SessionManager {
       agent = live;
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
-      // preset 只解析一次：resume/create 共用同一组合，避免重复 resolve/mount 目录
-      const composed = await this.composePreset(this.config.preset);
+      // preset 只解析一次：resume/create 共用同一组合，避免重复 resolve/mount 目录。
+      // 优先 session 当初的 preset（started 锁定语义），无则用当前 effective preset。
+      const presetId = (await this.resolvePersistedPreset(sessionId)) ?? this.getEffectivePresetByKey(key);
+      const composed = await this.composePreset(presetId);
       agentPreset = composed.agentPreset;
       try {
         const resumeRoute = this.modelResolver.getResumeRoute(key);
@@ -394,7 +508,7 @@ export class SessionManager {
 
     let compaction: CompactionServiceLike | undefined;
     try {
-      const presets = this.ctx.get('agentPresets') as AgentPresetsLike | undefined;
+      const presets = this.getPresetsService();
       compaction = (presets?.serviceFor(record.agent, 'compaction') ?? this.ctx.get('compaction')) as CompactionServiceLike | undefined;
     } catch {
       compaction = undefined;
