@@ -77,6 +77,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `/new`（别名 `/reset` `/clear`） | 开始新会话（清空上下文） |
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
 | `/model` | 查看或切换模型 |
+| `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/stop` | 中止当前生成 |
 | `/bot-ping` | 连通性测试 |
 | `/bot-version` | 查看版本信息 |

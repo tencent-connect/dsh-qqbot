@@ -77,6 +77,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/model` | View or switch model |
+| `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Connectivity test |
 | `/bot-version` | View version info |
