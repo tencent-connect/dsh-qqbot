@@ -40,6 +40,13 @@ export interface VisionConfig {
   timeoutMs: number;
 }
 
+export interface SendFileConfig {
+  /** 是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots；关闭则任意路径） */
+  restrictPaths: boolean;
+  /** 额外允许访问的根目录（media 和 agent cwd 始终默认允许） */
+  extraRoots: string[];
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -81,6 +88,8 @@ export interface ImQQBotConfig {
   media: MediaConfig;
   /** 视觉理解（qqbot_describe_image 工具，走 dsh llm + attachments） */
   vision: VisionConfig;
+  /** 附件发送（qqbot_send_file 工具） */
+  sendFile: SendFileConfig;
 }
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -138,4 +147,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxTokens: 1024,
     timeoutMs: 120000,
   }).description('视觉理解配置'),
+  sendFile: Schema.object({
+    restrictPaths: Schema.boolean().default(true).description('是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots）'),
+    extraRoots: Schema.array(Schema.string()).default([]).description('额外允许访问的根目录'),
+  }).default({
+    restrictPaths: true,
+    extraRoots: [],
+  }).description('附件发送工具配置'),
 });

@@ -17,6 +17,7 @@ import type { Logger } from '../types.js';
 import { setupMiddlewares } from './middleware-setup.js';
 import { startMediaCleanup } from '../media/media-cleaner.js';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.js';
+import { registerSendFileTool } from '../media/send-file-tool.js';
 
 export async function bootstrapGateway(
   ctx: Context,
@@ -92,6 +93,9 @@ export async function bootstrapGateway(
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
+
+  // ── 附件发送工具注册（qqbot_send_file） ──
+  registerSendFileTool(ctx, bot, manager, config, logger);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
