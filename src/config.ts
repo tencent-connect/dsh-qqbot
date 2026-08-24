@@ -106,7 +106,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
   sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)'),
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
-  processingTimeoutMs: Schema.number().default(120000).description('处理超时(ms)'),
+  processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
   access: Schema.object({
     c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式'),

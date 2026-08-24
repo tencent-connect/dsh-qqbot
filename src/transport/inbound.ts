@@ -134,6 +134,13 @@ export async function handleInbound(
   if (scope === 'group') {
     clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
   }
+
+  // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
+  try {
+    await record.agent.whenIdle();
+  } catch (err) {
+    logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
