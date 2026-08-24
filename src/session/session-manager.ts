@@ -46,6 +46,24 @@ const COMPACTION_ERROR_HINTS: Record<string, string> = {
   persistence: '压缩完成但保存失败',
 };
 
+/** system-prompt section 最小结构（name/order/text） */
+interface PromptSection {
+  name: string;
+  order: number;
+  text: string;
+}
+
+/** system-prompt/assemble waterfall 的 context 最小结构 */
+interface AssembleContext {
+  agent?: DshAgent;
+}
+
+/** system-prompt/assemble 的组装产物最小结构 */
+interface AssembledPrompt {
+  sections?: PromptSection[];
+  [key: string]: unknown;
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   private readonly evictor: IdleEvictor;
@@ -69,6 +87,41 @@ export class SessionManager {
         void record.handle.dispose().catch(() => {});
       },
     );
+
+    this.registerScopePromptInjection();
+  }
+
+  /**
+   * 通过 system-prompt/assemble waterfall 注入群聊/私聊额外 system prompt。
+   *
+   * 该事件在每次 turn 构建 request 时触发；此处按会话 scope（群聊/私聊）
+   * 追加对应的额外 prompt section。会话尚未建立（首次 assemble）或未配置
+   * 额外 prompt 时原样返回，不做改动。
+   */
+  private registerScopePromptInjection(): void {
+    const assemble = async (
+      _assembly: unknown,
+      context: AssembleContext,
+      next: () => Promise<AssembledPrompt>,
+    ): Promise<AssembledPrompt> => {
+      const assembled = await next();
+      if (!context.agent) return assembled;
+
+      const record = this.findByAgent(context.agent);
+      if (!record) return assembled;
+
+      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      if (!prompt) return assembled;
+
+      return {
+        ...assembled,
+        sections: [...(assembled.sections ?? []), { name: 'qqbot:scope-prompt', order: 90, text: prompt }],
+      };
+    };
+
+    (this.ctx as unknown as {
+      on(event: 'system-prompt/assemble', handler: typeof assemble): void;
+    }).on('system-prompt/assemble', assemble);
   }
 
   /**
