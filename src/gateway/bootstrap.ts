@@ -49,7 +49,7 @@ export async function bootstrapGateway(
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(msg, manager, config, logger, mCtx.state);
+    await handleInbound(mCtx, manager, config, logger);
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──

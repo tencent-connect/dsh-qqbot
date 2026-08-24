@@ -20,6 +20,7 @@ import {
   type MediaKind,
 } from './attachment.js';
 import { clearGroupHistory } from '../features/history-store.js';
+import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
 
@@ -85,14 +86,14 @@ interface ProcessedAttachment {
  * 处理 QQ 入站消息（已经过 SDK 中间件链）
  */
 export async function handleInbound(
-  rawMsg: unknown,
+  ctx: MiddlewareContext,
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
-  state?: Record<string, unknown>,
 ): Promise<void> {
-  const msg = rawMsg as ProcessedMessage;
-  const mwState = (state ?? {}) as MiddlewareState;
+  const msg = ctx.message as unknown as ProcessedMessage;
+  const mwState = ctx.state as MiddlewareState;
+  const { bot } = ctx;
 
   const scope: ChatScope = msg.kind === 'group' ? 'group' : 'c2c';
   const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
@@ -116,6 +117,12 @@ export async function handleInbound(
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
+    // 兜底回复：会话创建失败时告知用户，避免静默无响应
+    try {
+      await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');
+    } catch (sendErr) {
+      logger.error(`fallback reply failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
+    }
     return;
   }
 

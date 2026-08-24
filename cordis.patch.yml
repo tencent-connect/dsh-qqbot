@@ -22,7 +22,7 @@
         textChunkLimit: 4500
         sessionIdleTimeout: 1800000
         maxQueue: 20
-        processingTimeoutMs: 120000
+        processingTimeoutMs: 1800000
         historyLimit: 10
         access:
           c2cMode: open
