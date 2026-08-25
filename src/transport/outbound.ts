@@ -8,6 +8,7 @@ import type { SessionManager, SessionRecord } from '../session/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
 import { chunkMarkdownText } from './chunker.js';
+import { sanitizeForQQ } from './md-sanitizer.js';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.js';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.js';
 import {
@@ -165,9 +166,11 @@ class OutboundRouter {
     this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
+  /** 统一发送：QQ 方言降级 → 切分 → 逐 chunk 发送 + 错误记录 */
   private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
+    // QQ markdown 不支持 GFM 表格/图片 → 降级后再切分（见 md-sanitizer.ts）
+    const sanitized = sanitizeForQQ(text);
+    const chunks = chunkMarkdownText(sanitized, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);

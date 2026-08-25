@@ -43,6 +43,17 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
   };
 
   const appendLine = (line: string): void => {
+    // 超长单行硬切：单行超过 limit 时按字符切分（QQ 单条消息有字数上限，超长行会被拒）
+    if (line.length > limit) {
+      if (current) {
+        chunks.push(current);
+        current = '';
+      }
+      for (let i = 0; i < line.length; i += limit) {
+        chunks.push(line.slice(i, i + limit));
+      }
+      return;
+    }
     if (!current) {
       current = line;
       return;
