@@ -12,6 +12,8 @@ import { handleInbound, createOutboundHandler } from '../transport/index.js';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
 import type { QQBotSender } from '../transport/outbound-buffer.js';
 import { QuestionChannel } from '../features/question-channel.js';
+import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.js';
+import { decodeButtonData } from '../features/button-utils.js';
 import { buildUserAgent } from '../shared/index.js';
 import type { ImQQBotConfig } from '../config.js';
 import type { Logger } from '../types.js';
@@ -19,6 +21,21 @@ import { setupMiddlewares } from './middleware-setup.js';
 import { startMediaCleanup } from '../media/media-cleaner.js';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.js';
 import { registerSendFileTool } from '../media/send-file-tool.js';
+
+/**
+ * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
+ * channel（question / approval）。QQ 只有一个 interaction 入口，集中路由
+ * 避免多通道各自 try 导致误判。
+ */
+function dispatchInteraction(event: InteractionEvent, manager: SessionManager): boolean {
+  const raw = event.data?.resolved?.button_data;
+  if (!raw) return false;
+  const button = decodeButtonData(raw);
+  if (!button) return false;
+  if (button.t === 'question') return manager.questionChannel?.handleInteraction(event) ?? false;
+  if (button.t === 'approval') return manager.approvalChannel?.handleInteraction(event) ?? false;
+  return false;
+}
 
 export async function bootstrapGateway(
   ctx: Context,
@@ -83,9 +100,14 @@ export async function bootstrapGateway(
   manager.questionChannel = questionChannel;
   questionChannel.install(ctx);
 
-  // ── 按钮点击回调（interaction） ──
+  // ── 审批通道（approval/request → QQ 两按钮审批） ──
+  const approvalChannel = new ApprovalChannel(manager, sender, logger);
+  manager.approvalChannel = approvalChannel;
+  approvalChannel.install(ctx as unknown as ApprovalChannelContext);
+
+  // ── 按钮点击回调（interaction）：统一分发到问答/审批通道 ──
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
-    const matched = questionChannel.handleInteraction(event);
+    const matched = dispatchInteraction(event, manager);
     await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
   });
 

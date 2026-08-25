@@ -13,6 +13,7 @@ import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-no
 import type { ChatScope, Logger, ReplyTarget } from '../types.js';
 import { parseAnswer } from './answer-parser.js';
 import { buildKeyboard, formatQuestion } from './question-renderer.js';
+import { decodeButtonData } from './button-utils.js';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -192,22 +193,17 @@ export class QuestionChannel {
 
     const data = event.data?.resolved?.button_data;
     if (!data) return false;
-    let parsed: { q?: unknown; i?: unknown };
-    try {
-      parsed = JSON.parse(data) as { q?: unknown; i?: unknown };
-    } catch {
-      return false;
-    }
+    const button = decodeButtonData(data);
+    if (!button || button.t !== 'question') return false;
     const current = entry.request.questions[entry.index];
     if (!current) return false;
     // 校验按钮归属题：旧题按钮在新题推进后被点击（误点/延迟事件），
     // 其 q 不等于当前题 id，直接忽略，避免错位映射到当前题选项。
-    if (parsed.q !== current.id) return false;
-    const i = parsed.i;
+    if (button.q !== current.id) return false;
+    const idx = button.i;
     const opts = current.options ?? [];
-    if (!Number.isInteger(i) || (i as number) < 0 || (i as number) >= opts.length) return false;
+    if (idx < 0 || idx >= opts.length) return false;
 
-    const idx = i as number;
     this.advance(entry, record.sessionKey, { id: current.id, selected: [opts[idx]!.label] });
     return true;
   }

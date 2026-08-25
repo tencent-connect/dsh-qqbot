@@ -21,6 +21,7 @@ import { ModelResolver } from '../model/model-resolver.js';
 import type { ModelRoute, ModelEntry } from '../model/types.js';
 import { IdleEvictor } from './idle-evictor.js';
 import type { QuestionChannel } from '../features/question-channel.js';
+import type { ApprovalChannel } from '../features/approval-channel.js';
 import type {
   SessionEventLike,
   DshAgent,
@@ -71,6 +72,8 @@ export class SessionManager {
   private readonly modelResolver: ModelResolver;
   /** 由 bootstrap 注入的问答通道（ask_user_question → QQ），会话回收时清理其待答问题 */
   public questionChannel?: QuestionChannel;
+  /** 由 bootstrap 注入的审批通道（approval/request → QQ），会话回收时清理其待批审批 */
+  public approvalChannel?: ApprovalChannel;
 
   constructor(
     private readonly ctx: Context,
@@ -88,8 +91,9 @@ export class SessionManager {
         this.sessions.delete(key);
         record.agent.cancel({ kind: 'user' });
         void record.handle.dispose().catch(() => {});
-        // 回收会话时同步清理其待答问题，避免 pending 悬挂泄漏
+        // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
         this.questionChannel?.cancelPending(key);
+        this.approvalChannel?.cancelPending(key);
       },
     );
 

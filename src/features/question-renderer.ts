@@ -5,26 +5,16 @@
  */
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import type { UserQuestion } from './question-channel.js';
-
-/** QQ 按钮 label 有长度限制，超长截断（正文保留完整文本；多列布局下阈值更短） */
-const BUTTON_LABEL_MAX = 10;
-
-/** 单选按钮每行个数（多列布局，减少选项多时的刷屏） */
-const BUTTONS_PER_ROW = 2;
-
-function buttonLabel(text: string | undefined): string {
-  const s = String(text ?? '').trim();
-  return s.length > BUTTON_LABEL_MAX ? s.slice(0, BUTTON_LABEL_MAX - 1) + '…' : s;
-}
+import { BUTTONS_PER_ROW, buttonLabel, encodeButtonData } from './button-utils.js';
 
 /**
  * 为「单选、带选项」的问题构建内联键盘；不适用时返回 undefined。
  *
  * 多行多列布局：每行 BUTTONS_PER_ROW 个按钮，减少选项多时的刷屏。
  *
- * button_data 编码 `{"q":<问题id>, "i":<选项下标>}`，由 handleInteraction 解码。
- * 编码 question.id 用于把按钮与「当前正在问的题」关联：逐题推进时，旧题按钮
- * 在新题发出后被点击（误点/延迟事件），其 q 不等于当前题 id，可被识别并忽略。
+ * button_data 编码 `{"t":"question","q":<问题id>,"i":<选项下标>}`，由分发器解码。
+ * `t` 顶层判别字段供 interaction 统一路由；`q` 关联「当前正在问的题」：逐题
+ * 推进时旧题按钮在新题发出后被点击，其 q 不等于当前题 id，可被识别并忽略。
  */
 export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefined {
   const opts = question.options ?? [];
@@ -46,7 +36,7 @@ export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefine
             type: 1,
             permission: { type: 2 },
             click_limit: 1,
-            data: JSON.stringify({ q: question.id, i: idx }),
+            data: encodeButtonData({ t: 'question', q: question.id, i: idx }),
           },
           // 同一题的选项共享分组：点一个后其余变灰（单选互斥）
           group_id: `q-${question.id}`,

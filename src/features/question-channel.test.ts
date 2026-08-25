@@ -108,7 +108,7 @@ describe('buildKeyboard', () => {
     expect(btn?.render_data.visited_label).toBe('✓ 已选');
     // button_data 同时编码 question.id 与选项下标，供 handleInteraction 校验归属题
     expect(btn?.id).toBe('q-q-opt-0');
-    expect(JSON.parse(btn!.action.data)).toEqual({ q: 'q', i: 0 });
+    expect(JSON.parse(btn!.action.data)).toEqual({ t: 'question', q: 'q', i: 0 });
   });
 
   it('wraps options across multiple rows', () => {
@@ -117,7 +117,7 @@ describe('buildKeyboard', () => {
     expect(kb?.content.rows).toHaveLength(3); // 2+2+1
     expect(kb?.content.rows[0]?.buttons).toHaveLength(2);
     expect(kb?.content.rows[2]?.buttons).toHaveLength(1);
-    expect(JSON.parse(kb!.content.rows[2]!.buttons[0]!.action.data)).toEqual({ q: 'q', i: 4 });
+    expect(JSON.parse(kb!.content.rows[2]!.buttons[0]!.action.data)).toEqual({ t: 'question', q: 'q', i: 4 });
   });
 
   it('returns undefined for multi-select or no-options', () => {
@@ -274,7 +274,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'q', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 1 }), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
   });
 
@@ -283,7 +283,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'group', 'G1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'q', i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
   });
 
@@ -293,7 +293,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const long = '这是一个非常非常长的选项标签超过十八个字符的限制了吧';
     const p = startAsk(ch, 'c2c', 'U7', [{ id: 'q', question: 't', options: [{ label: long }] }]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'q', i: 0 }), { user: 'U7' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'U7' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: [long] }] });
   });
 
@@ -303,10 +303,10 @@ describe('QuestionChannel.handleInteraction', () => {
     const p = startAsk(ch, 'c2c', 'U2', [q2()]);
     await sleep(20);
     expect(ch.handleInteraction(makeEvent('not-json', { user: 'U2' }))).toBe(false);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'q', i: 9 }), { user: 'U2' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 9 }), { user: 'U2' }))).toBe(false);
     // 旧题按钮：q 不等于当前题 id，忽略
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'other', i: 0 }), { user: 'U2' }))).toBe(false);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'q', i: 0 }), { user: 'nobody' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'other', i: 0 }), { user: 'U2' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'nobody' }))).toBe(false);
     expect(ch.handleInteraction(makeEvent(undefined, { user: 'U2' }))).toBe(false);
     ch.tryAnswer('c2c', 'U2', '1');
     await p;
@@ -320,13 +320,13 @@ describe('QuestionChannel.handleInteraction', () => {
     const p = startAsk(ch, 'c2c', 'U1', [q1, q2b]);
     await sleep(20);
     // 答第一题（按钮点击），推进到第二题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'a', i: 0 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 0 }), { user: 'U1' }))).toBe(true);
     await sleep(20);
     expect(sent).toHaveLength(2); // 第二题已发出
     // 旧题（q=a）按钮在新题发出后被点击 → 忽略，不消费当前题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'a', i: 1 }), { user: 'U1' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 1 }), { user: 'U1' }))).toBe(false);
     // 当前题（q=b）仍可正常作答
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ q: 'b', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'b', i: 1 }), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'a', selected: ['A1'] }, { id: 'b', selected: ['B2'] }] });
   });
 });
