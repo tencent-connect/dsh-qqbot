@@ -6,9 +6,9 @@ import {
   type ApprovalRequest,
   type ApprovalSessionRecordLike,
   type ApprovalChannelContext,
-} from './approval-channel.js';
-import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.js';
-import type { ChatScope, Logger, ReplyTarget } from '../types.js';
+} from './approval-channel.ts';
+import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 
 function createLogger(): Logger {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };

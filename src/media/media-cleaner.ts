@@ -9,7 +9,7 @@ import { readdir, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { Context } from '@deepseek-ai/cordis';
-import type { Logger } from '../types.js';
+import type { Logger } from '../types.ts';
 
 /** 富媒体下载根目录（attachment.ts 复用） */
 export const MEDIA_ROOT = resolve(homedir(), '.dsh-qqbot', 'media');

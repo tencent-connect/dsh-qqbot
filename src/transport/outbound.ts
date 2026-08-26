@@ -4,12 +4,12 @@
  * 采用路由器模式：OutboundRouter 持有会话级状态（文本缓冲、工具调用记录），
  * 事件解析归一化在 events.ts，路由按事件类型分发到私有方法。
  */
-import type { SessionManager, SessionRecord } from '../session/index.js';
-import type { ImQQBotConfig } from '../config.js';
-import type { Logger } from '../types.js';
-import { chunkMarkdownText } from './chunker.js';
-import { OutboundBuffer, type QQBotSender } from './outbound-buffer.js';
-import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.js';
+import type { SessionManager, SessionRecord } from '../session/index.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
+import { chunkMarkdownText } from './chunker.ts';
+import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
+import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -19,10 +19,10 @@ import {
   type ToolResultEvent,
   type TurnEndEvent,
   type RawSessionEvent,
-} from './events.js';
+} from './events.ts';
 
-export type { QQBotSender } from './outbound-buffer.js';
-export type { ToolsRegistryLike } from './tool-presenter.js';
+export type { QQBotSender } from './outbound-buffer.ts';
+export type { ToolsRegistryLike } from './tool-presenter.ts';
 
 /** 出站处理器签名（注册到 ctx.on('session/event')） */
 export type OutboundHandler = (session: SessionLike, event: RawSessionEvent) => void;
@@ -47,14 +47,25 @@ const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 class OutboundRouter {
   private readonly buffers = new Map<string, OutboundBuffer>();
   private readonly toolCalls = new Map<string, ToolCallRecord>();
+  private readonly manager: SessionManager;
+  private readonly bot: QQBotSender;
+  private readonly config: ImQQBotConfig;
+  private readonly logger: Logger;
+  private readonly toolsRegistry: ToolsRegistryLike | undefined;
 
   public constructor(
-    private readonly manager: SessionManager,
-    private readonly bot: QQBotSender,
-    private readonly config: ImQQBotConfig,
-    private readonly logger: Logger,
-    private readonly toolsRegistry: ToolsRegistryLike | undefined,
-  ) {}
+    manager: SessionManager,
+    bot: QQBotSender,
+    config: ImQQBotConfig,
+    logger: Logger,
+    toolsRegistry: ToolsRegistryLike | undefined,
+  ) {
+    this.manager = manager;
+    this.bot = bot;
+    this.config = config;
+    this.logger = logger;
+    this.toolsRegistry = toolsRegistry;
+  }
 
   /** 事件分发入口 */
   public route(session: SessionLike, raw: RawSessionEvent): void {

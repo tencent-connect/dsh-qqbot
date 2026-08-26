@@ -9,8 +9,8 @@
  *   - 终态幂等（finished）：finish/abort 后忽略 append，重复 finish 不重复 complete
  *   - 中止关闭（abort）：abort 时若 session 已打开，串行 complete 关闭，避免悬挂
  */
-import type { Logger, ReplyTarget } from '../types.js';
-import type { QQBotSender, StreamSessionLike } from './outbound-buffer.js';
+import type { Logger, ReplyTarget } from '../types.ts';
+import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
 
 export interface StreamingWriterDeps {
   bot: QQBotSender;
@@ -30,7 +30,11 @@ export class StreamingWriter {
   private throttleTimer: ReturnType<typeof setTimeout> | null = null;
   private chain: Promise<void> = Promise.resolve();
 
-  public constructor(private readonly deps: StreamingWriterDeps) {}
+  private readonly deps: StreamingWriterDeps;
+
+  public constructor(deps: StreamingWriterDeps) {
+    this.deps = deps;
+  }
 
   /** 是否应降级为静态发送：从未成功发送过任何分片 */
   public get shouldFallback(): boolean {

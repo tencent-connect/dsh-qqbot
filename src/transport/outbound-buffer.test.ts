@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OutboundBuffer } from './outbound-buffer.js';
-import type { QQBotSender, StreamSessionLike } from './outbound-buffer.js';
-import type { SessionRecord } from '../session/index.js';
-import type { Logger, ReplyTarget } from '../types.js';
+import { OutboundBuffer } from './outbound-buffer.ts';
+import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
+import type { SessionRecord } from '../session/index.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 
 function createLogger(): Logger {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };

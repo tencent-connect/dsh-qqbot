@@ -3,7 +3,7 @@
  *
  * 逐题解析：一次解析一个问题的答案。
  */
-import type { UserQuestion, UserQuestionAnswer } from './question-channel.js';
+import type { UserQuestion, UserQuestionAnswer } from './question-channel.ts';
 
 /** 把用户对单个问题的文本回复解析为答案 */
 export function parseAnswer(question: UserQuestion, text: string): UserQuestionAnswer {

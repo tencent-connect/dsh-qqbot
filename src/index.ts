@@ -5,19 +5,19 @@
  * 网关组装（中间件编排 + 事件 + 出站 + 生命周期）见 src/gateway/。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { ConfigSchema, type ImQQBotConfig } from './config.js';
-import { bootstrapGateway } from './gateway/index.js';
-import type { DshAgentRegistry } from './session/index.js';
-import { getProfileDir, resolveEnv } from './shared/index.js';
-import { runQrSetup, persistCredentialsToProfile } from './setup.js';
-import type { Logger } from './types.js';
+import { ConfigSchema, type ImQQBotConfig } from './config.ts';
+import { bootstrapGateway } from './gateway/index.ts';
+import type { DshAgentRegistry } from './session/index.ts';
+import { getProfileDir, resolveEnv } from './shared/index.ts';
+import { runQrSetup, persistCredentialsToProfile } from './setup.ts';
+import type { Logger } from './types.ts';
 
 // ── Cordis 插件元数据 ──
 export const name = 'im-qqbot';
 export const inject = ['agents'];
 export const Config = ConfigSchema;
 
-export type { ImQQBotConfig } from './config.js';
+export type { ImQQBotConfig } from './config.ts';
 
 // ── 插件主体 ──
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {

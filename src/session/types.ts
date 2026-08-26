@@ -2,7 +2,7 @@
  * 会话管理层类型定义
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { ChatScope, ReplyTarget } from '../types.js';
+import type { ChatScope, ReplyTarget } from '../types.ts';
 
 /** AgentSetup hook 类型 */
 export type AgentSetup = (agentCtx: Context) => Promise<void> | void;

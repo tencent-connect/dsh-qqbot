@@ -1,2 +1,2 @@
-export { setupMiddlewares } from './middleware-setup.js';
-export { bootstrapGateway } from './bootstrap.js';
+export { setupMiddlewares } from './middleware-setup.ts';
+export { bootstrapGateway } from './bootstrap.ts';

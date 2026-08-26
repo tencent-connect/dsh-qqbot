@@ -5,7 +5,7 @@
  * 否则会被排队而无法到达 tryAnswer，导致「turn 等答案 ↔ 答案被缓冲」死锁。
  */
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
-import type { SessionManager } from '../session/index.js';
+import type { SessionManager } from '../session/index.ts';
 
 export function questionAnswer(manager: SessionManager) {
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {

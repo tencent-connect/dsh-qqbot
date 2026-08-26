@@ -7,20 +7,20 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
-import { SessionManager, type DshAgentRegistry } from '../session/index.js';
-import { handleInbound, createOutboundHandler } from '../transport/index.js';
-import type { ToolsRegistryLike } from '../transport/tool-presenter.js';
-import type { QQBotSender } from '../transport/outbound-buffer.js';
-import { QuestionChannel } from '../features/question-channel.js';
-import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.js';
-import { decodeButtonData } from '../features/button-utils.js';
-import { buildUserAgent } from '../shared/index.js';
-import type { ImQQBotConfig } from '../config.js';
-import type { Logger } from '../types.js';
-import { setupMiddlewares } from './middleware-setup.js';
-import { startMediaCleanup } from '../media/media-cleaner.js';
-import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.js';
-import { registerSendFileTool } from '../media/send-file-tool.js';
+import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
+import { handleInbound, createOutboundHandler } from '../transport/index.ts';
+import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
+import type { QQBotSender } from '../transport/outbound-buffer.ts';
+import { QuestionChannel } from '../features/question-channel.ts';
+import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
+import { decodeButtonData } from '../features/button-utils.ts';
+import { buildUserAgent } from '../shared/index.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
+import { setupMiddlewares } from './middleware-setup.ts';
+import { startMediaCleanup } from '../media/media-cleaner.ts';
+import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
+import { registerSendFileTool } from '../media/send-file-tool.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应

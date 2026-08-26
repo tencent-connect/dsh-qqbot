@@ -6,10 +6,10 @@ import {
   type UserQuestionRequest,
   type UserQuestionResult,
   type QuestionSessionRecordLike,
-} from './question-channel.js';
-import { buildKeyboard, formatQuestion } from './question-renderer.js';
-import { parseAnswer } from './answer-parser.js';
-import type { ChatScope, Logger, ReplyTarget } from '../types.js';
+} from './question-channel.ts';
+import { buildKeyboard, formatQuestion } from './question-renderer.ts';
+import { parseAnswer } from './answer-parser.ts';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 
 function createLogger(): Logger {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };

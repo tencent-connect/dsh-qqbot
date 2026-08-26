@@ -3,16 +3,22 @@
  *
  * 定期检查会话最后活跃时间，超时则自动回收释放资源。
  */
-import type { SessionRecord } from './types.js';
+import type { SessionRecord } from './types.ts';
 
 export class IdleEvictor {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly sessions: Map<string, SessionRecord>;
+  private readonly timeoutMs: number;
+  private readonly onEvict: (key: string, record: SessionRecord) => void;
 
   constructor(
-    private readonly sessions: Map<string, SessionRecord>,
-    private readonly timeoutMs: number,
-    private readonly onEvict: (key: string, record: SessionRecord) => void,
+    sessions: Map<string, SessionRecord>,
+    timeoutMs: number,
+    onEvict: (key: string, record: SessionRecord) => void,
   ) {
+    this.sessions = sessions;
+    this.timeoutMs = timeoutMs;
+    this.onEvict = onEvict;
     if (timeoutMs > 0) {
       this.timer = setInterval(() => this.check(), 60_000);
     }

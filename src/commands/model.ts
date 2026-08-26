@@ -1,8 +1,8 @@
 /**
  * 模型命令：/model — 查看或切换模型
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { getScopePeer, sendMarkdownChunked } from '../shared/index.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 
 export function modelCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {

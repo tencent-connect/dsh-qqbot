@@ -6,8 +6,8 @@
  *
  * 两者都对应底层 dsh agent 能力，分类为 agent（通用能力）。
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { getScopePeer } from '../shared/index.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { getScopePeer } from '../shared/index.ts';
 
 /** /new（别名 /reset /clear）— 开始新会话 */
 export function newCommand({ manager }: CommandDeps): CategorizedCommand {

@@ -5,10 +5,10 @@
  * 独立文件便于单测。
  */
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
-import type { SessionRecord } from '../session/index.js';
-import type { Logger, ReplyTarget } from '../types.js';
-import { chunkMarkdownText } from './chunker.js';
-import { StreamingWriter } from './streaming-writer.js';
+import type { SessionRecord } from '../session/index.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
+import { chunkMarkdownText } from './chunker.ts';
+import { StreamingWriter } from './streaming-writer.ts';
 
 /** 流式输出节流间隔(ms)：连续 chunk 累积后停顿该间隔才推送 */
 const STREAM_THROTTLE_MS = 200;
@@ -29,14 +29,22 @@ export class OutboundBuffer {
   private buffer = '';
   private flushing = false;
   private readonly writer: StreamingWriter | null;
+  private readonly record: SessionRecord;
+  private readonly bot: QQBotSender;
+  private readonly limit: number;
+  private readonly logger: Logger;
 
   public constructor(
-    private readonly record: SessionRecord,
-    private readonly bot: QQBotSender,
-    private readonly limit: number,
-    private readonly logger: Logger,
+    record: SessionRecord,
+    bot: QQBotSender,
+    limit: number,
+    logger: Logger,
     streamingEnabled: boolean,
   ) {
+    this.record = record;
+    this.bot = bot;
+    this.limit = limit;
+    this.logger = logger;
     this.writer = streamingEnabled
       ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS })
       : null;

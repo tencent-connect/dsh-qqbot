@@ -9,7 +9,7 @@
  * - downloadedQuoteFiles: attachmentProcessor 中间件 → 下载到本地的引用消息附件
  */
 import '@tencent-connect/qqbot-nodejs';
-import type { DownloadedFile } from './transport/attachment.js';
+import type { DownloadedFile } from './transport/attachment.ts';
 
 declare module '@tencent-connect/qqbot-nodejs' {
   interface MiddlewareState {

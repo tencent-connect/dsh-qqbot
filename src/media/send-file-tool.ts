@@ -11,10 +11,10 @@ import { stat } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
-import type { ImQQBotConfig, SendFileConfig } from '../config.js';
-import type { DshAgent, SessionManager } from '../session/index.js';
-import type { Logger, ReplyTarget } from '../types.js';
-import { MEDIA_ROOT } from './media-cleaner.js';
+import type { ImQQBotConfig, SendFileConfig } from '../config.ts';
+import type { DshAgent, SessionManager } from '../session/index.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
+import { MEDIA_ROOT } from './media-cleaner.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';

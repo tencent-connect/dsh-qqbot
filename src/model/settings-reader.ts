@@ -8,7 +8,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
-import type { ModelRoute, ModelEntry } from './types.js';
+import type { ModelRoute, ModelEntry } from './types.ts';
 
 /** settings.yaml 中的 provider 配置结构 */
 interface SettingsProviderConfig {

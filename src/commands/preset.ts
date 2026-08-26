@@ -3,8 +3,8 @@
  *
  * 无参数列出可用 preset（可点击切换），有参数切换，reset/default 重置为默认。
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { getScopePeer, sendMarkdownChunked } from '../shared/index.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 
 export function presetCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {

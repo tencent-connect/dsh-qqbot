@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
-import type { ModelRoute } from './types.js';
+import type { ModelRoute } from './types.ts';
 
 /** 日志回调（可选） */
 type DebugFn = (msg: string) => void;

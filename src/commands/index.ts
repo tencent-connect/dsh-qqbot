@@ -7,13 +7,13 @@
  *   - agent：底层 dsh agent 通用能力（new/compact/model/stop）
  *   - qqbot：插件自身特有（ping/version/status/help）
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { newCommand, compactCommand } from './session.js';
-import { modelCommand } from './model.js';
-import { presetCommand } from './preset.js';
-import { statusCommand } from './status.js';
-import { helpCommand } from './help.js';
-import { pingCommand, versionCommand, stopCommand } from './misc.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { newCommand, compactCommand } from './session.ts';
+import { modelCommand } from './model.ts';
+import { presetCommand } from './preset.ts';
+import { statusCommand } from './status.ts';
+import { helpCommand } from './help.ts';
+import { pingCommand, versionCommand, stopCommand } from './misc.ts';
 
 /**
  * 构建标准命令列表

@@ -1,8 +1,8 @@
 /**
  * 状态命令：/bot-status（QQBot 特有）
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { getScopePeer, formatRelativeTime } from '../shared/index.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { getScopePeer, formatRelativeTime } from '../shared/index.ts';
 
 /** /bot-status — 查看当前会话状态 */
 export function statusCommand({ manager }: CommandDeps): CategorizedCommand {

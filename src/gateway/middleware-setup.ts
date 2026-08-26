@@ -19,13 +19,13 @@ import {
   historyBuffer,
   envelopeFormatter,
 } from '@tencent-connect/qqbot-nodejs';
-import type { ImQQBotConfig } from '../config.js';
-import type { SessionManager } from '../session/index.js';
-import type { Logger } from '../types.js';
-import { buildCommandList } from '../commands/index.js';
-import { attachmentProcessor } from '../middleware/attachment.js';
-import { questionAnswer } from '../middleware/question-answer.js';
-import { getHistoryStore, historyGroupKey } from '../features/history-store.js';
+import type { ImQQBotConfig } from '../config.ts';
+import type { SessionManager } from '../session/index.ts';
+import type { Logger } from '../types.ts';
+import { buildCommandList } from '../commands/index.ts';
+import { attachmentProcessor } from '../middleware/attachment.ts';
+import { questionAnswer } from '../middleware/question-answer.ts';
+import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 
 export function setupMiddlewares(
   bot: QQBot,

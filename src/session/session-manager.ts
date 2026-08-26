@@ -15,13 +15,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
-import type { ChatScope, Logger, ReplyTarget } from '../types.js';
-import type { ImQQBotConfig } from '../config.js';
-import { ModelResolver } from '../model/model-resolver.js';
-import type { ModelRoute, ModelEntry } from '../model/types.js';
-import { IdleEvictor } from './idle-evictor.js';
-import type { QuestionChannel } from '../features/question-channel.js';
-import type { ApprovalChannel } from '../features/approval-channel.js';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import { ModelResolver } from '../model/model-resolver.ts';
+import type { ModelRoute, ModelEntry } from '../model/types.ts';
+import { IdleEvictor } from './idle-evictor.ts';
+import type { QuestionChannel } from '../features/question-channel.ts';
+import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -37,7 +37,7 @@ import type {
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
-} from './types.js';
+} from './types.ts';
 
 /** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
@@ -70,17 +70,25 @@ export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
+  private readonly ctx: Context;
+  private readonly agents: DshAgentRegistry;
+  private readonly config: ImQQBotConfig;
+  private readonly logger: Logger;
   /** 由 bootstrap 注入的问答通道（ask_user_question → QQ），会话回收时清理其待答问题 */
   public questionChannel?: QuestionChannel;
   /** 由 bootstrap 注入的审批通道（approval/request → QQ），会话回收时清理其待批审批 */
   public approvalChannel?: ApprovalChannel;
 
   constructor(
-    private readonly ctx: Context,
-    private readonly agents: DshAgentRegistry,
-    private readonly config: ImQQBotConfig,
-    private readonly logger: Logger,
+    ctx: Context,
+    agents: DshAgentRegistry,
+    config: ImQQBotConfig,
+    logger: Logger,
   ) {
+    this.ctx = ctx;
+    this.agents = agents;
+    this.config = config;
+    this.logger = logger;
     this.modelResolver = new ModelResolver(ctx, config, logger);
 
     this.evictor = new IdleEvictor(

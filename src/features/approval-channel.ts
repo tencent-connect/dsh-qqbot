@@ -8,9 +8,9 @@
  * 协议的闭合集合，无 allow-always，只提供「允许一次 / 拒绝」两个按钮。
  */
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
-import type { ChatScope, Logger, ReplyTarget } from '../types.js';
-import { decodeButtonData } from './button-utils.js';
-import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.js';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
+import { decodeButtonData } from './button-utils.ts';
+import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
 
 // ── 最小契约（对齐 dsh-user-approval，避免硬依赖） ──
 
@@ -99,12 +99,19 @@ function commandOf(req: ApprovalRequest): string | undefined {
 
 export class ApprovalChannel {
   private readonly pending = new Map<string, PendingApproval>();
+  private readonly manager: ApprovalChannelManagerLike;
+  private readonly sender: ApprovalChannelSenderLike;
+  private readonly logger: Logger;
 
   public constructor(
-    private readonly manager: ApprovalChannelManagerLike,
-    private readonly sender: ApprovalChannelSenderLike,
-    private readonly logger: Logger,
-  ) {}
+    manager: ApprovalChannelManagerLike,
+    sender: ApprovalChannelSenderLike,
+    logger: Logger,
+  ) {
+    this.manager = manager;
+    this.sender = sender;
+    this.logger = logger;
+  }
 
   /**
    * 注册 approval/request waterfall answerer。approval 服务未挂载时优雅禁用。

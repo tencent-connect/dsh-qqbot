@@ -10,10 +10,10 @@
  *   - 完成 / 中断（abort / 超时 / 会话回收）：reject(ASK_ABORTED)
  */
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
-import type { ChatScope, Logger, ReplyTarget } from '../types.js';
-import { parseAnswer } from './answer-parser.js';
-import { buildKeyboard, formatQuestion } from './question-renderer.js';
-import { decodeButtonData } from './button-utils.js';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
+import { parseAnswer } from './answer-parser.ts';
+import { buildKeyboard, formatQuestion } from './question-renderer.ts';
+import { decodeButtonData } from './button-utils.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -79,11 +79,11 @@ export interface QuestionChannelConfigLike {
 const ASK_ABORTED = 'ASK_ABORTED';
 
 class QuestionChannelError extends Error {
-  public constructor(
-    message: string,
-    public readonly code: string,
-  ) {
+  public readonly code: string;
+
+  public constructor(message: string, code: string) {
     super(message);
+    this.code = code;
     this.name = 'QuestionChannelError';
   }
 }
@@ -107,13 +107,22 @@ export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
   private uq?: UserQuestionsServiceLike;
   private origAsk?: UserQuestionsServiceLike['ask'];
+  private readonly manager: QuestionChannelManagerLike;
+  private readonly sender: QuestionChannelSenderLike;
+  private readonly config: QuestionChannelConfigLike;
+  private readonly logger: Logger;
 
   public constructor(
-    private readonly manager: QuestionChannelManagerLike,
-    private readonly sender: QuestionChannelSenderLike,
-    private readonly config: QuestionChannelConfigLike,
-    private readonly logger: Logger,
-  ) {}
+    manager: QuestionChannelManagerLike,
+    sender: QuestionChannelSenderLike,
+    config: QuestionChannelConfigLike,
+    logger: Logger,
+  ) {
+    this.manager = manager;
+    this.sender = sender;
+    this.config = config;
+    this.logger = logger;
+  }
 
   /**
    * 包装 userQuestions.ask：QQ 会话走 QQ 通道，其余委托原实现。

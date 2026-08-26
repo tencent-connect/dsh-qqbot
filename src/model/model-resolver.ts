@@ -13,11 +13,11 @@
  *   > 宿主 agentDefaultModel 服务
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { ImQQBotConfig } from '../config.js';
-import type { Logger } from '../types.js';
-import type { ModelRoute, ModelEntry } from './types.js';
-import { PrefsStore } from './prefs-store.js';
-import { SettingsReader } from './settings-reader.js';
+import type { ImQQBotConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
+import type { ModelRoute, ModelEntry } from './types.ts';
+import { PrefsStore } from './prefs-store.ts';
+import { SettingsReader } from './settings-reader.ts';
 
 /** ctx.llm 服务的最小接口（listProviders 同步，listModels 异步） */
 interface LlmServiceLike {
@@ -28,12 +28,18 @@ interface LlmServiceLike {
 export class ModelResolver {
   private readonly prefs: PrefsStore;
   private readonly settings: SettingsReader;
+  private readonly ctx: Context;
+  private readonly config: ImQQBotConfig;
+  private readonly logger?: Logger;
 
   constructor(
-    private readonly ctx: Context,
-    private readonly config: ImQQBotConfig,
-    private readonly logger?: Logger,
+    ctx: Context,
+    config: ImQQBotConfig,
+    logger?: Logger,
   ) {
+    this.ctx = ctx;
+    this.config = config;
+    this.logger = logger;
     this.prefs = new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
     );

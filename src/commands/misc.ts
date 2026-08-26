@@ -4,8 +4,8 @@
  * - /bot-ping /bot-version：QQBot 插件特有（连通性测试、版本信息）
  * - /stop：中止当前生成（对应底层 agent cancel，通用能力）
  */
-import type { CommandDeps, CategorizedCommand } from './types.js';
-import { getScopePeer, PLUGIN_VERSION } from '../shared/index.js';
+import type { CommandDeps, CategorizedCommand } from './types.ts';
+import { getScopePeer, PLUGIN_VERSION } from '../shared/index.ts';
 
 /** /bot-ping — 连通性测试 */
 export function pingCommand(): CategorizedCommand {

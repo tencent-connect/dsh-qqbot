@@ -5,9 +5,9 @@
  * 下载失败不阻断消息（记录告警后放行），确保附件异常不影响正常文本处理。
  */
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
-import { downloadMediaAttachments } from '../transport/attachment.js';
-import type { ImQQBotConfig } from '../config.js';
-import type { Logger, QuotedAttachment, RawAttachment } from '../types.js';
+import { downloadMediaAttachments } from '../transport/attachment.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import type { Logger, QuotedAttachment, RawAttachment } from '../types.ts';
 
 export function attachmentProcessor(config: ImQQBotConfig, logger: Logger) {
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {

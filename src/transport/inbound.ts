@@ -10,16 +10,16 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import type { SessionManager } from '../session/index.js';
-import type { ImQQBotConfig } from '../config.js';
-import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.js';
+import type { SessionManager } from '../session/index.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
 import {
   classifyContentType,
   isVoiceContentType,
   type DownloadedFile,
   type MediaKind,
-} from './attachment.js';
-import { clearGroupHistory } from '../features/history-store.js';
+} from './attachment.ts';
+import { clearGroupHistory } from '../features/history-store.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──

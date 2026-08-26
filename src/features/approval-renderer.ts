@@ -4,8 +4,8 @@
  * 单次审批：一次只渲染一个审批请求（每个会话同时只有一个 pending 审批）。
  */
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
-import type { ApprovalRequest } from './approval-channel.js';
-import { encodeButtonData } from './button-utils.js';
+import type { ApprovalRequest } from './approval-channel.ts';
+import { encodeButtonData } from './button-utils.ts';
 
 /** 把审批请求渲染成 QQ 文本（含被 gate 的命令回显） */
 export function buildApprovalText(request: ApprovalRequest, command?: string): string {

@@ -4,8 +4,8 @@
  * 逐题渲染：一次只渲染一个问题（多题时由状态机逐题推进）。
  */
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
-import type { UserQuestion } from './question-channel.js';
-import { BUTTONS_PER_ROW, buttonLabel, encodeButtonData } from './button-utils.js';
+import type { UserQuestion } from './question-channel.ts';
+import { BUTTONS_PER_ROW, buttonLabel, encodeButtonData } from './button-utils.ts';
 
 /**
  * 为「单选、带选项」的问题构建内联键盘；不适用时返回 undefined。

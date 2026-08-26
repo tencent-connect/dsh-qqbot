@@ -10,9 +10,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as dns from 'node:dns';
-import type { Logger, RawAttachment } from '../types.js';
-import type { MediaConfig } from '../config.js';
-import { MEDIA_ROOT } from '../media/media-cleaner.js';
+import type { Logger, RawAttachment } from '../types.ts';
+import type { MediaConfig } from '../config.ts';
+import { MEDIA_ROOT } from '../media/media-cleaner.ts';
 
 /** 默认富媒体下载大小上限（MB），可被 media.maxMB 覆盖 */
 const DEFAULT_MAX_MB = 200;

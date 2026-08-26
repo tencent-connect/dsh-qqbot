@@ -22,8 +22,8 @@ import type {
   ImageBlock,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm';
-import type { VisionConfig } from '../config.js';
-import type { Logger } from '../types.js';
+import type { VisionConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
 
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
 type ImageAttachmentRef = ImageBlock['attachment'];
