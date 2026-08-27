@@ -37,6 +37,8 @@ import type {
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
+  SwitchTarget,
+  SwitchResult,
 } from './types.ts';
 
 /** ManualCompactionError 各 code 的友好提示 */
@@ -64,6 +66,12 @@ interface AssembleContext {
 interface AssembledPrompt {
   sections?: PromptSection[];
   [key: string]: unknown;
+}
+
+/** /switch 所需宿主 sessionPersistence 服务最小面（可选服务，不可用时优雅降级） */
+interface SessionPersistenceLike {
+  list(signal?: AbortSignal): Promise<Array<{ id: string; cwd?: string; createdAt?: number; origin?: string }>>;
+  load(id: string, signal?: AbortSignal): Promise<{ meta?: { id?: string } }>;
 }
 
 export class SessionManager {
@@ -147,6 +155,17 @@ export class SessionManager {
   private getSessionsService(): SessionsService | undefined {
     try {
       return this.ctx.get('sessions') as SessionsService | undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 动态获取 sessionPersistence 服务（/switch 枚举与校验用，可选）
+   */
+  private getPersistenceService(): SessionPersistenceLike | undefined {
+    try {
+      return this.ctx.get('sessionPersistence') as SessionPersistenceLike | undefined;
     } catch {
       return undefined;
     }
@@ -562,6 +581,89 @@ export class SessionManager {
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
     this.logger.info(`session removed: key=${key}`);
+  }
+
+  /** 当前桥接的 sessionId（per-peer 覆盖 > 确定性哈希派生），/switch 展示用 */
+  currentBoundSessionId(scope: ChatScope, peerId: string): string {
+    return this.currentSessionId(this.sessionKey(scope, peerId));
+  }
+
+  /**
+   * 枚举可切换的顶层会话（/switch 无参列表视图）。
+   *
+   * 数据源为宿主 sessionPersistence.list()：过滤 subagent 子会话，
+   * 按创建时间倒序取前 limit 条。服务不可用时返回空数组（对齐 compaction 的优雅降级）。
+   */
+  async listSwitchTargets(limit = 10): Promise<SwitchTarget[]> {
+    const persistence = this.getPersistenceService();
+    if (!persistence) return [];
+    try {
+      const headers = await persistence.list();
+      return headers
+        .filter((h) => h.origin !== 'subagent')
+        .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+        .slice(0, limit)
+        .map((h) => ({ sessionId: String(h.id), cwd: h.cwd, createdAt: h.createdAt }));
+    } catch (err) {
+      this.logger.warn(`list switch targets failed: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * 将当前通道的桥接切换到另一个已有会话（/switch 核心操作）。
+   *
+   * 与 remove() 同源的回收动作（cancel + dispose 当前记录），差别是把绑定写成
+   * 指定目标而非随机新 id：下一条消息 getOrCreate → agents.resume(目标) 即恢复
+   * 该会话上下文，立即生效、无需重启。targetSessionId 省略时清除覆盖，
+   * 回到确定性哈希派生路由（即本通道"原生"会话）。
+   */
+  async switchSession(scope: ChatScope, peerId: string, targetSessionId?: string): Promise<SwitchResult> {
+    const key = this.sessionKey(scope, peerId);
+    const record = this.sessions.get(key);
+    if (record && record.agent.status !== 'idle') return { ok: false, reason: 'busy' };
+    const previous = this.currentSessionId(key);
+
+    // 恢复默认哈希路由：清除 per-peer 覆盖
+    if (!targetSessionId) {
+      this.modelResolver.clearSessionId(key);
+      await this.disposeForSwitch(key, record);
+      this.logger.info(`switch to derived default: key=${key} (was ${previous})`);
+      return { ok: true, previous, target: this.deriveSessionId(key) };
+    }
+
+    if (targetSessionId === previous) return { ok: true, previous, target: previous, unchanged: true };
+    if (!(await this.isSessionBindable(targetSessionId))) {
+      return { ok: false, reason: 'not-found', message: `会话 ${targetSessionId} 不存在或不可绑定` };
+    }
+
+    this.modelResolver.setSessionId(key, targetSessionId);
+    await this.disposeForSwitch(key, record);
+    this.logger.info(`session switched: key=${key} ${previous} → ${targetSessionId}`);
+    return { ok: true, previous, target: targetSessionId };
+  }
+
+  /** 切换前回收当前记录：与 remove() 对齐，并清理悬挂的待答问题/待批审批 */
+  private async disposeForSwitch(key: string, record: SessionRecord | undefined): Promise<void> {
+    if (!record) return;
+    this.sessions.delete(key);
+    record.agent.cancel({ kind: 'user' });
+    await record.handle.dispose().catch(() => {});
+    this.questionChannel?.cancelPending(key);
+    this.approvalChannel?.cancelPending(key);
+  }
+
+  /** 目标会话可绑定性：进程内存活，或持久化存储可加载（两者皆不满足则拒绝，避免静默新建空会话） */
+  private async isSessionBindable(sessionId: string): Promise<boolean> {
+    if (this.agents.get(sessionId)) return true;
+    const persistence = this.getPersistenceService();
+    if (!persistence) return false;
+    try {
+      const { meta } = await persistence.load(sessionId);
+      return meta?.id === sessionId;
+    } catch {
+      return false;
+    }
   }
 
   /**

@@ -19,4 +19,6 @@ export type {
   SessionRecord,
   SessionStatus,
   TokenUsageStats,
+  SwitchTarget,
+  SwitchResult,
 } from './types.ts';

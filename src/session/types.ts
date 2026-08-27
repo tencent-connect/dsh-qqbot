@@ -154,3 +154,15 @@ export interface TokenUsageStats {
   cacheRead: number;
   cacheWrite: number;
 }
+
+/** /switch 候选会话条目（宿主 sessionPersistence 顶层会话的投影） */
+export interface SwitchTarget {
+  sessionId: string;
+  cwd?: string;
+  createdAt?: number;
+}
+
+/** /switch 切换桥接目标的结果 */
+export type SwitchResult =
+  | { ok: true; previous: string; target: string; unchanged?: boolean }
+  | { ok: false; reason: 'busy' | 'not-found' | 'failed'; message?: string };
