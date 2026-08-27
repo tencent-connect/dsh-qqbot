@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 体验优化
+
+- **QQ 提问规约**：QQ 会话的系统提示新增「QQ 通道提问规范」section（经 `system-prompt/assemble` 瀑布注入），要求模型在让用户做选择/确认/补信息时调用 `ask_user_question` 工具，而不是输出「1. xxx 2. yyy」编号纯文本——编号文本在 QQ 端只能手动输入，工具提问才有可点击按钮。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

@@ -22,6 +22,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
+import { QUESTION_STYLE_SECTION_NAME, QUESTION_STYLE_SECTION_TEXT } from './question-style.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -109,11 +110,16 @@ export class SessionManager {
   }
 
   /**
-   * 通过 system-prompt/assemble waterfall 注入群聊/私聊额外 system prompt。
+   * 通过 system-prompt/assemble waterfall 注入 QQ 会话额外 system prompt：
    *
-   * 该事件在每次 turn 构建 request 时触发；此处按会话 scope（群聊/私聊）
-   * 追加对应的额外 prompt section。会话尚未建立（首次 assemble）或未配置
-   * 额外 prompt 时原样返回，不做改动。
+   * 1. 按会话 scope（群聊/私聊）追加配置的额外 prompt（groupPrompt/directPrompt）；
+   *    未配置时跳过。
+   * 2. 恒追加「QQ 通道提问规范」（question-style）：要求模型让用户做
+   *    选择/确认/补信息时走 ask_user_question 工具，而非编号纯文本——
+   *    问题通道只拦截工具调用渲染按钮，编号文本会退化为手动输入。
+   *
+   * 该事件在每次 turn 构建 request 时触发；会话尚未建立（首次 assemble）
+   * 时原样返回，不做改动。
    */
   private registerScopePromptInjection(): void {
     const assemble = async (
@@ -127,13 +133,15 @@ export class SessionManager {
       const record = this.findByAgent(context.agent);
       if (!record) return assembled;
 
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
-      if (!prompt) return assembled;
+      const sections = [...(assembled.sections ?? [])];
 
-      return {
-        ...assembled,
-        sections: [...(assembled.sections ?? []), { name: 'qqbot:scope-prompt', order: 90, text: prompt }],
-      };
+      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      if (prompt) sections.push({ name: 'qqbot:scope-prompt', order: 90, text: prompt });
+
+      // order 取大值，排在系统提示尾部更显眼
+      sections.push({ name: QUESTION_STYLE_SECTION_NAME, order: 900, text: QUESTION_STYLE_SECTION_TEXT });
+
+      return { ...assembled, sections };
     };
 
     (this.ctx as unknown as {
