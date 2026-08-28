@@ -13,7 +13,8 @@ import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-no
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
 import { buildKeyboard, formatQuestion } from './question-renderer.ts';
-import { decodeButtonData } from './button-utils.ts';
+import { decodeButtonData, encodeButtonData } from './button-utils.ts';
+import { detectTrailingOptions } from './quick-reply.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -62,6 +63,8 @@ export interface QuestionSessionRecordLike {
 export interface QuestionChannelManagerLike {
   findBySessionId(sessionId: string): QuestionSessionRecordLike | undefined;
   getSessionRecord(scope: ChatScope, peerId: string): QuestionSessionRecordLike | undefined;
+  /** 规范会话键（快捷按钮登记/点击匹配用；测试桩可缺省） */
+  sessionKey?(scope: ChatScope, peerId: string): string;
 }
 
 export interface QuestionChannelSenderLike {
@@ -71,6 +74,11 @@ export interface QuestionChannelSenderLike {
 export interface QuestionChannelConfigLike {
   requireMention: boolean;
   askTimeoutMs: number;
+  /**
+   * 快捷按钮：助手消息尾部编号选项自动补挂可点击按钮。
+   * 未设置（如单测直接构造）→ 关闭；生产配置 schema 默认 true。
+   */
+  quickReplyButtons?: boolean;
 }
 
 // ── 错误语义（对齐 dsh-user-questions 的 UserQuestionError code 约定） ──
@@ -90,6 +98,56 @@ class QuestionChannelError extends Error {
 
 // ── 每会话状态机 ──
 
+/** 快捷按钮点击的解析结果（调用方把 text 作为用户消息注入会话） */
+export interface QuickReplyClick {
+  scope: ChatScope;
+  peerId: string;
+  senderId: string;
+  /** 等同用户回复的文本（选项编号） */
+  text: string;
+}
+
+/** QQ 按钮 label 有长度限制，超长截断（正文保留完整文本） */
+const QUICK_BUTTON_LABEL_MAX = 18;
+
+function quickButtonLabel(text: string | undefined): string {
+  const s = String(text ?? '').trim();
+  return s.length > QUICK_BUTTON_LABEL_MAX ? s.slice(0, QUICK_BUTTON_LABEL_MAX - 1) + '…' : s;
+}
+
+/**
+ * 快捷按钮键盘（一行一按钮）：button_data 沿用官方统一编码，
+ * `t` 判别字段取 `quick`（`{"t":"quick","i":<下标>}`）——
+ * 与提问 `t:'question'`、审批 `t:'approval'` 并列；统一分发器
+ * 不识别 `quick` 而放行，由 consumeQuickReply 兜底消费。
+ */
+export function keyboardFromLabels(labels: readonly string[]): InlineKeyboard {
+  return {
+    content: {
+      rows: labels.map((label, i) => ({
+        buttons: [{
+          id: `qr-opt-${i}`,
+          render_data: {
+            label: quickButtonLabel(label),
+            visited_label: quickButtonLabel(label),
+            style: 1,
+          },
+          action: {
+            // action.type：0=跳转链接，1=回调（点击即发 INTERACTION_CREATE，
+            //   无需再发送），2=把 data 填入输入框（需用户手动发送）。
+            //   这里必须用 1 才能"点击即确认"。
+            type: 1,
+            // permission.type 用 2（指定用户不可点、列表为空即全员可点）；
+            // 实测 type 0 会导致点击报"无权限操作"。
+            permission: { type: 2 },
+            data: encodeButtonData({ t: 'quick', i }),
+          },
+        }],
+      })),
+    },
+  };
+}
+
 interface PendingEntry {
   record: QuestionSessionRecordLike;
   request: UserQuestionRequest;
@@ -105,6 +163,8 @@ interface PendingEntry {
 
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
+  /** sessionKey → 最近一条"尾部编号选项"消息的选项标签（快捷按钮点击解析用） */
+  private readonly quickReplies = new Map<string, string[]>();
   private uq?: UserQuestionsServiceLike;
   private origAsk?: UserQuestionsServiceLike['ask'];
   private readonly manager: QuestionChannelManagerLike;
@@ -215,6 +275,60 @@ export class QuestionChannel {
 
     this.advance(entry, record.sessionKey, { id: current.id, selected: [opts[idx]!.label] });
     return true;
+  }
+
+  /**
+   * 出站快捷按钮：检测助手消息尾部的编号选项块，登记选项并返回键盘。
+   *
+   * 模型不一定总走 ask_user_question（被中断后继续推进时常直接列编号文本），
+   * 出站层对这类消息补挂按钮作确定性兜底：点击等同用户回复编号。
+   * 流式消息本身挂不了键盘，调用方把键盘放在随后的附加短消息上。
+   *
+   * @param key 规范会话键（`manager.sessionKey(scope, peerId)`；出站桥接记录的
+   *            `record.sessionKey` 可能是 `bridge:*`，不能直接用）
+   * @returns 键盘与选项标签；配置关闭、无选项块或该会话已有待答问题时返回 undefined
+   */
+  prepareQuickReply(key: string, text: string): { keyboard: InlineKeyboard; labels: string[] } | undefined {
+    if (this.config.quickReplyButtons !== true) return undefined;
+    if (this.pending.has(key)) return undefined; // 正式提问在等待时不叠加快捷按钮
+    const labels = detectTrailingOptions(text);
+    if (labels === undefined) return undefined;
+    this.quickReplies.set(key, labels);
+    return { keyboard: keyboardFromLabels(labels), labels };
+  }
+
+  /**
+   * 快捷按钮点击：与正式提问/审批按钮（统一分发器按 `t` 路由）互斥——
+   * 快捷按钮的判别字段为 `t:'quick'`，分发器不识别而放行到这里。
+   * 命中则返回注入载荷，调用方把编号文本作为用户消息注入会话
+   *（点击等同回复编号）。
+   */
+  consumeQuickReply(event: InteractionEvent): QuickReplyClick | undefined {
+    if (this.config.quickReplyButtons !== true) return undefined;
+    const raw = event?.data?.resolved?.button_data;
+    if (typeof raw !== 'string' || raw.length === 0) return undefined;
+    const peerId = event.group_openid ?? event.user_openid;
+    if (!peerId) return undefined;
+    const scope: ChatScope = event.group_openid ? 'group' : 'c2c';
+
+    const button = decodeButtonData(raw);
+    if (!button || button.t !== 'quick') return undefined; // 提问/审批按钮归统一分发器
+    const idx = button.i;
+    if (!Number.isInteger(idx) || idx < 0) return undefined;
+
+    const record = this.manager.getSessionRecord(scope, peerId);
+    const key = record?.sessionKey ?? this.manager.sessionKey?.(scope, peerId);
+    if (!key) return undefined;
+    if (this.pending.has(key)) return undefined; // 正式提问在等待：点击归 handleInteraction
+    const labels = this.quickReplies.get(key);
+    const label = labels?.[idx];
+    if (labels === undefined || label === undefined) return undefined;
+
+    const senderId = scope === 'group'
+      ? ((event.group_member_openid ?? event.user_openid ?? peerId) as string)
+      : (event.user_openid ?? peerId);
+    this.logger.info(`im-qqbot: quick-reply clicked key=${key} option=${idx + 1} ("${label}")`);
+    return { scope, peerId, senderId, text: String(idx + 1) };
   }
 
   /** 走 QQ 通道：发送首题 + 挂起 Promise，等待逐题作答 */
