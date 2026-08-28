@@ -19,10 +19,26 @@ export interface StreamSessionLike {
   complete(): Promise<unknown>;
 }
 
+/** 文件来源（与 SDK QQBot.sendFile 三形态对齐；斜杠命令与未来工具用 localPath） */
+export interface FileSendSource {
+  localPath?: string;
+  buffer?: Buffer;
+  url?: string;
+}
+
+/** 文件发送选项（SDK opts 子集；onProgress 分片进度回调） */
+export interface FileSendOptions {
+  fileName?: string;
+  content?: string;
+  onProgress?: (uploaded: number, total: number) => void;
+}
+
 /** QQ Bot 发送接口 */
 export interface QQBotSender {
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
+  /** 上传 + 发送通用文件（msg_type=7）；SDK 按大小自动选择单发（<5MB）或分片（≥5MB） */
+  sendFile(target: ReplyTarget, source: FileSendSource, opts?: FileSendOptions): Promise<unknown>;
 }
 
 export class OutboundBuffer {

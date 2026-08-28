@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **发送文件**：新增 `/sendfile <文件绝对路径>` 指令，机器人把服务器本地文件（PDF、图片、视频等，≤20MB）直接发到当前私聊，走 SDK `sendFile`（上传 + `msg_type=7`，5–20MB 自动分片）。v1 仅私聊、仅本地绝对路径；群聊、URL 源、主动 push 后续开放。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

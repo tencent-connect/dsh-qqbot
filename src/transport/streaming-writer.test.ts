@@ -15,6 +15,7 @@ function createBot(openStreamImpl?: () => StreamSessionLike): QQBotSender {
   return {
     sendMarkdown: vi.fn().mockResolvedValue(undefined),
     openStream: vi.fn(openStreamImpl ?? (() => createSession())),
+    sendFile: vi.fn().mockResolvedValue(undefined),
   };
 }
 

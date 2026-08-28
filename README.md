@@ -103,6 +103,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `/bot-ping` | 连通性测试 |
 | `/bot-version` | 查看版本信息 |
 | `/bot-status` | 查看当前会话状态 |
+| `/sendfile <绝对路径>` | 发送服务器本地文件到当前私聊（≤20MB，仅私聊；含空格路径加引号） |
 | `/bot-help` | 查看所有指令 |
 
 ## 核心模块

@@ -96,6 +96,9 @@ export async function bootstrapGateway(
         msgId: target.msgId as string,
       },
     }),
+    // 文件桥接：与 mediaSender（qqbot_send_file 工具）同走被动三级兜底；
+    // allowEvent=false —— SDK 文件发送不支持 event_id（见 reply-target.ts）
+    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
 
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
