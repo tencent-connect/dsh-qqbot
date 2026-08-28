@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from './config.ts';
 import { bootstrapGateway } from './gateway/index.ts';
 import type { DshAgentRegistry } from './session/index.ts';
+import { registerQqChannelProjection } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
 import { runQrSetup, persistCredentialsToProfile } from './setup.ts';
 import type { Logger } from './types.ts';
@@ -57,6 +58,17 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
+
+  // ── QQ 渠道自声明（qqChannel 投影单元）──
+  // 经条件注入挂载：sessionProjections 服务缺席（老宿主组装）时静默跳过，
+  // 不影响插件其余功能。值随官方 session/projection 帧到达会话列表行，
+  // 供渠道视图类插件（如 dsh-channel-view）消费。
+  (ctx as unknown as {
+    inject(deps: string[], cb: (scoped: unknown) => void): void;
+  }).inject(['sessionProjections'], (scopedCtx) => {
+    registerQqChannelProjection(scopedCtx);
+    logger.info('qqChannel projection unit registered');
+  });
 
   await bootstrapGateway(ctx, agents, resolvedConfig, logger);
 }

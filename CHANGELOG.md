@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **QQ 渠道自声明**：入站消息在 `source` 携带 `channel`（`qq/c2c` / `qq/group`），并注册 `qqChannel` 会话投影单元（官方扩展面，零宿主改动）。渠道值随投影帧到达会话列表，供第三方渠道视图（dsh-channel-view 等）直接分组；重放安全、冷会话可读。对应 RFC-0001（session header `channel` 字段）落地前的过渡实现。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

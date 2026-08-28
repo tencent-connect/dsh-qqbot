@@ -20,6 +20,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
+import { qqChannelOf } from '../session/channel-declaration.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -131,7 +132,9 @@ export async function handleInbound(
 
   const message = createUserMessage({
     content,
-    source: { kind: 'user' as const },
+    // channel 为 im-qqbot 的渠道自声明字段：宿主 source 校验为 looseObject
+    // （持久化与推送帧均直通），qqChannel 投影单元凭它锁存真实渠道。
+    source: { kind: 'user' as const, channel: qqChannelOf(scope) },
   });
 
   record.agent.followup(message);
