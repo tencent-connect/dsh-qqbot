@@ -4,9 +4,9 @@
  * 采用路由器模式：OutboundRouter 持有会话级状态（文本缓冲、工具调用记录），
  * 事件解析归一化在 events.ts，路由按事件类型分发到私有方法。
  */
-import type { SessionManager, SessionRecord } from '../session/index.ts';
+import type { SessionManager, SessionRecord, DshAgent } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
@@ -18,6 +18,7 @@ import {
   type ToolCallEvent,
   type ToolResultEvent,
   type TurnEndEvent,
+  type UserMessageEvent,
   type RawSessionEvent,
 } from './events.ts';
 
@@ -72,7 +73,17 @@ class OutboundRouter {
     const event = parseEvent(raw);
     if (event === undefined) return;
 
-    const record = this.manager.findBySessionId(session.header.id);
+    const sessionId = session.header.id;
+
+    // Web 镜像：用户消息单独处理（QQ 发起的回合按标记跳过）
+    if (event.type === 'user/message') {
+      this.onUserMessage(sessionId, event);
+      return;
+    }
+
+    // 无活记录（Web 发起 / 已回收 / 宿主重启）时按持久化映射构造桥接记录
+    const record = this.manager.findBySessionId(sessionId)
+      ?? (this.config.mirrorWeb ? this.bridgeRecord(sessionId) : undefined);
     if (record === undefined) return;
 
     switch (event.type) {
@@ -92,6 +103,51 @@ class OutboundRouter {
         this.onTurnEnd(session.header.id, record, event);
         break;
     }
+  }
+
+  /**
+   * Web 发起回合的用户消息 → 带标记镜像到 QQ。
+   * QQ 发起的回合（handleInbound 已递增 qqPendingTurns）消费标记并跳过，
+   * 避免把 QQ 端已有的消息重复推回去。
+   */
+  private onUserMessage(sessionId: string, event: UserMessageEvent): void {
+    if (!this.config.mirrorWeb) return;
+
+    const live = this.manager.findBySessionId(sessionId);
+    if (live !== undefined && (live.qqPendingTurns ?? 0) > 0) {
+      live.qqPendingTurns = (live.qqPendingTurns ?? 0) - 1;
+      return;
+    }
+
+    const record = live ?? this.bridgeRecord(sessionId);
+    if (record === undefined) return;
+
+    const text = event.text.trim();
+    if (!text) return; // 仅附件等非文本消息暂不镜像
+
+    void this.send(record, `🌐 来自 Web：\n${text}`, 'mirrorWebUserMessage');
+  }
+
+  /**
+   * 桥接记录：会话无活记录时（Web 发起/闲置回收/宿主重启后），
+   * 凭持久化映射解析 QQ 目标。回复目标不带 msgId → 走主动消息投递。
+   */
+  private bridgeRecord(sessionId: string): SessionRecord | undefined {
+    const peer = this.manager.resolvePeer(sessionId);
+    if (peer === undefined) return undefined;
+
+    const agent = (this.manager.liveAgent(sessionId) ?? {}) as DshAgent;
+    return {
+      sessionKey: `bridge:${sessionId}`,
+      sessionId,
+      agent,
+      handle: { agent, dispose: async () => {} },
+      replyTarget: { scope: peer.scope, targetId: peer.peerId },
+      scope: peer.scope,
+      peerId: peer.peerId,
+      senderId: peer.peerId,
+      lastActivity: Date.now(),
+    };
   }
 
   /** 流式文本增量：累积到会话 buffer */
@@ -144,13 +200,18 @@ class OutboundRouter {
 
     if (event.error === undefined && !this.config.showToolResults) return;
 
-    const text = formatToolResult(
-      call.name,
-      call.args,
-      event.raw as unknown as ToolResultData,
-      this.toolsRegistry,
-      record.agent,
-    );
+    let text: string | null | undefined;
+    try {
+      text = formatToolResult(
+        call.name,
+        call.args,
+        event.raw as unknown as ToolResultData,
+        this.toolsRegistry,
+        record.agent,
+      );
+    } catch {
+      return; // 桥接记录无真实 agent 时展示层可能不可用，静默跳过
+    }
     if (!text) return;
 
     void this.send(record, text, 'sendToolResult');
@@ -176,16 +237,47 @@ class OutboundRouter {
     this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
+  /** 统一发送：切分 + 逐 chunk 三级容错投递 + 错误记录 */
   private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
     const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
     for (const chunk of chunks) {
+      await this.sendResilient(record.replyTarget, chunk, tag);
+    }
+  }
+
+  /**
+   * 三级容错投递（全部 fail-soft，不影响会话处理）：
+   *   1. 原目标发送（有 msgId 时为被动回复——QQ 回合的正常路径）
+   *   2. 失败且带 msgId → 去掉 msgId 按主动消息重试（Web 回合的 msgId 通常已过期）
+   *   3. 仍失败且为 c2c → 唤醒消息（30 天会话窗口内的主动投递）
+   */
+  private async sendResilient(target: ReplyTarget, content: string, tag: string): Promise<void> {
+    try {
+      await this.bot.sendMarkdown(target, content);
+      return;
+    } catch (err) {
+      this.logger.debug(`im-qqbot: ${tag} send failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (target.msgId !== undefined) {
       try {
-        await this.bot.sendMarkdown(record.replyTarget, chunk);
+        await this.bot.sendMarkdown({ scope: target.scope, targetId: target.targetId }, content);
+        return;
       } catch (err) {
-        this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.logger.debug(`im-qqbot: ${tag} active retry failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
+    if (target.scope === 'c2c' && this.bot.sendWakeup !== undefined) {
+      try {
+        await this.bot.sendWakeup({ scope: target.scope, targetId: target.targetId }, content);
+        return;
+      } catch (err) {
+        this.logger.debug(`im-qqbot: ${tag} wakeup retry failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    this.logger.error(`im-qqbot: ${tag} failed after all fallbacks`);
   }
 }
 

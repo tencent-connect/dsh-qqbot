@@ -96,6 +96,10 @@ export async function bootstrapGateway(
         msgId: target.msgId as string,
       },
     }),
+    sendWakeup: (target, content) => bot.sendWakeup(
+      { scope: target.scope, targetId: target.targetId },
+      content,
+    ),
   };
 
   const outboundHandler = createOutboundHandler(manager, sender, config, logger, toolsRegistry);

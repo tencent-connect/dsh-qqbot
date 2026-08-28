@@ -4,6 +4,16 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **Web 端回合镜像到 QQ**：在网页端继续一个 QQ 会话时，你发的消息（带「🌐 来自 Web」标记）和机器人回复会同步推送到 QQ，QQ 端不再只停留在最后一次 QQ 内的对话。会话被闲置回收或宿主重启后依然有效（sessionId→QQ 对端映射持久化在 `~/.dsh-qqbot/session-peers.json`）。QQ 内发起的回合不会重复镜像。投递为三级容错：被动回复 → 主动消息 → c2c 唤醒，全部失败仅记日志，不影响会话处理。可用 `mirrorWeb: false` 关闭。
+
+### 修复
+
+- **工作区归属**：插件创建的 QQ 会话现在会在创建/恢复时挂载到对应工作区（`workspaceRegistry`）。此前宿主只在 Web 端 `session.create` 路径挂载会话，插件会话不在任何工作区成员列表里，侧边栏中只能落在 Ungrouped 区。挂载为 fail-soft（服务缺失或失败时静默降级，不影响消息处理）。（注：闲置回收导致会话行从侧边栏消失是另一个独立问题，属宿主帧语义，缓解方式见配置项 `sessionIdleTimeout`。）
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

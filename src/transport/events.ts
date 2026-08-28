@@ -56,13 +56,20 @@ export interface TurnEndEvent {
   reason: TurnEndReason;
 }
 
+/** user/message 事件（Web 镜像用；QQ 入站回合由路由器按标记跳过） */
+export interface UserMessageEvent {
+  type: 'user/message';
+  text: string;
+}
+
 /** 出站事件联合类型 */
 export type OutboundEvent =
   | ChunkEvent
   | MessageEvent
   | ToolCallEvent
   | ToolResultEvent
-  | TurnEndEvent;
+  | TurnEndEvent
+  | UserMessageEvent;
 
 /**
  * 解析原始事件为强类型
@@ -99,6 +106,17 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     case 'turn/end': {
       const reason = (raw.data as { reason?: TurnEndReason }).reason ?? {};
       return { type: 'turn/end', reason };
+    }
+
+    case 'user/message': {
+      // user/message 的 data 即消息本体（role/source/content 在顶层）
+      const data = raw.data as { content?: Array<{ type: string; text?: string }> };
+      if (!Array.isArray(data.content)) return undefined;
+      const text = data.content
+        .filter((b) => b.type === 'text' && typeof b.text === 'string' && b.text.trim().length > 0)
+        .map((b) => b.text as string)
+        .join('\n');
+      return { type: 'user/message', text };
     }
 
     default:

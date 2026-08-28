@@ -135,6 +135,9 @@ export async function handleInbound(
   });
 
   record.agent.followup(message);
+  // 标记 QQ 发起的回合：出站路由收到 user/message 事件时据此跳过镜像
+  // （QQ 端已有该消息，重复推送会刷屏）
+  record.qqPendingTurns = (record.qqPendingTurns ?? 0) + 1;
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
   // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
