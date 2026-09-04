@@ -20,6 +20,8 @@ import { decodeButtonData } from '../features/button-utils.ts';
 import { buildUserAgent } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
@@ -46,7 +48,14 @@ export async function bootstrapGateway(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
-  const manager = new SessionManager(ctx, agents, config, logger);
+  // 多 bot 模式：本实例状态文件命名空间（单 bot 为 undefined → 落 legacy 共享路径，
+  // 存量用户数据零迁移）。sessionKey/历史缓存本就带 appId，唯一共享可变资源是
+  // prefs 文件，命名空间化后"实例持有该会话"的判定（manager.findBySessionId +
+  // 各自 prefs）即天然完成全局事件流的归属过滤。
+  const stateDir = config.multiBot === true
+    ? resolve(homedir(), '.dsh-qqbot', 'bots', config.appId)
+    : undefined;
+  const manager = new SessionManager(ctx, agents, config, logger, stateDir);
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -132,25 +141,32 @@ export async function bootstrapGateway(
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
 
-  // ── 富媒体过期清理 ──
-  if (config.media.enabled) {
-    startMediaCleanup(ctx, config.media.ttlHours, logger);
+  // ── 进程级全局注册（媒体清理 / 视觉 modal / 工具）：仅 primary 实例执行 ──
+  // 这些注册共享同一宿主注册表，多实例重复注册会撞名；媒体目录与视觉描述与
+  // bot 身份无关，一份足矣。已知限制：qqbot_send_file 绑定 primary 的 sender，
+  // 多 bot 下其他 bot 会话调用会经 primary 出站（正确路由需 per-session 实例
+  // 注册表，见 PR body TODO）。
+  if (config.primaryBot !== false) {
+    // ── 富媒体过期清理 ──
+    if (config.media.enabled) {
+      startMediaCleanup(ctx, config.media.ttlHours, logger);
+    }
+
+    // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
+    ensureVisionInputModal(config.vision, logger);
+    registerDescribeImageTool(ctx, config.vision, logger);
+
+    // ── 附件发送工具注册（qqbot_send_file） ──
+    // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
+    // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
+    const mediaSender: MediaSenderLike = {
+      sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
+      sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
+      sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
+      sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
+    };
+    registerSendFileTool(ctx, mediaSender, manager, config, logger);
   }
-
-  // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
-  ensureVisionInputModal(config.vision, logger);
-  registerDescribeImageTool(ctx, config.vision, logger);
-
-  // ── 附件发送工具注册（qqbot_send_file） ──
-  // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
-  // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender: MediaSenderLike = {
-    sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
-    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
-  };
-  registerSendFileTool(ctx, mediaSender, manager, config, logger);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
@@ -165,5 +181,5 @@ export async function bootstrapGateway(
         await manager.disposeAll();
         bot.stop();
       };
-    }, 'im-qqbot.lifecycle');
+    }, `im-qqbot.lifecycle:${config.appId}`);
 }

@@ -84,12 +84,13 @@ export class SessionManager {
     agents: DshAgentRegistry,
     config: ImQQBotConfig,
     logger: Logger,
+    stateDir?: string,
   ) {
     this.ctx = ctx;
     this.agents = agents;
     this.config = config;
     this.logger = logger;
-    this.modelResolver = new ModelResolver(ctx, config, logger);
+    this.modelResolver = new ModelResolver(ctx, config, logger, stateDir);
 
     this.evictor = new IdleEvictor(
       this.sessions,

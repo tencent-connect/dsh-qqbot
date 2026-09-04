@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **一个 dsh 绑定多个 QQ Bot（草案）**：新增 `bots: [{appId, appSecret}, …]` 配置数组，与 legacy 单字段并存（合并去重、legacy 在前）。单条目行为与历史完全一致；≥2 条目时每 bot 独立 gateway/SessionManager 实例，per-peer 偏好文件按 `~/.dsh-qqbot/bots/<appId>/` 命名空间隔离（单 bot 沿用旧共享路径，存量零迁移），工具/视觉/媒体清理等进程级注册仅首位实例执行。已知限制见 README「多 Bot」节。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能

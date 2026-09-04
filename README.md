@@ -79,6 +79,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 |------|------|--------|------|
 | `appId` | string | **必填** | QQ Bot AppID（或通过 `QQBOT_APPID` 环境变量） |
 | `appSecret` | string | **必填** | QQ Bot AppSecret（或通过 `QQBOT_SECRET` 环境变量） |
+| `bots` | array | `[]` | 多 Bot 列表 `[{appId, appSecret}, …]`，与上方单字段并存时自动合并去重；总数 ≥2 进入多实例模式（见下节） |
 | `provider` | string | `deepseek-official` | LLM 提供商名称 |
 | `model` | string | `deepseek-chat` | 模型名称 |
 | `preset` | string | - | Agent preset id |
@@ -90,6 +91,23 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `debug` | boolean | `false` | 调试模式 |
+
+## 多 Bot（一个 dsh 同时服务多个 QQ Bot）
+
+```yaml
+im-qqbot:
+  bots:
+    - appId: "100000001"
+      appSecret: "…"   # 正式号
+    - appId: "100000002"
+      appSecret: "…"   # 测试号
+```
+
+- 每个 bot 一个独立网关连接与会话管理器实例；会话键本就含 appId（`qqbot:<appId>:<scope>:<peerId>`），跨 bot 会话天然隔离。
+- **per-peer 模型/preset 偏好按实例命名空间**：多 bot 时落 `~/.dsh-qqbot/bots/<appId>/model-prefs.json`；单 bot（含仅 legacy 字段）沿用 `~/.dsh-qqbot/model-prefs.json`，存量数据零迁移。
+- 出站/问答/审批对宿主事件流的订阅是全局的，但各实例先做 `findBySessionId` 归属判定——只有持有该会话的实例处理，双实例不会双发。
+- 进程级注册（`qqbot_describe_image` / `qqbot_send_file` 工具、视觉 modal、媒体清理）仅**首位实例**执行。
+- 已知限制：① 非凭据类配置（prompt/白名单/模型默认等）当前全 bot 共享，per-bot 覆盖待后续；② `qqbot_send_file` 出站绑定首位实例，其他 bot 会话调用会经首位发送；③ msgId 缓存键未含 appId（QQ 平台 openid per-app 隔离，实际不冲突，属防御性 TODO）；④ 扫码绑定仅覆盖首位/legacy 槽；⑤ 每 bot 的网关连接数受官方 per-app 上限约束。
 
 ## 内置命令
 

@@ -36,12 +36,14 @@ export class ModelResolver {
     ctx: Context,
     config: ImQQBotConfig,
     logger?: Logger,
+    stateDir?: string,
   ) {
     this.ctx = ctx;
     this.config = config;
     this.logger = logger;
     this.prefs = new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
+      stateDir,
     );
     this.settings = new SettingsReader();
   }

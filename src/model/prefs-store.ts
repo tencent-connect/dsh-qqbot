@@ -32,8 +32,9 @@ export class PrefsStore {
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
 
-  constructor(debugLog?: DebugFn) {
-    this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
+  constructor(debugLog?: DebugFn, stateDir?: string) {
+    // 单 bot：legacy 共享路径原样（存量零迁移）；多 bot：入口传 per-appId 命名空间。
+    this.prefsPath = resolve(stateDir ?? resolve(homedir(), '.dsh-qqbot'), 'model-prefs.json');
     this.debugLog = debugLog;
     this.load();
   }

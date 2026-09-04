@@ -52,6 +52,16 @@ export interface ImQQBotConfig {
   appId: string;
   /** QQ Bot AppSecret */
   appSecret: string;
+  /**
+   * 多 bot 列表。与上方单字段并存：resolveBotIdentities 合并两者
+   * （legacy 在前），去重后 ≥2 即进入多实例模式（per-appId 状态命名空间）。
+   */
+  bots?: BotIdentity[];
+  // ── 运行时字段（由入口按实例注入；不在配置 schema 面）──
+  /** 同进程 ≥2 实例：状态文件走 ~/.dsh-qqbot/bots/<appId>/ 命名空间 */
+  multiBot?: boolean;
+  /** 本实例是否首位：工具/视觉/清理等进程级全局注册仅 primary 执行 */
+  primaryBot?: boolean;
   /** dsh LLM 提供商名称 */
   provider?: string;
   /** 模型名称 */
@@ -97,6 +107,10 @@ export interface ImQQBotConfig {
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appId: Schema.string().default('').description('QQ Bot AppID'),
   appSecret: Schema.string().default('').description('QQ Bot AppSecret'),
+  bots: Schema.array(Schema.object({
+    appId: Schema.string().description('QQ Bot AppID'),
+    appSecret: Schema.string().description('QQ Bot AppSecret'),
+  })).default([]).description('多 bot 列表（与单字段并存；≥2 生效时按 appId 隔离状态）'),
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
@@ -158,3 +172,26 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     extraRoots: [],
   }).description('附件发送工具配置'),
 });
+
+/** Bot 凭据对（多 bot 列表条目；亦是 legacy 单字段的等价抽象）。 */
+export interface BotIdentity {
+  readonly appId: string;
+  readonly appSecret: string;
+}
+
+/**
+ * 合并配置面为生效 bot 列表：legacy 单字段在前（向后兼容），bots[] 追加；
+ * 按 appId 去重，凭据不全的条目丢弃。返回空数组 = 无任何可启动 bot。
+ */
+export function resolveBotIdentities(config: ImQQBotConfig): BotIdentity[] {
+  const out: BotIdentity[] = [];
+  const seen = new Set<string>();
+  const push = (appId?: string, appSecret?: string): void => {
+    if (!appId || !appSecret || seen.has(appId)) return;
+    seen.add(appId);
+    out.push({ appId, appSecret });
+  };
+  push(config.appId, config.appSecret);
+  for (const bot of config.bots ?? []) push(bot?.appId, bot?.appSecret);
+  return out;
+}
