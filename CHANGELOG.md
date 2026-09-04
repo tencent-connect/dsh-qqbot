@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 修复
+
+- **偏好持久化健壮性**：`model-prefs.json` 写入改为原子（tmp + rename），进程在写入瞬间被中断不再产生半截 JSON；若既有文件已损坏（历史中断产物/手工编辑出错），加载时自动改名为 `.corrupt-<时间戳>` 保留取证后以空偏好继续——旧实现仅 debug 模式有一行日志，损坏事故静默无迹。构造支持注入 filePath（单测与后续多实例命名空间复用）。
+
 ## [0.4.0] - 2026-08-16
 
 ### 新功能
