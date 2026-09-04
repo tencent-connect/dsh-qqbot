@@ -51,6 +51,12 @@ npx @deepseek-ai/dsh --profile qqbot
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
 
+> **安装报 `ERESOLVE could not resolve`？** 已知冲突（[#37](https://github.com/tencent-connect/dsh-qqbot/issues/37) 跟踪中）：`@deepseek-ai/dsh-tools` 等包仍处于 prerelease（`-rc`）peer 版本线，npm 7+ 的严格 peer 解析会拒绝与之相交的组合，与插件本身无关。实测可绕过（仅安装期解析策略，不改运行行为）：跳过 `plugin add`，直接对 profile 目录安装——
+> ```bash
+> npm install --prefix ~/.dsh/profiles/qqbot --legacy-peer-deps @tencent-connect/dsh-qqbot
+> ```
+> 安装完成后按原方式启动即可。
+
 ### 方式二：本地路径安装
 
 ```bash
