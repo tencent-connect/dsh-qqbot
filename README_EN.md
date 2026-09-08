@@ -27,7 +27,7 @@ Scan to join the QQ group / channel
 ## Architecture
 
 ```
-QQ User → QQ WebSocket → dsh-im-qqbot → ctx.agents → dsh agent loop → LLM
+QQ User → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → LLM
                                  ↑                           │
                                  └── session/event ──────────┘
                                        (assistant reply → QQ sendMarkdown)
@@ -87,9 +87,49 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
 | `textChunkLimit` | number | `4500` | Max chars per message |
+| `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min |
+| `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current LLM call |
+| `maxQueue` | number | `20` | Max concurrent queue length |
+| `historyLimit` | number | `10` | Group history buffer size |
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
+| `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |
+
+### Access control (access)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `access.c2cMode` | `open`/`allowlist`/`disabled` | `open` | Direct-chat access mode |
+| `access.c2cAllow` | string[] | `[]` | Direct-chat allowlist (user openid) |
+| `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
+| `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
+
+### Rich media (media)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `media.enabled` | boolean | `true` | Enable rich media understanding (image/video download + tool analysis) |
+| `media.maxMB` | number | `200` | Max download size (MB) |
+| `media.ttlHours` | number | `24` | Media lifetime (hours), 0 = never expire |
+
+### Vision (vision)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `vision.enabled` | boolean | `false` | Enable vision (qqbot_describe_image tool) |
+| `vision.provider` | string | - | Vision model provider (e.g. pi-ai) |
+| `vision.model` | string | - | Vision model id (e.g. qwen-vl-max) |
+| `vision.maxBytes` | number | `10MB` | Max image bytes |
+| `vision.maxTokens` | number | `1024` | Max output tokens |
+| `vision.timeoutMs` | number | `120000` | Vision call timeout (ms) |
+
+### File sending (sendFile)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `sendFile.restrictPaths` | boolean | `true` | Enable path allowlist (media + cwd + extraRoots only) |
+| `sendFile.extraRoots` | string[] | `[]` | Extra allowed root directories |
 
 ## Built-in Commands
 
@@ -100,7 +140,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
-| `/bot-ping` | Connectivity test |
+| `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
 | `/bot-status` | View current session status |
 | `/bot-help` | View all commands |
@@ -113,10 +153,18 @@ src/
 ├── config.ts                   # Config schema
 ├── types.ts                    # Global types
 ├── setup.ts                    # Credential binding (QR)
+├── gateway/                    # Gateway assembly
+│   ├── bootstrap.ts            # Startup wiring (session/event listeners, etc.)
+│   └── middleware-setup.ts     # Middleware chain config
 ├── transport/                  # Transport layer
 │   ├── inbound.ts              # QQ inbound message → agent.followup()
 │   ├── outbound.ts             # session/event → QQ sendMarkdown
 │   ├── outbound-buffer.ts      # Streaming buffer
+│   ├── streaming-writer.ts     # Streaming writer
+│   ├── reply-target.ts         # Reply target resolution
+│   ├── msgid-cache.ts          # Passive reply msgid cache
+│   ├── reply-limiter.ts        # Passive reply rate limiter
+│   ├── tool-presenter.ts       # Tool-call presentation
 │   └── chunker.ts              # Markdown chunking
 ├── session/                    # Session management
 │   ├── session-manager.ts      # QQ peer → Agent mapping
@@ -125,12 +173,22 @@ src/
 │   ├── model-resolver.ts       # Route resolution
 │   ├── prefs-store.ts          # Per-peer preference persistence
 │   └── settings-reader.ts      # settings.yaml read-only
+├── features/                   # Interaction features
+│   ├── question-channel.ts     # ask_user_question Q&A channel
+│   ├── approval-channel.ts     # approval confirmation channel
+│   └── answer-parser.ts        # Answer parsing
+├── media/                      # Media
+│   ├── vision-tool.ts          # Image vision understanding
+│   ├── send-file-tool.ts       # Send local files
+│   └── media-cleaner.ts        # Media TTL cleanup
+├── middleware/                 # Middleware
+│   ├── question-answer.ts      # Q&A answer handling
+│   └── attachment.ts           # Attachment handling
 ├── shared/                     # Shared utilities
 │   ├── utils.ts                # Common helpers
 │   ├── scope.ts                # scope/peer extraction
 │   └── send-helper.ts          # Chunked send
-├── commands/                   # Slash commands
-└── typings/                    # External module declarations
+└── commands/                   # Slash commands
 ```
 
 ## Session Routing
@@ -147,7 +205,10 @@ Resolution strategy: in-process reuse → persisted resume → fresh create.
 - **Preset support** — mount presets (toolkits, prompts, etc.) via the `agent-presets` service
 - **Idle eviction** — auto-dispose Agents on timeout to prevent memory leaks
 - **Markdown output** — replies sent as Markdown with code-block/table-aware chunking
+- **Image understanding** — supports `qqbot_describe_image` vision to analyze images sent by users
+- **File sending** — supports `qqbot_send_file` to send local files to users (path allowlist enabled by default)
 - **Question interaction** — supports `ask_user_question` with inline keyboard buttons (mutually exclusive) or numbered replies, one question at a time with timeout
+- **Approval confirmation** — supports `approval/request` to ask for user confirmation on critical actions via allow/deny buttons
 
 ## Local Development
 

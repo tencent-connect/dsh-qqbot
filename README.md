@@ -27,7 +27,7 @@
 ## 架构
 
 ```
-QQ 用户 → QQ WebSocket → dsh-im-qqbot → ctx.agents → dsh agent loop → LLM
+QQ 用户 → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → LLM
                                  ↑                           │
                                  └── session/event ──────────┘
                                        (assistant reply → QQ sendMarkdown)
@@ -87,9 +87,49 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
+| `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟 |
+| `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
+| `maxQueue` | number | `20` | 并发队列最大长度 |
+| `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
+| `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |
+
+### 访问控制（access）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `access.c2cMode` | `open`/`allowlist`/`disabled` | `open` | 私聊访问模式 |
+| `access.c2cAllow` | string[] | `[]` | 私聊白名单（user openid） |
+| `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | 群聊访问模式 |
+| `access.groupAllow` | string[] | `[]` | 群聊白名单（group openid） |
+
+### 富媒体理解（media）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `media.enabled` | boolean | `true` | 是否启用富媒体理解（图片/视频下载 + 工具分析） |
+| `media.maxMB` | number | `200` | 富媒体下载大小上限(MB) |
+| `media.ttlHours` | number | `24` | 富媒体存活时长(小时)，0=永不过期 |
+
+### 视觉理解（vision）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `vision.enabled` | boolean | `false` | 是否启用视觉理解（qqbot_describe_image 工具） |
+| `vision.provider` | string | - | 视觉模型 provider（如 pi-ai） |
+| `vision.model` | string | - | 视觉模型 id（如 qwen-vl-max） |
+| `vision.maxBytes` | number | `10MB` | 图片字节上限 |
+| `vision.maxTokens` | number | `1024` | 输出 token 上限 |
+| `vision.timeoutMs` | number | `120000` | 视觉调用超时(ms) |
+
+### 附件发送（sendFile）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sendFile.restrictPaths` | boolean | `true` | 是否启用路径白名单（仅 media + cwd + extraRoots） |
+| `sendFile.extraRoots` | string[] | `[]` | 额外允许访问的根目录 |
 
 ## 内置命令
 
@@ -100,7 +140,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `/model` | 查看或切换模型 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/stop` | 中止当前生成 |
-| `/bot-ping` | 连通性测试 |
+| `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |
 | `/bot-version` | 查看版本信息 |
 | `/bot-status` | 查看当前会话状态 |
 | `/bot-help` | 查看所有指令 |
@@ -113,10 +153,18 @@ src/
 ├── config.ts                   # 配置 Schema
 ├── types.ts                    # 全局类型定义
 ├── setup.ts                    # 凭据绑定（扫码）
+├── gateway/                    # 网关装配
+│   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
+│   └── middleware-setup.ts     # 中间件链配置
 ├── transport/                  # 传输层
 │   ├── inbound.ts              # QQ 入站消息 → agent.followup()
 │   ├── outbound.ts             # session/event → QQ sendMarkdown
 │   ├── outbound-buffer.ts      # 流式缓冲
+│   ├── streaming-writer.ts     # 流式写入
+│   ├── reply-target.ts         # 回复目标解析
+│   ├── msgid-cache.ts          # 被动回复 msgid 缓存
+│   ├── reply-limiter.ts        # 被动回复限流
+│   ├── tool-presenter.ts       # 工具调用展示
 │   └── chunker.ts              # Markdown 文本切分
 ├── session/                    # 会话管理层
 │   ├── session-manager.ts      # QQ peer → Agent 映射
@@ -125,12 +173,22 @@ src/
 │   ├── model-resolver.ts       # 路由解析
 │   ├── prefs-store.ts          # per-peer 偏好持久化
 │   └── settings-reader.ts      # settings.yaml 只读
+├── features/                   # 交互特性
+│   ├── question-channel.ts     # ask_user_question 问答通道
+│   ├── approval-channel.ts     # approval 审批确认通道
+│   └── answer-parser.ts        # 答案解析
+├── media/                      # 多媒体
+│   ├── vision-tool.ts          # 图片视觉理解
+│   ├── send-file-tool.ts       # 发送本地文件
+│   └── media-cleaner.ts        # 媒体 TTL 清理
+├── middleware/                 # 中间件
+│   ├── question-answer.ts      # 问答答案处理
+│   └── attachment.ts           # 附件处理
 ├── shared/                     # 共享工具
 │   ├── utils.ts                # 通用函数
 │   ├── scope.ts                # scope/peer 提取
 │   └── send-helper.ts          # 分块发送
-├── commands/                   # 斜杠命令
-└── typings/                    # 外部模块声明
+└── commands/                   # 斜杠命令
 ```
 
 ## 会话路由
@@ -147,7 +205,10 @@ sessionKey: `qqbot:${appId}:${scope}:${peerId}`，由 SHA-256 确定性派生 Se
 - **Preset 支持** — 可通过 `agent-presets` 服务挂载预设（工具集、prompt 等）
 - **闲置回收** — 超时自动 dispose Agent，防止内存泄漏
 - **Markdown 输出** — 回复以 Markdown 格式发送，支持代码块/表格感知切分
+- **图片理解** — 支持 `qqbot_describe_image` 视觉理解，可分析用户发送的图片
+- **附件发送** — 支持 `qqbot_send_file` 将本地文件发送给用户（默认启用路径白名单）
 - **问答互动** — 支持 `ask_user_question`，单选生成内联按钮（点一个其余变灰）、多选回复编号，逐题推进 + 问题级超时
+- **操作确认** — 支持 `approval/request`，关键操作通过「允许/拒绝」按钮请求用户确认
 
 ## 本地开发
 
