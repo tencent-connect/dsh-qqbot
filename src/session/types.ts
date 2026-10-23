@@ -134,6 +134,8 @@ export interface SessionRecord {
   senderId: string;
   lastActivity: number;
   agentPreset?: string;
+  /** 已 followup 但尚未消费 user/message 事件的 QQ 入站回合数（镜像去重用） */
+  qqPendingTurns?: number;
 }
 
 /** 会话状态信息（/status 用） */
