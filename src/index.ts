@@ -6,7 +6,7 @@
  * 凭据绑定编排（扫码状态机 + 端内绑定页路由）见 src/setup/。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { ConfigSchema, type ImQQBotConfig } from './config.ts';
+import { ConfigSchema, resolveBotIdentities, type ImQQBotConfig } from './config.ts';
 import { bootstrapGateway } from './gateway/index.ts';
 import type { DshAgentRegistry } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
@@ -28,8 +28,8 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
 
-  // ── 凭据缺失时唤起扫码绑定 ──
-  if (!appId || !appSecret) {
+  // ── 凭据缺失时唤起扫码绑定（bots[] 已有凭据则不触发） ──
+  if ((!appId || !appSecret) && (config.bots ?? []).length === 0) {
     logger.info('凭据未配置，启动扫码绑定...');
 
     // 关键：不 await 扫码结果。boot 会等 Loader 树稳定（loader.await()），
@@ -78,5 +78,24 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 
-  await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+  // ── 多 bot 装配：legacy 单字段在前，bots[] 追加（去重）──
+  // 单条目时行为与历史完全一致（无命名空间、primary 全局注册）；
+  // ≥2 时进入多实例模式：per-appId 状态命名空间 + 全局注册仅首位执行。
+  const identities = resolveBotIdentities(resolvedConfig);
+  if (identities.length === 0) {
+    logger.error('无可用的 QQ Bot 凭据（appId/appSecret 或 bots[]），插件未启动');
+    return;
+  }
+  if (identities.length > 1) {
+    logger.info(`multi-bot mode: launching ${identities.length} bots (${identities.map((b) => b.appId).join(', ')})`);
+  }
+  for (const [i, bot] of identities.entries()) {
+    await bootstrapGateway(ctx, agents, {
+      ...resolvedConfig,
+      appId: bot.appId,
+      appSecret: bot.appSecret,
+      multiBot: identities.length > 1,
+      primaryBot: i === 0,
+    }, logger);
+  }
 }

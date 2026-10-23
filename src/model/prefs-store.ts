@@ -32,8 +32,8 @@ export class PrefsStore {
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
 
-  constructor(debugLog?: DebugFn) {
-    this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
+  constructor(debugLog?: DebugFn, filePath?: string) {
+    this.prefsPath = filePath ?? resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
     this.debugLog = debugLog;
     this.load();
   }
