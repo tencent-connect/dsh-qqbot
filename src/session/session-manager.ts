@@ -22,6 +22,8 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
+import { attachSessionToWorkspace } from './workspace-attach.ts';
+import { PeerMap } from './peer-map.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -78,6 +80,7 @@ export class SessionManager {
   public questionChannel?: QuestionChannel;
   /** 由 bootstrap 注入的审批通道（approval/request → QQ），会话回收时清理其待批审批 */
   public approvalChannel?: ApprovalChannel;
+  private readonly peerMap: PeerMap;
 
   constructor(
     ctx: Context,
@@ -90,6 +93,7 @@ export class SessionManager {
     this.config = config;
     this.logger = logger;
     this.modelResolver = new ModelResolver(ctx, config, logger);
+    this.peerMap = new PeerMap(logger);
 
     this.evictor = new IdleEvictor(
       this.sessions,
@@ -427,7 +431,11 @@ export class SessionManager {
 
   // ── Session 生命周期管理 ──
 
-  private sessionKey(scope: ChatScope, peerId: string): string {
+  /**
+   * 规范会话键。出站快捷按钮登记/点击匹配、问题通道桥接需要与
+   * SessionManager 内部一致的键格式，故公开。
+   */
+  sessionKey(scope: ChatScope, peerId: string): string {
     return `qqbot:${this.config.appId}:${scope}:${peerId}`;
   }
 
@@ -474,11 +482,13 @@ export class SessionManager {
     if (existing) {
       existing.replyTarget = replyTarget;
       existing.lastActivity = Date.now();
+      this.rememberPeer(existing.sessionId, scope, peerId, senderId, replyTarget.msgId);
       return existing;
     }
 
     const route = this.modelResolver.getEffectiveRoute(key);
     const sessionId = SessionId(this.currentSessionId(key));
+    this.rememberPeer(sessionId, scope, peerId, senderId, replyTarget.msgId);
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
@@ -534,6 +544,11 @@ export class SessionManager {
       agentPreset,
     };
 
+    // 挂载到对应工作区（侧边栏可见性）；fail-soft，不影响消息处理。
+    // 宿主只在 Web 端 session.create 时挂载会话，插件会话不走那条路径，
+    // 闲置回收后会从侧边栏消失（详见 workspace-attach.ts 注释）。
+    await attachSessionToWorkspace(this.ctx, this.config.cwd || process.cwd(), sessionId, this.logger);
+
     this.sessions.set(key, record);
     return record;
   }
@@ -543,6 +558,35 @@ export class SessionManager {
       if (record.sessionId === sessionId) return record;
     }
     return undefined;
+  }
+
+  /** 记录 sessionId → QQ 对端映射（持久化，供 Web 回合桥接/回收后恢复） */
+  private rememberPeer(
+    sessionId: string,
+    scope: ChatScope,
+    peerId: string,
+    senderId: string,
+    lastMsgId: string | undefined,
+  ): void {
+    try {
+      this.peerMap.set(sessionId, { scope, peerId, senderId, lastMsgId, updatedAt: Date.now() });
+    } catch (err) {
+      this.logger.debug(`peer-map remember failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** 出站桥接：按 sessionId 解析 QQ 对端（无活记录时兜底） */
+  resolvePeer(sessionId: string): { scope: ChatScope; peerId: string } | undefined {
+    const live = this.findBySessionId(sessionId);
+    if (live) return { scope: live.scope, peerId: live.peerId };
+    const info = this.peerMap.get(sessionId);
+    if (info) return { scope: info.scope, peerId: info.peerId };
+    return undefined;
+  }
+
+  /** 进程内存活的 agent（可能不存在：已被宿主回收） */
+  liveAgent(sessionId: string): DshAgent | undefined {
+    return this.agents.get(sessionId);
   }
 
   findByAgent(agent: DshAgent): SessionRecord | undefined {

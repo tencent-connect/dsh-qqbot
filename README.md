@@ -94,8 +94,10 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
 | `maxQueue` | number | `20` | 并发队列最大长度 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
+| `mirrorWeb` | boolean | `true` | Web 端发起的回合镜像推送到 QQ（用户消息带标记 + 机器人回复） |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
+| `questionSync` | boolean | `true` | 提问双端同步：QQ 会话的 ask_user_question 同时投 QQ 与 Web，先答先得 |
 | `debug` | boolean | `false` | 调试模式 |
 
 ### 访问控制（access）
