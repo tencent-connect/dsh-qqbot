@@ -22,6 +22,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
+import { attachSessionToWorkspace } from './workspace-attach.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -533,6 +534,11 @@ export class SessionManager {
       lastActivity: Date.now(),
       agentPreset,
     };
+
+    // 挂载到对应工作区（侧边栏可见性）；fail-soft，不影响消息处理。
+    // 宿主只在 Web 端 session.create 时挂载会话，插件会话不走那条路径，
+    // 闲置回收后会从侧边栏消失（详见 workspace-attach.ts 注释）。
+    await attachSessionToWorkspace(this.ctx, this.config.cwd || process.cwd(), sessionId, this.logger);
 
     this.sessions.set(key, record);
     return record;
