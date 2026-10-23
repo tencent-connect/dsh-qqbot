@@ -63,7 +63,8 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "^1.0.5",
     "js-yaml": "^4.1.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "yaml": "2.8.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",
