@@ -53,6 +53,12 @@ DSH **桌面版 / Web** 下会自动打开应用内「QQ Bot 绑定」页（右�
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
 
+> **安装报 `ERESOLVE could not resolve`？** 与**声明了 prerelease（`-rc`）peer 范围的其他插件共装**时，npm 7+ 的严格解析可能判定这组范围不相交而拒绝安装（[#37](https://github.com/tencent-connect/dsh-qqbot/issues/37) 跟踪中）。实测：profile 中只装本插件不触发，共装才触发。绕过办法（仅影响安装期解析策略，不改运行行为）——跳过 `plugin add`，直接对 profile 目录安装：
+> ```bash
+> npm install --prefix ~/.dsh/profiles/qqbot --legacy-peer-deps @tencent-connect/dsh-qqbot
+> ```
+> 安装完成后按原方式启动即可。
+
 ### 方式二：本地路径安装
 
 ```bash
