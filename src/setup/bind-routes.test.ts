@@ -111,6 +111,44 @@ function json(res: { body: string }): unknown {
 }
 
 describe('bind-routes', () => {
+  it('manual binding, settings and unbinding preserve other profile plugins', async () => {
+    vi.stubEnv('QQBOT_APPID', undefined);
+    vi.stubEnv('QQBOT_SECRET', undefined);
+    const dir = mkdtempSync(join(tmpdir(), 'im-qqbot-profile-'));
+    profileDirState.dir = dir;
+    const patchPath = join(dir, 'cordis.patch.yml');
+    writeFileSync(patchPath, '# Custom plugin\n- insert:\n    - id: custom-plugin\n      name: custom-plugin\n');
+    const routes = new Map<string, WebRoute>();
+    const dispose = registerBindRoutes({
+      register(route) {
+        routes.set(route.path, route);
+        return () => { routes.delete(route.path); };
+      },
+    }, null, { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }, {
+      boundAppId: () => readFileSync(patchPath, 'utf8').includes('appId:') ? 'test-app' : null,
+    });
+    try {
+      for (const [path, body] of [
+        [BIND_MANUAL_PATH, '{"appId":"test-app","appSecret":"test-secret"}'],
+        [BIND_CONFIG_PATH, '{"requireMention":false}'],
+        [BIND_UNBIND_PATH, undefined],
+      ] as const) {
+        const res = fakeRes();
+        await invoke(routes.get(path), fakeReq('POST', { host: '127.0.0.1:3080' }, body), res);
+        expect(res.statusCode).toBe(200);
+        const content = readFileSync(patchPath, 'utf8');
+        expect(content).toContain('# Custom plugin');
+        expect(content).toContain('insert:');
+        expect(content).toContain('custom-plugin');
+      }
+      expect(readFileSync(patchPath, 'utf8')).toContain('requireMention: false');
+      expect(readFileSync(patchPath, 'utf8')).not.toContain('test-secret');
+    } finally {
+      dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('注册状态、刷新与手动提交三条精确路由', () => {
     const { routes } = createHarness();
     expect(routes.has(BIND_STATE_PATH)).toBe(true);
