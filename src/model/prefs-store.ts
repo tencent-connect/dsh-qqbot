@@ -1,10 +1,15 @@
 /**
  * PrefsStore — per-peer 会话偏好持久化（模型 + preset）
  *
- * 隔离文件 I/O 操作，便于单元测试时 mock。
- * 存储路径：~/.dsh-qqbot/model-prefs.json
+ * 隔离文件 I/O 操作，构造时可注入 filePath（单测/多实例命名空间）。
+ * 默认存储路径：~/.dsh-qqbot/model-prefs.json
+ *
+ * 持久化保证：
+ * - 写入原子（tmp + rename）：进程中断不再产生半截 JSON 覆盖旧数据；
+ * - 读取容错但留痕：文件解析失败时改名为 `.corrupt-<ts>` 保留取证
+ *   （旧实现只在 debug 模式打一行日志，损坏事故静默无迹），随后以空偏好继续。
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import type { ModelRoute } from './types.ts';
@@ -32,8 +37,8 @@ export class PrefsStore {
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
 
-  constructor(debugLog?: DebugFn) {
-    this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
+  constructor(debugLog?: DebugFn, filePath?: string) {
+    this.prefsPath = filePath ?? resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');
     this.debugLog = debugLog;
     this.load();
   }
@@ -99,7 +104,8 @@ export class PrefsStore {
     try {
       if (!existsSync(this.prefsPath)) return;
       const content = readFileSync(this.prefsPath, 'utf8');
-      const data = JSON.parse(content) as PrefsFile;
+      const data = this.parseOrQuarantine(content);
+      if (!data) return;
       if (data.overrides && typeof data.overrides === 'object') {
         for (const [key, route] of Object.entries(data.overrides)) {
           if (route.provider && route.model) {
@@ -126,7 +132,24 @@ export class PrefsStore {
     }
   }
 
+  /** JSON 解析失败 → 损坏文件改名隔离保留取证，返回 undefined（调用方以空偏好继续）。 */
+  private parseOrQuarantine(content: string): PrefsFile | undefined {
+    try {
+      return JSON.parse(content) as PrefsFile;
+    } catch (err) {
+      const quarantine = `${this.prefsPath}.corrupt-${Date.now()}`;
+      try {
+        renameSync(this.prefsPath, quarantine);
+        this.debugLog?.(`loadPrefs: 文件损坏已隔离到 ${quarantine}（原因：${err instanceof Error ? err.message : String(err)}）`);
+      } catch {
+        this.debugLog?.(`loadPrefs failed（隔离亦失败）: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    }
+  }
+
   private write(): void {
+    const tmp = `${this.prefsPath}.tmp`;
     try {
       mkdirSync(dirname(this.prefsPath), { recursive: true });
       const data: PrefsFile = {
@@ -134,8 +157,14 @@ export class PrefsStore {
         sessionIds: Object.fromEntries(this.sessionIds.entries()),
         presets: Object.fromEntries(this.presets.entries()),
       };
-      writeFileSync(this.prefsPath, JSON.stringify(data, null, 2), 'utf8');
+      // 原子写：先落 tmp 再 rename 覆盖目标，rename 在同卷上是原子的，
+      // 任何时刻目标路径上的文件要么是完整旧版本、要么是完整新版本。
+      writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      renameSync(tmp, this.prefsPath);
     } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch { /* tmp 可能不存在，忽略 */ }
       this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
