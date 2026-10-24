@@ -75,6 +75,56 @@ export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+## 安全模型（必读）
+
+这个插件把 **DSH agent 的执行能力**接到 QQ 上：群里的人说什么，agent 就会读到什么；agent 能调用的工具，群成员也就间接能触发。装之前请先确认默认值是否符合预期。
+
+### 默认开放了什么
+
+| 项 | 示例配置默认 | 说明 |
+| --- | --- | --- |
+| 执行工具 | `bash` / `fs` / `web` | 群里的人能让 agent 执行命令、读写文件、联网 |
+| 审批 | Windows 下 `never`（其他平台取决于 `DSH_PERMISSION_MODE`） | 审批被关闭时，工具调用不会询问你 |
+| 沙箱 | 未挂载 | DSH 的四档权限需要 `sandbox` + `sandbox-policy` 才生效 |
+| 访问控制 | `c2cMode` / `groupMode` = `open` | 任何私聊、任何群都能使用 |
+
+> ⚠️ 示例配置下，四档权限没有执行者、审批不会弹出。请按需收紧，不要直接上线。
+
+### 收紧示例
+
+```yaml
+# 1) 挂上沙箱（四档权限才有执行者）
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: workspace-write
+
+# 2) 审批改为询问
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+# 3) 关掉不需要的执行工具：删除 tool-bash / tool-fs / tool-web 三行
+
+# 4) 访问控制改白名单
+access:
+  c2cMode: allowlist
+  groupMode: allowlist
+  groupAllow: ['<群openid>']
+```
+
+### 建议的最小面
+
+- 只做聊天/查询：不挂 `tool-bash`、`tool-fs`、`tool-web`；
+- 必须用工具时：`workspace-write` + `ask` + `allowlist`；
+- 不要在公开群使用 `danger-full-access`（它会连带把审批设为 `never`）。
+
+> 本文只描述默认值与收紧方法；具体调用链与复现步骤请走 security 渠道或 issue 讨论，不在文档里展开。
+
+
 ## 配置项
 
 | 配置 | 类型 | 默认值 | 说明 |
