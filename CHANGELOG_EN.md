@@ -6,6 +6,16 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Improved
+
+- **Message time context**: current direct/group messages and every buffered group history entry now carry their own second-resolution UTC+08:00 timestamp (`YYYY-MM-DDTHH:mm:ss+08:00`) in model-facing text, helping distinguish when messages were sent, including across midnight. Body assembly omits the affected label for missing or invalid timestamps without inventing a replacement; history limits and collection behavior are unchanged.
+- **Time source limitations**: existing SDK behavior remains unchanged—history collection can fall back to the local recording time for invalid or zero timestamps, and a concurrently merged current message retains the first message's timestamp. This change does not alter collection or merging.
+- **Timed group-history sends**: when `requireMention` is `false`, buffered group history is sent at each `groupIntervalTimer` interval and when the bot is mentioned.
+- **Group image history**: group history now retains image metadata, original URLs and successful local download paths; unmentioned group images are preloaded before mention gating, so later mentions and timed batches can use the local path, with URL fallback on download failure.
+
+
 ## [0.5.2] - 2026-10-12
 
 ### Fixed

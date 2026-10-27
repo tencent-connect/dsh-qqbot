@@ -85,7 +85,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `model` | string | `deepseek-chat` | 模型名称 |
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent 工作目录 |
-| `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
+| `requireMention` | boolean | `true` | 群聊是否只有 @bot 才触发，true 时只有 @bot 才有回复，false 时启用 `groupIntervalTimer`，每`groupIntervalTimer`（ms）发送一次群历史缓存 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
@@ -94,6 +94,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
 | `maxQueue` | number | `20` | 并发队列最大长度 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
+| `groupIntervalTimer` | number | `300000` | 群历史缓存间隔发送(ms)，默认5分钟，仅 `requireMention: false` 时生效 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |

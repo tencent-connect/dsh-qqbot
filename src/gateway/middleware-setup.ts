@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { MiddlewareContext, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -16,23 +16,26 @@ import {
   concurrencyGuard,
   typingIndicator,
   quoteRef,
-  historyBuffer,
+  // historyBuffer removed: group history now stores image metadata.
   envelopeFormatter,
 } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
-import { attachmentProcessor } from '../middleware/attachment.ts';
+import { attachmentProcessor, groupImagePreloader } from '../middleware/attachment.ts';
+import { createGroupHistoryBuffer } from '../middleware/group-history.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import { createGroupWaitController, type GroupWaitController } from '../middleware/group-wait.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 
+import { handleBufferedGroupHistory } from '../transport/inbound.ts';
 export function setupMiddlewares(
   bot: QQBot,
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
-): void {
+): GroupWaitController {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
 
@@ -56,23 +59,29 @@ export function setupMiddlewares(
     },
   }));
 
-  // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
-  //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
-  bot.use(historyBuffer({
-    limit: config.historyLimit,
-    store: getHistoryStore(),
-    recordOnSkip: true,
-    groupKey: (ctx) => {
-      const gid = ctx.message.groupOpenid;
-      if (ctx.message.kind !== 'group' || !gid) return undefined;
-      return historyGroupKey(config.appId, gid);
-    },
-  }));
+  // 群图片在 @ 门控前预下载并写入扩展历史；其它附件仍由下游按原时机处理。
+  const historyStore = getHistoryStore();
+  const groupKey = (ctx: MiddlewareContext): string | undefined => {
+    const gid = ctx.message.groupOpenid;
+    if (ctx.message.kind !== 'group' || !gid) return undefined;
+    return historyGroupKey(config.appId, gid);
+  };
+  bot.use(groupImagePreloader(config, logger));
+  bot.use(createGroupHistoryBuffer({ limit: config.historyLimit, store: historyStore, groupKey }));
+  bot.use(mentionGate({ requireMentionInGroup: config.requireMention }));
 
-  // 5. 群聊 @bot 门控
-  bot.use(mentionGate({
-    requireMentionInGroup: config.requireMention,
-  }));
+  // 5.5. requireMention=false 时，群聊未 @ 消息进入等待，超时后整批处理；true 时群聊仅 @bot 消息继续处理。
+  const groupWait = createGroupWaitController({
+    enabled: !config.requireMention,
+    timeoutMs: config.groupIntervalTimer,
+    historyLimit: config.historyLimit,
+    store: historyStore,
+    groupKey,
+    groupId: (ctx) => ctx.message.kind === 'group' ? ctx.message.groupOpenid : undefined,
+    onTimeout: (groupId, entries) => handleBufferedGroupHistory(bot, manager, config, logger, groupId, entries),
+  });
+  bot.use(groupWait.middleware);
+
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
@@ -119,4 +128,5 @@ export function setupMiddlewares(
     includeQuote: true,
     includeSender: true,
   }));
+  return groupWait;
 }

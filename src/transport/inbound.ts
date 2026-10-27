@@ -19,9 +19,9 @@ import {
   type DownloadedFile,
   type MediaKind,
 } from './attachment.ts';
-import { clearGroupHistory } from '../features/history-store.ts';
+import { clearGroupHistory, historyImagesToAttachments, historyImagesToDownloadedFiles } from '../features/history-store.ts';
+import type { GroupHistoryEntry } from '../features/history-store.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
-
 // ── 类型定义 ──
 
 interface ProcessedMessage {
@@ -44,23 +44,16 @@ interface ResolvedQuote {
   attachments?: QuotedAttachment[];
 }
 
-interface HistoryEntry {
-  senderId: string;
-  senderName?: string;
-  content: string;
-  timestamp: number;
-  messageId: string;
-}
-
 interface MentionState {
   wasMentioned?: boolean;
 }
 
 interface MiddlewareState {
   quote?: ResolvedQuote;
-  history?: HistoryEntry[];
+  history?: GroupHistoryEntry[];
   envelope?: string;
   mention?: MentionState;
+  bufferedHistory?: boolean;
   processedAttachments?: ProcessedAttachment[];
   downloadedFiles?: DownloadedFile[];
   downloadedQuoteFiles?: DownloadedFile[];
@@ -91,10 +84,62 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
-  const msg = ctx.message as unknown as ProcessedMessage;
-  const mwState = ctx.state as MiddlewareState;
-  const { bot } = ctx;
+  await processInbound(
+    ctx.bot,
+    ctx.message as unknown as ProcessedMessage,
+    ctx.state as MiddlewareState,
+    manager,
+    config,
+    logger,
+    true,
+  );
+}
 
+/**
+ * 处理群历史等待超时产生的整批消息。
+ */
+export async function handleBufferedGroupHistory(
+  bot: MiddlewareContext['bot'],
+  manager: SessionManager,
+  config: ImQQBotConfig,
+  logger: Logger,
+  groupId: string,
+  entries: GroupHistoryEntry[],
+): Promise<void> {
+  if (entries.length === 0) return;
+  const current = entries[entries.length - 1];
+  if (!current) return;
+
+  const msg: ProcessedMessage = {
+    rawEventType: 'GROUP_MESSAGE_CREATE',
+    kind: 'group',
+    senderId: current.senderId,
+    senderName: current.senderName,
+    content: current.content,
+    messageId: current.messageId,
+    timestamp: historyTimestampToIso(current.timestamp),
+    groupOpenid: groupId,
+    attachments: historyImagesToAttachments(current.images),
+  };
+  const state: MiddlewareState = {
+    history: entries.slice(0, -1),
+    downloadedFiles: historyImagesToDownloadedFiles(current.images),
+    mention: { wasMentioned: false },
+    bufferedHistory: true,
+  };
+
+  await processInbound(bot, msg, state, manager, config, logger, false);
+}
+
+async function processInbound(
+  bot: MiddlewareContext['bot'],
+  msg: ProcessedMessage,
+  mwState: MiddlewareState,
+  manager: SessionManager,
+  config: ImQQBotConfig,
+  logger: Logger,
+  clearHistory: boolean,
+): Promise<void> {
   const scope: ChatScope = msg.kind === 'group' ? 'group' : 'c2c';
   const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
 
@@ -137,8 +182,8 @@ export async function handleInbound(
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
-  if (scope === 'group') {
+  // 普通群消息回复后清空历史缓存；超时批次的快照已由协调器清空。
+  if (clearHistory && scope === 'group') {
     clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
   }
 
@@ -149,6 +194,12 @@ export async function handleInbound(
     logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
+function historyTimestampToIso(timestamp: number): string {
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : '';
+}
+
 
 // ══════════════════════════════════════════════════════════════
 // Body Assembly（5 层组装）
@@ -171,12 +222,13 @@ function assembleAgentBody(
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
   const quotePart = buildQuotePart(state.quote);
-  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
+  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned, msg.timestamp);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
 
   const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned);
+  const includeHistory = isGroup && (wasMentioned || state.bufferedHistory === true);
+  const agentBody = buildAgentBody(base, state.history, isGroup, includeHistory);
 
   return agentBody;
 }
@@ -246,15 +298,19 @@ function buildUserMessage(
   senderName: string | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
+  timestamp: string | undefined,
 ): string {
+  const time = formatMessageTime(timestamp);
+  const timePrefix = time ? `[Message time: ${time}]\n` : '';
+
   if (!isGroup) {
-    return `${quotePart}${userContent}`;
+    return `${quotePart}${timePrefix}${userContent}`;
   }
 
   const mentionTag = wasMentioned ? ' (@you)' : '';
   const displayName = senderName ?? shortSenderId(senderId);
   const senderTag = `[${displayName} (${senderId})]`;
-  return `${quotePart}${senderTag} ${userContent}${mentionTag}`;
+  return `${quotePart}${timePrefix}${senderTag} ${userContent}${mentionTag}`;
 }
 
 /**
@@ -341,32 +397,39 @@ function renderMediaLine(
  */
 function buildAgentBody(
   base: string,
-  history: HistoryEntry[] | undefined,
+  history: GroupHistoryEntry[] | undefined,
   isGroup: boolean,
-  wasMentioned: boolean,
+  includeHistory: boolean,
 ): string {
-  if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base;
-  }
-
-  const historyLines = history.map(h => {
-    const name = h.senderName ?? shortSenderId(h.senderId);
-    return `[${name} (${h.senderId})] ${h.content}`;
+  if (!isGroup || !includeHistory || !history || history.length === 0) return base;
+  const historyLines = history.flatMap(entry => {
+    const name = entry.senderName ?? shortSenderId(entry.senderId);
+    const time = formatMessageTime(entry.timestamp);
+    const timePrefix = time ? `[Message time: ${time}] ` : '';
+    const body = `${timePrefix}[${name} (${entry.senderId})] ${entry.content}`;
+    return [body, ...(entry.images ?? []).map(image => `- Image: ${image.localPath ?? image.url}`)];
   });
-
   return [
-    '[Chat history begins]',
-    ...historyLines,
-    '',
-    '[Chat history ends]',
-    '[Current message]',
-    base,
+    '[Chat history begins]', ...historyLines, '',
+    '[Chat history ends]', '[Current message]', base,
   ].join('\n');
 }
 
 // ══════════════════════════════════════════════════════════════
 // 辅助函数
 // ══════════════════════════════════════════════════════════════
+
+function formatMessageTime(timestamp: string | number | undefined): string {
+  if (timestamp === undefined || timestamp === '') return '';
+
+  const milliseconds = typeof timestamp === 'number' ? timestamp : Date.parse(timestamp);
+  if (!Number.isFinite(milliseconds)) return '';
+
+  const date = new Date(milliseconds + 8 * 60 * 60 * 1000);
+  if (!Number.isFinite(date.getTime())) return '';
+
+  return `${date.toISOString().slice(0, 19)}+08:00`;
+}
 
 interface VoiceText {
   text: string;

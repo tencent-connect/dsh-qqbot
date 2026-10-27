@@ -362,7 +362,7 @@ export function ConfigPanel(): ReactNode {
     createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
     createElement(SwitchRow, {
       label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
-      help: '开启后，机器人仅可回复 @机器人的群聊消息',
+      help: '开启后仅回复 @机器人的群聊消息；关闭后启用 `groupIntervalTimer`，每`groupIntervalTimer`（ms）发送一次群历史缓存',
       onChange: (v) => { patch('requireMention', v); },
     }),
     createElement(SwitchRow, {

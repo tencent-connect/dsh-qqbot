@@ -60,7 +60,7 @@ export interface ImQQBotConfig {
   preset?: string;
   /** Agent 工作目录（缺省回落到进程 cwd） */
   cwd?: string;
-  /** 是否启用群消息 @mention 门控 */
+  /** 群聊是否只有 @bot 才触发，true 时只有 @bot 才有回复，false 时启用 `groupIntervalTimer`，每`groupIntervalTimer`（ms）发送一次群历史缓存 */
   requireMention: boolean;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
@@ -78,6 +78,8 @@ export interface ImQQBotConfig {
   processingTimeoutMs: number;
   /** 待答问题超时(ms)，超时自动拒绝并提示（ask_user_question） */
   askTimeoutMs: number;
+  /** 群历史缓存间隔发送(ms)，默认5分钟，仅 `requireMention: false` 时生效 */
+  groupIntervalTimer: number;
   /** 群历史缓冲条数 */
   historyLimit: number;
   /** 访问控制 */
@@ -109,7 +111,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
   cwd: Schema.string().description('Agent working directory'),
-  requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
+  requireMention: Schema.boolean().default(true).description('群聊是否只有 @bot 才触发，true 时只有 @bot 才有回复，false 时启用 `groupIntervalTimer`，每`groupIntervalTimer`（ms）发送一次群历史缓存'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),
@@ -118,6 +120,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
+  groupIntervalTimer: Schema.number().default(5 * 60 * 1000).description('群历史缓存间隔发送(ms)，默认5分钟，仅 `requireMention: false` 时生效'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
   access: AccessControlSchema.default({
     c2cMode: 'open',

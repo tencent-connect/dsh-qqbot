@@ -83,7 +83,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `model` | string | `deepseek-chat` | Model name |
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent working directory |
-| `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
+| `requireMention` | boolean | `true` | Whether only @bot mentions trigger group replies: `true` replies only to @bot mentions; `false` enables `groupIntervalTimer` and sends buffered group history every `groupIntervalTimer` ms |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
 | `textChunkLimit` | number | `4500` | Max chars per message |
@@ -92,6 +92,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current LLM call |
 | `maxQueue` | number | `20` | Max concurrent queue length |
 | `historyLimit` | number | `10` | Group history buffer size |
+| `groupIntervalTimer` | number | `300000` | Group history cache send interval (ms), default 5 minutes; applies only when `requireMention: false` |
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |

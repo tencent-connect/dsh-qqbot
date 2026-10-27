@@ -63,7 +63,7 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  const groupWait = setupMiddlewares(bot, config, manager, logger);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -189,6 +189,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        groupWait.dispose();
         await manager.disposeAll();
         bot.stop();
       };
