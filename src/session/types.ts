@@ -2,6 +2,8 @@
  * 会话管理层类型定义
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { Message } from '@deepseek-ai/dsh-llm';
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
 import type { ChatScope, ReplyTarget } from '../types.ts';
 
 /** AgentSetup hook 类型 */
@@ -19,6 +21,13 @@ export interface SessionEventLike {
   [key: string]: unknown;
 }
 
+/** 只读会话投影；events 保留给现有统计/导出，聊天历史使用宿主公开的投影接口。 */
+export interface DshSessionLike {
+  readonly id: string;
+  readonly events?: readonly SessionEventLike[];
+  deriveMessages?(): readonly Message[];
+}
+
 /** dsh Agent 简化接口 */
 export interface DshAgent {
   readonly id: string;
@@ -26,10 +35,7 @@ export interface DshAgent {
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
   /** 底层 session（fork 时作为 source，events 用于统计/导出） */
-  readonly session: {
-    readonly id: string;
-    readonly events?: readonly SessionEventLike[];
-  };
+  readonly session: DshSessionLike;
   cancel(cause: { kind: string }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;
@@ -74,9 +80,25 @@ export interface DshAgentHandle {
   dispose(): Promise<void>;
 }
 
-/** sessions 服务（fork 能力） */
+/** sessions 服务（fork 与已有会话的只读投影能力） */
 export interface SessionsService {
   fork(source: unknown, boundary?: number): { events: readonly unknown[] };
+  get?(id: string): DshSessionLike | undefined;
+  /** 当前宿主注册的消息投影定义，供 detached replay 借用。 */
+  readonly messageProjections?: readonly unknown[];
+}
+
+/** 仅打开 read handle，不获取写入所有权或恢复 Agent。 */
+export interface SessionPersistenceReader {
+  open(id: string, access: 'read'): Promise<{
+    readonly header: SessionHeader;
+    readonly inheritedEventCount?: number;
+    read(): Promise<{
+      events: readonly SessionEvent[];
+      eventState?: 'detached' | 'shared-frozen';
+    }>;
+    close(): Promise<void>;
+  }>;
 }
 
 export interface DshAgentRegistry {

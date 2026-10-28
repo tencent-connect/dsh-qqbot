@@ -100,6 +100,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent working directory |
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
+| `groupSmartReply` | boolean | `false` | Let the model decide whether to respond to ordinary group messages when mention-only mode is off |
+| `groupReplyPrompt` | string | Built-in decision policy | Editable reply-decision prompt; blank uses the default, up to 20000 characters |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
 | `textChunkLimit` | number | `4500` | Max chars per message |
@@ -111,6 +113,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |
+
+### Smart group replies
+
+In Settings → QQ Bot → Basic settings, turn off mention-only replies and enable smart group replies. The bot uses recent group conversation and its recent replies to decide whether to join in. Explicit @mentions, commands, and answers to pending questions bypass this decision; direct chats are unchanged. With both switches off, group messages retain the previous handling behavior.
+
+Enabling smart replies reveals an editable reply-decision prompt. Adjust it to stay quieter, respond when addressed by name, or help more actively with group questions. This is saved separately from custom conversation prompts: the decision prompt controls whether to respond, while the conversation prompt shapes the actual reply. “Restore default” changes the form only; click Save to apply any edit or reset. A blank prompt also uses the default policy.
+
+The decision uses the current group model, returns only `{"decision":"reply"}` or `{"decision":"silent"}`, and has no tools. A silent decision does not start the full Agent or send a silence notice; recent messages remain available as later context. Failures, timeouts, and unparseable results default to silence for ordinary group messages. Decisions consume model usage, and messages selected for a reply require an additional model call, which can add latency.
 
 ### Access control (access)
 

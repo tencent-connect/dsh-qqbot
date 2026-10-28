@@ -179,6 +179,8 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     const res = fakeRes();
     await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({
       requireMention: false,
+      groupSmartReply: true,
+      groupReplyPrompt: '只在值得接话时回复',
       streaming: false,
       showToolResults: true,
       debug: true,
@@ -193,6 +195,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     const after = readFileSync(patchPath, 'utf8');
     for (const expected of [
       'requireMention: false', 'streaming: false', 'showToolResults: true', 'debug: true',
+      'groupSmartReply: true', 'groupReplyPrompt: 只在值得接话时回复',
       "provider: pi-ai", 'groupPrompt: 群聊提示词', 'directPrompt: 私聊提示词',
       'c2cMode: allowlist', 'c2cAllow:', '- u1',
     ]) {

@@ -13,8 +13,10 @@
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { SessionId } from '@deepseek-ai/dsh-session';
+import { Session, SessionId } from '@deepseek-ai/dsh-session';
+import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import type { Message } from '@deepseek-ai/dsh-llm';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
@@ -27,6 +29,7 @@ import type {
   DshAgent,
   DshAgentHandle,
   SessionsService,
+  SessionPersistenceReader,
   DshAgentRegistry,
   AgentPresetsLike,
   PresetComposition,
@@ -355,6 +358,52 @@ export class SessionManager {
 
   getSessionRecord(scope: ChatScope, peerId: string): SessionRecord | undefined {
     return this.sessions.get(this.sessionKey(scope, peerId));
+  }
+
+  /** 只读已有会话的有效消息，不为接话判断创建或恢复 Agent。 */
+  async getConversationMessages(scope: ChatScope, peerId: string): Promise<readonly Message[]> {
+    const key = this.sessionKey(scope, peerId);
+    const sessionId = SessionId(this.currentSessionId(key));
+    let session = this.sessions.get(key)?.agent.session;
+    if (!session) {
+      session = this.agents.get(sessionId)?.session ?? this.getSessionsService()?.get?.(sessionId);
+    }
+    if (!session) {
+      // Agent 被回收或插件重载后，历史可能只在持久化存储中。只读重放
+      // 不进入 SessionStore，也不运行 Agent setup、工具或任何模型请求。
+      const persistence = this.ctx.get('sessionPersistence') as SessionPersistenceReader | undefined;
+      if (!persistence) return [];
+      if (typeof persistence.open !== 'function') {
+        throw new Error('Session persistence read API is unavailable');
+      }
+      let handle: Awaited<ReturnType<SessionPersistenceReader['open']>> | undefined;
+      try {
+        handle = await persistence.open(sessionId, 'read');
+        const snapshot = await handle.read();
+        // 新宿主额外接收继承边界、快照所有权和投影定义；旧 SDK 接口只有
+        // 前三个参数。运行时使用宿主自身的 Session，保留对应版本的语义。
+        const restore = Session.fromRestore as (
+          id: SessionId, events: readonly SessionEvent[], header: SessionHeader,
+          inheritedEventCount?: number, eventState?: 'detached' | 'shared-frozen',
+          projections?: readonly unknown[],
+        ) => Session;
+        session = restore(
+          sessionId, snapshot.events, structuredClone(handle.header),
+          handle.inheritedEventCount, snapshot.eventState,
+          this.getSessionsService()?.messageProjections,
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name === 'SessionPersistenceNotFoundError'
+          && (error as Error & { sessionId?: string }).sessionId === sessionId) return [];
+        throw error;
+      } finally {
+        await handle?.close();
+      }
+    }
+    if (typeof session.deriveMessages !== 'function') {
+      throw new Error('Session message projection is unavailable');
+    }
+    return session.deriveMessages();
   }
 
   getStatus(scope: ChatScope, peerId: string): SessionStatus {

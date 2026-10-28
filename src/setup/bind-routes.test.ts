@@ -365,6 +365,31 @@ describe('bind-routes', () => {
     expect(json(res)).toMatchObject({ ok: false, error: expect.stringContaining('凭据') });
   });
 
+  it.each(['', '结合群聊上下文决定是否接话。\n只输出 JSON。'])('POST config：保存智能回复开关及可编辑判断提示词 %j', async (prompt) => {
+    const update = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig: update });
+    const res = fakeRes();
+    const config = { groupSmartReply: true, groupReplyPrompt: prompt };
+    await invoke(routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify(config)), res);
+    expect(res.statusCode).toBe(200);
+    expect(update).toHaveBeenCalledWith(config);
+  });
+
+  it.each([
+    { groupSmartReply: 'true' },
+    { groupReplyPrompt: false },
+    { groupReplyPrompt: 'x'.repeat(20001) },
+  ])('POST config：拒绝无效智能回复配置 %#', async (config) => {
+    const update = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig: update });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify(config)), res);
+    expect(res.statusCode).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('POST config：cwd 只读字段被拒绝', async () => {
     const { routes } = createHarness();
     const res = fakeRes();

@@ -6,6 +6,12 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Smart group replies**: when mention-only mode is off, an optional context-aware decision lets the bot reply or remain silent. The decision prompt is editable and can be reset or left blank for the default; explicit @mentions, commands, pending answers, and direct chats keep their normal handling.
+
 ## [0.5.4] - 2026-10-28
 
 ### Fixed

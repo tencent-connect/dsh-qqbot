@@ -19,7 +19,8 @@ import {
   type DownloadedFile,
   type MediaKind,
 } from './attachment.ts';
-import { clearGroupHistory } from '../features/history-store.ts';
+import { consumeGroupHistory } from '../features/history-store.ts';
+import type { GroupReplyMessage } from '../features/group-reply-policy.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -61,6 +62,8 @@ interface MiddlewareState {
   history?: HistoryEntry[];
   envelope?: string;
   mention?: MentionState;
+  groupReplyMessages?: GroupReplyMessage[];
+  groupSmartReplyAccepted?: boolean;
   processedAttachments?: ProcessedAttachment[];
   downloadedFiles?: DownloadedFile[];
   downloadedQuoteFiles?: DownloadedFile[];
@@ -91,6 +94,7 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
+  if (ctx.signal.aborted) return;
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
   const { bot } = ctx;
@@ -116,6 +120,7 @@ export async function handleInbound(
   try {
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
+    if (ctx.signal.aborted) return;
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
@@ -126,6 +131,8 @@ export async function handleInbound(
     return;
   }
 
+  if (ctx.signal.aborted) return;
+
   // ── 构建 UserMessage → followup ──
   const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
 
@@ -134,19 +141,24 @@ export async function handleInbound(
     source: { kind: 'user' as const },
   });
 
-  record.agent.followup(message);
-  logger.info(`→ followup sent: key=${scope}:${peerId}`);
-
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
-  if (scope === 'group') {
-    clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
-  }
-
-  // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
+  const cancel = (): void => record.agent.cancel({ kind: 'user' });
+  ctx.signal.addEventListener('abort', cancel, { once: true });
   try {
+    record.agent.followup(message);
+    logger.info(`→ followup sent: key=${scope}:${peerId}`);
+    // 按实际输入消费；会话创建/模型运行期间新到的消息仍留在缓存里。
+    if (scope === 'group') {
+      consumeGroupHistory(config.appId, peerId, [
+        ...(mwState.history ?? []).map(entry => entry.messageId),
+        ...(mwState.groupReplyMessages ?? [{ messageId: msg.messageId }]).map(entry => entry.messageId),
+      ]);
+    }
+    // 保持串行锁直到 turn 真正停止，超时只取消，不放行并发 followup。
     await record.agent.whenIdle();
   } catch (err) {
     logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    ctx.signal.removeEventListener('abort', cancel);
   }
 }
 
@@ -171,12 +183,19 @@ function assembleAgentBody(
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
   const quotePart = buildQuotePart(state.quote);
-  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
+  const batch = state.groupReplyMessages;
+  const userMessage = isGroup && batch && batch.length > 1
+    ? batch.map((entry) => buildUserMessage(
+        buildUserContent({ ...msg, ...entry, attachments: entry.attachments as RawAttachment[] }, {}, logger),
+        buildQuotePart(entry.quote),
+        entry.senderId, entry.senderName, true, entry.wasMentioned,
+      )).join('\n')
+    : buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
 
   const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned);
+  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned || state.groupSmartReplyAccepted === true);
 
   return agentBody;
 }

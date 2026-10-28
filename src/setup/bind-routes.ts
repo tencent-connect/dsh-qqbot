@@ -89,7 +89,7 @@ export interface BindRoutesOptions {
 
 /** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
 const EDITABLE_CONFIG_KEYS = new Set([
-  'requireMention', 'streaming', 'showToolResults', 'debug',
+  'requireMention', 'groupSmartReply', 'groupReplyPrompt', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'access',
@@ -98,6 +98,8 @@ const EDITABLE_CONFIG_KEYS = new Set([
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
 const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   requireMention: (v) => booleanSchema(v, 'requireMention'),
+  groupSmartReply: (v) => booleanSchema(v, 'groupSmartReply'),
+  groupReplyPrompt: stringSchema('groupReplyPrompt'),
   streaming: (v) => booleanSchema(v, 'streaming'),
   showToolResults: (v) => booleanSchema(v, 'showToolResults'),
   debug: (v) => booleanSchema(v, 'debug'),

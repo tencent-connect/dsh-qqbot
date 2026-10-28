@@ -26,13 +26,16 @@ import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
+import { createSmartGroupQueue, createGroupReplyGate } from '../middleware/group-reply.ts';
+import type { GroupReplyPolicy } from '../features/group-reply-policy.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
-): void {
+  replyPolicy: GroupReplyPolicy,
+): () => void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
 
@@ -74,6 +77,14 @@ export function setupMiddlewares(
     requireMentionInGroup: config.requireMention,
   }));
 
+  // 保留清洗前的 @对象，避免把“@其他群友 帮我看看”误当成普通群求助。
+  bot.use(async (ctx, next) => {
+    if (config.groupSmartReply && !config.requireMention && ctx.message.kind === 'group') {
+      ctx.state.groupReplyOriginalContent = ctx.message.content;
+    }
+    await next();
+  });
+
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
     parseFaceTags: true,
@@ -94,21 +105,28 @@ export function setupMiddlewares(
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
   bot.use(questionAnswer(manager));
 
-  // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
-  bot.use(concurrencyGuard({
-    strategy: 'merge',
-    maxQueue: config.maxQueue,
-    maxProcessingMs: config.processingTimeoutMs,
-  }));
-
-  // 10. C2C 输入状态指示
-  bot.use(typingIndicator());
-
-  // 11. 引用消息解析（记录 + 解析被引用原文）
+  // 合并前逐条解析引用，保留每位发送者实际引用的文本和附件。
   bot.use(quoteRef({
     maxSize: 500,
     preferMsgElements: true,
   }));
+
+  // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
+  const legacyConcurrency = concurrencyGuard({
+    strategy: 'merge',
+    maxQueue: config.maxQueue,
+    maxProcessingMs: config.processingTimeoutMs,
+  });
+  const smartQueue = createSmartGroupQueue(config, logger);
+  bot.use((ctx, next) => config.groupSmartReply && !config.requireMention && ctx.message.kind === 'group'
+    ? smartQueue.middleware(ctx, next)
+    : legacyConcurrency(ctx, next));
+
+  // 10. C2C 输入状态指示
+  bot.use(typingIndicator());
+
+  // 普通群消息先做无工具判断；沉默消息不下载附件，也不创建 Agent。
+  bot.use(createGroupReplyGate(config, replyPolicy));
 
   // 11.5. 附件下载（file 附件下载到本地，供 @提及 / 工具访问）
   bot.use(attachmentProcessor(config, logger));
@@ -119,4 +137,5 @@ export function setupMiddlewares(
     includeQuote: true,
     includeSender: true,
   }));
+  return () => { smartQueue.dispose(); replyPolicy.dispose(); };
 }

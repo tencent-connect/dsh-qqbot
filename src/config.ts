@@ -2,6 +2,7 @@
  * dsh-im-qqbot 插件配置 Schema
  */
 import Schema from '@deepseek-ai/schemastery';
+import { DEFAULT_GROUP_REPLY_PROMPT } from './shared/group-reply-defaults.ts';
 
 export interface AccessControlConfig {
   /** C2C 访问模式 */
@@ -67,6 +68,10 @@ export interface ImQQBotConfig {
   cwd?: string;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
+  /** 关闭仅 @ 触发时，由模型判断普通群消息是否需要回复 */
+  groupSmartReply?: boolean;
+  /** 群聊接话判断提示词；空白时使用默认策略 */
+  groupReplyPrompt?: string;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
@@ -115,6 +120,8 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   preset: Schema.string().description('Agent preset id'),
   cwd: Schema.string().description('Agent working directory'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
+  groupSmartReply: Schema.boolean().default(false).description('群聊智能回复（仅在关闭仅@触发时生效）'),
+  groupReplyPrompt: Schema.string().default(DEFAULT_GROUP_REPLY_PROMPT).description('群聊接话判断提示词（留空使用默认策略）'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),

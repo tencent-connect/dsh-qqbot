@@ -26,6 +26,7 @@ import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
+import { GroupReplyPolicy } from '../features/group-reply-policy.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -64,7 +65,8 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  const replyPolicy = new GroupReplyPolicy(ctx, config, manager, logger);
+  const disposeMiddlewares = setupMiddlewares(bot, config, manager, logger, replyPolicy);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -195,6 +197,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        disposeMiddlewares();
         await manager.disposeAll();
         bot.stop();
       };
