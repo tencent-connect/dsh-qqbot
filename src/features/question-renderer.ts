@@ -38,8 +38,10 @@ export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefine
             click_limit: 1,
             data: encodeButtonData({ t: 'question', q: question.id, i: idx }),
           },
-          // 同一题的选项共享分组：点一个后其余变灰（单选互斥）
-          group_id: `q-${question.id}`,
+          // 不传 group_id：QQ 平台会以「rows.buttons.group_id 无效」拒收整条
+          // keyboard（实测：值取 'q-continue_or_cancel' 时 400，'approval' 时通过，
+          // 疑与长度/取值约束有关）。互斥变灰只是观感，状态机已按 button_data
+          // 的 q 忽略过期点击，故直接省略该字段。
         };
       }),
     });

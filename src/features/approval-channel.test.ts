@@ -108,19 +108,19 @@ function installAndCapture(ch: ApprovalChannel, sent: SentMessage[]): {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe('buildApprovalKeyboard', () => {
-  it('builds two mutually-exclusive buttons with type-tagged data', () => {
+  it('builds two type-tagged buttons without the unsupported group_id', () => {
     const kb = buildApprovalKeyboard();
     const buttons = kb.content.rows[0]?.buttons ?? [];
     expect(buttons).toHaveLength(2);
 
     const allow = buttons[0]!;
-    expect(allow.group_id).toBe('approval');
+    expect(allow).not.toHaveProperty('group_id');
     expect(allow.action.type).toBe(1);
     expect(allow.action.click_limit).toBe(1);
     expect(JSON.parse(allow.action.data)).toEqual({ t: 'approval', d: 'allow' });
 
     const deny = buttons[1]!;
-    expect(deny.group_id).toBe('approval');
+    expect(deny).not.toHaveProperty('group_id');
     expect(JSON.parse(deny.action.data)).toEqual({ t: 'approval', d: 'deny' });
   });
 });

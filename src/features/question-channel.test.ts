@@ -100,8 +100,9 @@ describe('buildKeyboard', () => {
     const btn = kb?.content.rows[0]?.buttons[0];
     expect(btn?.action.type).toBe(1);
     expect(btn?.action.permission.type).toBe(2);
-    // 单选互斥：同一题选项共享 group_id，点一个后其余变灰（action.type=1 才生效）
-    expect(btn?.group_id).toBe('q-q');
+    // 不能带 group_id：平台以「rows.buttons.group_id 无效」拒收整条 keyboard
+    // （实测长值 'q-continue_or_cancel' 400，短值 'approval' 通过），故显式省略
+    expect(btn).not.toHaveProperty('group_id');
     // 保留 click_limit=1（每人限点一次，与 openclaw 对齐）
     expect(btn?.action.click_limit).toBe(1);
     expect(btn?.render_data.label).toBe('A');

@@ -30,7 +30,8 @@ export function buildApprovalText(request: ApprovalRequest, command?: string): s
  * 构建审批键盘：两按钮（允许一次 / 拒绝）。
  *
  * dsh 审批协议 outcome 是闭合集合（allowed-once/rejected/cancelled/unavailable），
- * 无 allow-always，因此只提供两个按钮；`group_id` 相同实现单选互斥变灰。
+ * 无 allow-always，因此只提供两个按钮。不传 `group_id`：该字段在问题卡片上被
+ * 平台判为无效（rows.buttons.group_id 无效），统一省略以免两处行为不一致。
  * button_data 编码 `{"t":"approval","d":"allow"|"deny"}`，由分发器解码。
  */
 export function buildApprovalKeyboard(): InlineKeyboard {
@@ -43,7 +44,6 @@ export function buildApprovalKeyboard(): InlineKeyboard {
       click_limit: 1,
       data: encodeButtonData({ t: 'approval', d: 'allow' }),
     },
-    group_id: 'approval',
   };
   const deny = {
     id: 'approval-deny',
@@ -54,7 +54,6 @@ export function buildApprovalKeyboard(): InlineKeyboard {
       click_limit: 1,
       data: encodeButtonData({ t: 'approval', d: 'deny' }),
     },
-    group_id: 'approval',
   };
   return { content: { rows: [{ buttons: [allow, deny] }] } };
 }
