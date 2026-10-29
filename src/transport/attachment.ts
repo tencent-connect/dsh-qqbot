@@ -86,6 +86,27 @@ function uniqueFilename(name: string): string {
   return `${stem}_${Date.now()}_${rand}${ext}`;
 }
 
+/** 根据魔数识别图片扩展名，不转码 */
+function imageExtension(buf: Buffer): string | undefined {
+  const head = buf.subarray(0, 6).toString('latin1');
+  if (head === 'GIF87a' || head === 'GIF89a') return '.gif';
+  if (buf.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return '.png';
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf.subarray(0, 4).toString('latin1') === 'RIFF'
+    && buf.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp';
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp';
+  return undefined;
+}
+
+/** 按图片实际格式修正扩展名，保留文件名主体 */
+function imagePath(path: string, buf: Buffer): string {
+  const realExt = imageExtension(buf);
+  const ext = extname(path);
+  const declaredExt = ext.toLowerCase();
+  if (!realExt || declaredExt === realExt || (realExt === '.jpg' && declaredExt === '.jpeg')) return path;
+  return `${path.slice(0, path.length - ext.length)}${realExt}`;
+}
+
 /** 字节数格式化 */
 function formatSize(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
@@ -124,8 +145,8 @@ async function assertSafeHostname(hostname: string): Promise<void> {
   }
 }
 
-/** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回下载字节数 */
-async function download(url: string, destPath: string, maxBytes: number): Promise<number> {
+/** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回下载字节数和最终路径 */
+async function download(url: string, destPath: string, maxBytes: number, isImage: boolean): Promise<{ bytes: number; localPath: string }> {
   const parsed = new URL(normalizeUrl(url));
   if (parsed.protocol !== 'https:') {
     throw new Error(`Only HTTPS allowed: ${parsed.protocol}`);
@@ -139,8 +160,9 @@ async function download(url: string, destPath: string, maxBytes: number): Promis
   if (buf.length > maxBytes) {
     throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);
   }
-  writeFileSync(destPath, buf);
-  return buf.length;
+  const localPath = isImage ? imagePath(destPath, buf) : destPath;
+  writeFileSync(localPath, buf);
+  return { bytes: buf.length, localPath };
 }
 
 /**
@@ -168,7 +190,7 @@ export async function downloadMediaAttachments(
   const results: DownloadedFile[] = [];
   for (const att of targets) {
     const contentType = classifyContentType(att.content_type) as 'image' | 'video' | 'file';
-    const localPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
+    let localPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
 
     if (att.size > maxBytes) {
       logger.debug(`im-qqbot: skip download (${att.size}B too large): ${att.filename}`);
@@ -177,7 +199,7 @@ export async function downloadMediaAttachments(
 
     let bytes: number;
     try {
-      bytes = await download(att.url, localPath, maxBytes);
+      ({ bytes, localPath } = await download(att.url, localPath, maxBytes, contentType === 'image'));
     } catch (err) {
       logger.warn(`im-qqbot: download failed: ${att.filename} — ${err instanceof Error ? err.message : String(err)}`);
       continue; // 下载失败不加入结果，由 buildDynamicCtx 回退为描述
