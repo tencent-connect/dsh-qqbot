@@ -6,6 +6,12 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Local prompt files**: group and direct chats can independently switch between text and a local UTF-8 Markdown / text file, with a file picker and validation before saving. File edits take effect on the next turn; switching sources preserves the previous text and path.
+
 ## [0.5.4] - 2026-10-28
 
 ### Fixed

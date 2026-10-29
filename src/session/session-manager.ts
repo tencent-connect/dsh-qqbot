@@ -18,6 +18,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
+import { resolveScopePrompt } from '../prompt/prompt-file.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
@@ -152,7 +153,7 @@ export class SessionManager {
       const record = this.findByAgent(context.agent);
       if (!record) return assembled;
 
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      const prompt = await resolveScopePrompt(this.config, record.scope);
       if (!prompt) return assembled;
 
       return {

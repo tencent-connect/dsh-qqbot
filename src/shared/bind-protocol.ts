@@ -22,6 +22,9 @@ export const BIND_UNBIND_PATH = '/qqbot/im-qqbot/bind/unbind';
 /** 配置读写（设置面板表单） */
 export const BIND_CONFIG_PATH = '/qqbot/im-qqbot/config';
 
+/** 本地提示词文件校验（只返回文件元信息，不返回正文） */
+export const BIND_PROMPT_FILE_PATH = '/qqbot/im-qqbot/prompt-file';
+
 /** 线上协议（HTTP 路由序列化形态） */
 export type BindStateWire =
   | { phase: 'starting' }

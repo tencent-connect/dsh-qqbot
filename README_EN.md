@@ -102,6 +102,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
+| `groupPromptMode` / `directPromptMode` | `text` / `file` | `text` | Prompt source for group / direct chats |
+| `groupPromptFile` / `directPromptFile` | string | - | Absolute local text-file path used in file mode |
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min |
@@ -111,6 +113,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |
+
+Under Settings → QQ Bot → Custom prompts, enable “Use local file” separately for group and direct chats. Select a `.md`, `.markdown`, or `.txt` file, or enter its absolute path on the computer running Harness. Files must be UTF-8 text and at most 1 MiB. The file content is used as an extra system prompt; edits take effect on the next turn, and unreadable files produce an error. Switching back to text mode preserves the previous prompt.
 
 ### Access control (access)
 

@@ -14,8 +14,8 @@
  * 字段策略：只开放用户必要的配置；cwd 只读展示；超时与性能调优
  * 类字段走 profile patch / 环境变量。
  */
-import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { createElement, useCallback, useEffect, useId, useRef, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { BIND_CONFIG_PATH, BIND_PROMPT_FILE_PATH } from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -36,6 +36,10 @@ type ConfigWire = {
   preset?: string;
   groupPrompt?: string;
   directPrompt?: string;
+  groupPromptMode?: 'text' | 'file';
+  directPromptMode?: 'text' | 'file';
+  groupPromptFile?: string;
+  directPromptFile?: string;
   access?: AccessControlWire;
   cwd?: string;
 };
@@ -52,6 +56,7 @@ function useConfigPanelStyles(): void {
     style.id = STYLE_ID;
     style.textContent = `
 .imqb2-form { display: flex; flex-direction: column; width: 100%; }
+.imqb2-form-fields { display: flex; flex-direction: column; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; }
 .imqb2-group-title {
   padding: 14px 0 2px; font-size: 12px; font-weight: 600; line-height: 18px;
   color: var(--dsw-alias-label-tertiary); text-transform: uppercase; letter-spacing: .04em;
@@ -96,6 +101,24 @@ function useConfigPanelStyles(): void {
 .imqb2-input:focus { outline: none; border-color: var(--dsw-alias-state-business-primary); }
 .imqb2-input:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
 .imqb2-textarea { height: auto; min-height: 68px; padding: 8px 12px; resize: vertical; line-height: 1.5; }
+/* 本地提示词文件：保持与宿主输入框和开关一致的尺寸 */
+.imqb2-prompt-mode { display: inline-flex; align-items: center; gap: 8px; flex: none; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-secondary); }
+.imqb2-file-row { display: flex; align-items: center; gap: 8px; }
+.imqb2-file-row .imqb2-input { flex: 1; min-width: 0; }
+.imqb2-file-pick {
+  box-sizing: border-box; flex: none; height: 34px; padding: 0 12px;
+  border: 0.5px solid var(--dsw-alias-border-l4); border-radius: var(--dsw-radius-md, 8px);
+  background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.imqb2-file-pick:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.imqb2-file-pick:disabled { opacity: 0.4; cursor: default; }
+.imqb2-file-pick:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+.imqb2-file-status { overflow-wrap: anywhere; }
+.imqb2-file-status--error { color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-error)); }
 /* 分段控件（官方 SegmentedControl 复刻：指示器按段数/索引定位） */
 .imqb2-seg {
   position: relative; display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr;
@@ -219,6 +242,160 @@ function AreaRow({ label, help, value, rows, onChange }: {
   );
 }
 
+/** Desktop 预加载桥仅负责由用户选择的 File 获取真实本地路径。 */
+interface HostPathsBridge {
+  pathFor(file: File): string;
+}
+
+function hostPathsBridge(): HostPathsBridge | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const bridge = (window as Window & { __DSH_HOST_PATHS__?: HostPathsBridge }).__DSH_HOST_PATHS__;
+  return typeof bridge?.pathFor === 'function' ? bridge : undefined;
+}
+
+type PromptFileCheck = {
+  path: string;
+  state: 'checking' | 'ok' | 'error';
+  message: string;
+};
+
+/** 文本与文件两种来源独立保存；只把所选来源交给宿主加载。 */
+function PromptField({ scopeLabel, mode, text, filePath, onModeChange, onTextChange, onFileChange }: {
+  scopeLabel: string;
+  mode: 'text' | 'file';
+  text: string;
+  filePath: string;
+  onModeChange: (next: 'text' | 'file') => void;
+  onTextChange: (next: string) => void;
+  onFileChange: (next: string) => void;
+}): ReactNode {
+  const inputId = useId();
+  const picker = useRef<HTMLInputElement>(null);
+  const [check, setCheck] = useState<PromptFileCheck | null>(null);
+  const [pickerError, setPickerError] = useState<string | null>(null);
+  const [checkVersion, setCheckVersion] = useState(0);
+  const path = filePath.trim();
+  const fileMode = mode === 'file';
+  const canPickFile = hostPathsBridge() !== undefined;
+
+  useEffect(() => {
+    if (!fileMode || path.length === 0) {
+      setCheck(null);
+      return;
+    }
+    let stopped = false;
+    const controller = new AbortController();
+    setCheck({ path, state: 'checking', message: '正在校验文件…' });
+    const timer = setTimeout(() => {
+      void fetch(BIND_PROMPT_FILE_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          const body = (await res.json().catch(() => ({}))) as {
+            ok?: boolean; path?: string; bytes?: number; characters?: number; error?: string;
+          };
+          if (stopped) return;
+          if (!res.ok || body.ok !== true) {
+            throw new Error(body.error ?? `文件校验失败（HTTP ${res.status}）`);
+          }
+          if (typeof body.path !== 'string' || typeof body.bytes !== 'number' || typeof body.characters !== 'number') {
+            throw new Error('文件校验响应不完整，请稍后重试');
+          }
+          const name = body.path.split(/[\\/]/).pop() || body.path;
+          const size = body.bytes < 1024 ? `${body.bytes} B` : `${(body.bytes / 1024).toFixed(1)} KB`;
+          setCheck({
+            path, state: 'ok',
+            message: `已校验：${name} · ${size} · ${body.characters.toLocaleString('zh-CN')} 字符`,
+          });
+        })
+        .catch((err: unknown) => {
+          if (!stopped) {
+            setCheck({ path, state: 'error', message: err instanceof Error ? err.message : String(err) });
+          }
+        });
+    }, 500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [fileMode, path, checkVersion]);
+
+  const currentCheck = check?.path === path ? check : null;
+  const statusMessage = pickerError ?? currentCheck?.message
+    ?? (path.length === 0 ? '支持 .md、.markdown 和 .txt 文件' : '正在校验文件…');
+  const hasError = pickerError !== null || currentCheck?.state === 'error';
+
+  const pickFile = (event: ChangeEvent<HTMLInputElement>): void => {
+    const file = event.currentTarget.files?.[0];
+    // 清空原生输入，允许再次选择同一文件并重新校验。
+    event.currentTarget.value = '';
+    if (file === undefined) return;
+    try {
+      const selectedPath = hostPathsBridge()?.pathFor(file);
+      if (!selectedPath) throw new Error('无法取得文件路径，请手动填写运行 Harness 的电脑上的文件路径');
+      setPickerError(null);
+      onFileChange(selectedPath);
+      setCheckVersion((version) => version + 1);
+    } catch (err: unknown) {
+      setPickerError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('div', { className: 'imqb2-head' },
+      createElement('label', { className: 'imqb2-label', htmlFor: inputId }, `${scopeLabel}额外 system prompt`),
+      createElement('span', { className: 'imqb2-prompt-mode' },
+        createElement('span', null, '使用本地文件'),
+        createElement(Switch, {
+          checked: fileMode, label: `${scopeLabel}使用本地文件`,
+          onChange: (next) => { setPickerError(null); onModeChange(next ? 'file' : 'text'); },
+        }),
+      ),
+    ),
+    fileMode
+      ? createElement('div', { className: 'imqb2-file-row' },
+          createElement('input', {
+            id: inputId, className: 'imqb2-input', value: filePath, spellCheck: false, autoComplete: 'off',
+            placeholder: '请选择或填写提示词文件的完整路径', 'aria-label': `${scopeLabel}提示词文件路径`,
+            'aria-describedby': `${inputId}-status`, 'aria-invalid': hasError,
+            onChange: (event: ChangeEvent<HTMLInputElement>) => {
+              setPickerError(null);
+              onFileChange(event.currentTarget.value);
+            },
+          }),
+          createElement('button', {
+            type: 'button', className: 'imqb2-file-pick', disabled: !canPickFile,
+            'aria-label': `${scopeLabel}选择提示词文件`,
+            onClick: () => { picker.current?.click(); },
+          }, '选择文件'),
+          createElement('input', {
+            type: 'file', hidden: true, ref: picker, accept: '.md,.markdown,.txt',
+            'aria-label': `${scopeLabel}提示词文件`, onChange: pickFile,
+          }),
+        )
+      : createElement('textarea', {
+          id: inputId, className: 'imqb2-input imqb2-textarea', value: text, rows: 3,
+          onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { onTextChange(event.currentTarget.value); },
+        }),
+    fileMode
+      ? createElement('p', { className: 'imqb2-help' }, '文件正文将作为额外系统提示词。修改原文件后，下轮对话自动生效。')
+      : null,
+    fileMode && !canPickFile
+      ? createElement('p', { className: 'imqb2-hint' }, '当前环境无法选择本地文件，请手动填写运行 Harness 的电脑上的文件路径。')
+      : null,
+    fileMode
+      ? createElement('p', {
+          id: `${inputId}-status`, role: 'status', 'aria-live': 'polite',
+          className: `imqb2-hint imqb2-file-status${hasError ? ' imqb2-file-status--error' : ''}`,
+        }, statusMessage)
+      : null,
+  );
+}
+
 /** 访问模式分段选择行 */
 function SegmentedRow({ label, help, value, options, onChange }: {
   label: string; help?: string; value: AccessMode;
@@ -267,8 +444,15 @@ export function ConfigPanel(): ReactNode {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as { config: ConfigWire };
         if (stopped) return;
-        setInitial(body.config);
-        setForm(body.config);
+        const config: ConfigWire = {
+          ...body.config,
+          groupPromptMode: body.config.groupPromptMode ?? 'text',
+          directPromptMode: body.config.directPromptMode ?? 'text',
+          groupPromptFile: body.config.groupPromptFile ?? '',
+          directPromptFile: body.config.directPromptFile ?? '',
+        };
+        setInitial(config);
+        setForm(config);
       })
       .catch((err: unknown) => {
         if (!stopped) setLoadError(err instanceof Error ? err.message : String(err));
@@ -334,7 +518,8 @@ export function ConfigPanel(): ReactNode {
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
   const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
 
-  return createElement('form', { className: 'imqb2-form', onSubmit: submit },
+  // 保存会触发 HMR；请求期间锁定编辑，避免新增改动被重载丢失。
+  const fields = createElement('fieldset', { className: 'imqb2-form-fields', disabled: busy, 'aria-label': 'QQ 机器人设置' },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
     createElement(SegmentedRow, {
       label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
@@ -391,13 +576,19 @@ export function ConfigPanel(): ReactNode {
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '个性化提示词'),
-    createElement(AreaRow, {
-      label: '群聊额外 system prompt', value: form.groupPrompt ?? '',
-      onChange: (v) => { patch('groupPrompt', v); },
+    createElement(PromptField, {
+      scopeLabel: '群聊', mode: form.groupPromptMode ?? 'text',
+      text: form.groupPrompt ?? '', filePath: form.groupPromptFile ?? '',
+      onModeChange: (v) => { patch('groupPromptMode', v); },
+      onTextChange: (v) => { patch('groupPrompt', v); },
+      onFileChange: (v) => { patch('groupPromptFile', v); },
     }),
-    createElement(AreaRow, {
-      label: '私聊额外 system prompt', value: form.directPrompt ?? '',
-      onChange: (v) => { patch('directPrompt', v); },
+    createElement(PromptField, {
+      scopeLabel: '私聊', mode: form.directPromptMode ?? 'text',
+      text: form.directPrompt ?? '', filePath: form.directPromptFile ?? '',
+      onModeChange: (v) => { patch('directPromptMode', v); },
+      onTextChange: (v) => { patch('directPrompt', v); },
+      onFileChange: (v) => { patch('directPromptFile', v); },
     }),
 
     form.cwd !== undefined
@@ -421,4 +612,5 @@ export function ConfigPanel(): ReactNode {
         busy ? '正在保存…' : '保存'),
     ),
   );
+  return createElement('form', { className: 'imqb2-form', onSubmit: submit }, fields);
 }

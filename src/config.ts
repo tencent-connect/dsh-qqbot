@@ -69,8 +69,16 @@ export interface ImQQBotConfig {
   requireMention: boolean;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
+  /** 群聊提示词来源（缺省沿用文本配置） */
+  groupPromptMode?: 'text' | 'file';
+  /** 群聊本地提示词文件的绝对路径 */
+  groupPromptFile?: string;
   /** 私聊额外 system prompt */
   directPrompt?: string;
+  /** 私聊提示词来源（缺省沿用文本配置） */
+  directPromptMode?: 'text' | 'file';
+  /** 私聊本地提示词文件的绝对路径 */
+  directPromptFile?: string;
   /** 单条消息最大长度（QQ 限制约 5000 字符） */
   textChunkLimit: number;
   /** 是否启用流式输出（群聊始终不启用） */
@@ -116,7 +124,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   cwd: Schema.string().description('Agent working directory'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
+  groupPromptMode: Schema.union(['text', 'file']).default('text').description('群聊提示词来源'),
+  groupPromptFile: Schema.string().description('群聊本地提示词文件绝对路径'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
+  directPromptMode: Schema.union(['text', 'file']).default('text').description('私聊提示词来源'),
+  directPromptFile: Schema.string().description('私聊本地提示词文件绝对路径'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
   sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)'),

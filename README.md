@@ -102,6 +102,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
+| `groupPromptMode` / `directPromptMode` | `text` / `file` | `text` | 群聊 / 私聊提示词来源 |
+| `groupPromptFile` / `directPromptFile` | string | - | 文件模式使用的本地文本文件绝对路径 |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
 | `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟 |
@@ -111,6 +113,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |
+
+在设置 →「QQ 机器人」→「个性化提示词」中，群聊和私聊可分别开启「使用本地文件」，选择 `.md`、`.markdown` 或 `.txt` 文件，也可填写运行 Harness 的电脑上的绝对路径。文件须为 UTF-8 文本，大小不超过 1 MiB。文件正文会作为额外系统提示词使用，修改原文件后下一轮对话生效；文件不可读时会报错。切回文本模式会保留之前填写的提示词。
 
 ### 访问控制（access）
 

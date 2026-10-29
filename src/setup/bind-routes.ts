@@ -20,8 +20,10 @@ import {
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
+import { loadPromptFile } from '../prompt/prompt-file.ts';
 import {
   BIND_CONFIG_PATH,
+  BIND_PROMPT_FILE_PATH,
   BIND_MANUAL_PATH,
   BIND_REFRESH_PATH,
   BIND_STATE_PATH,
@@ -30,7 +32,7 @@ import {
 } from '../shared/bind-protocol.ts';
 
 // 协议单一来源：shared/bind-protocol.ts（类型 + 路径常量，客户端共用）
-export { BIND_CONFIG_PATH, BIND_MANUAL_PATH, BIND_REFRESH_PATH, BIND_STATE_PATH, BIND_UNBIND_PATH };
+export { BIND_CONFIG_PATH, BIND_PROMPT_FILE_PATH, BIND_MANUAL_PATH, BIND_REFRESH_PATH, BIND_STATE_PATH, BIND_UNBIND_PATH };
 export type { BindStateWire };
 
 /** dsh-host-webserver 的具名路由注册形状（局部投影，避免硬依赖） */
@@ -92,6 +94,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
+  'groupPromptMode', 'directPromptMode', 'groupPromptFile', 'directPromptFile',
   'access',
 ]);
 
@@ -106,11 +109,20 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   preset: stringSchema('preset'),
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
+  groupPromptMode: promptModeSchema,
+  directPromptMode: promptModeSchema,
+  groupPromptFile: stringSchema('groupPromptFile'),
+  directPromptFile: stringSchema('directPromptFile'),
   access: (v) => AccessControlSchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new TypeError(`${name} 必须是布尔值`);
+  return value;
+}
+
+function promptModeSchema(value: unknown): 'text' | 'file' {
+  if (value !== 'text' && value !== 'file') throw new TypeError('提示词来源必须是 text 或 file');
   return value;
 }
 
@@ -179,6 +191,11 @@ export function registerBindRoutes(
       path: BIND_CONFIG_PATH,
       handler: (req, res) => handleConfig(req, res, options),
     }),
+    webServer.register({
+      kind: 'exact',
+      path: BIND_PROMPT_FILE_PATH,
+      handler: (req, res) => handlePromptFile(req, res),
+    }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
   return () => { for (const dispose of disposers) dispose(); };
@@ -188,8 +205,8 @@ export function registerBindRoutes(
  * 请求来源校验（最小 CSRF 防护）。
  *
  * 带 Origin 的请求必须与 Host 同源；同源 fetch 与 Desktop IPC 桥
- * （后者会删除 origin 头）均放行。本路由数据不敏感且动作无害，
- * 该级别的防护足够。
+ * （后者会删除 origin 头）均放行。路由仍由宿主统一执行 Host 认证，
+ * 本地文件接口只返回元信息，不返回文件正文。
  */
 function trusted(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
@@ -408,6 +425,23 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     return;
   }
 
+  // 仅重新校验本次触及的提示词来源，失效的旧路径不影响其他设置保存。
+  const merged = { ...options.currentConfig?.(), ...validated };
+  try {
+    for (const scope of ['group', 'direct'] as const) {
+      const changed = [`${scope}Prompt`, `${scope}PromptMode`, `${scope}PromptFile`]
+        .some((key) => Object.hasOwn(validated, key));
+      if (changed && merged[`${scope}PromptMode`] === 'file') {
+        const file = merged[`${scope}PromptFile`];
+        if (typeof file !== 'string') throw new TypeError('请选择本地提示词文件');
+        await loadPromptFile(file);
+      }
+    }
+  } catch (err) {
+    sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+
   const persisted = options.onUpdateConfig === undefined
     ? updateProfileConfig(validated, getProfileDir() ?? undefined, undefined)
     : options.onUpdateConfig(validated);
@@ -416,4 +450,27 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     return;
   }
   sendJson(res, 200, { ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
+}
+
+/** 在宿主本机验证文件；仅回传元信息，正文始终保留在插件运行时。 */
+async function handlePromptFile(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!trusted(req)) {
+    sendJson(res, 403, { error: 'forbidden' });
+    return;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  try {
+    const body = await readJsonBody(req);
+    if (typeof body !== 'object' || body === null || Array.isArray(body)
+      || typeof (body as Record<string, unknown>).path !== 'string') {
+      throw new TypeError('请提供本地提示词文件的绝对路径');
+    }
+    const { text: _text, ...metadata } = await loadPromptFile((body as { path: string }).path);
+    sendJson(res, 200, { ok: true, ...metadata });
+  } catch (err) {
+    sendJson(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
 }
