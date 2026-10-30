@@ -7,8 +7,12 @@
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
-import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
+import {
+  deliverSegmentedReply,
+  planSegmentedReply,
+  type SegmentedReplyConfig,
+} from './segmented-reply.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
 import {
@@ -165,14 +169,26 @@ class OutboundRouter {
   private appendChunk(sessionId: string, record: SessionRecord, text: string): void {
     let buffer = this.buffers.get(sessionId);
     if (buffer === undefined) {
-      buffer = new OutboundBuffer(record, this.bot, this.config.textChunkLimit, this.logger, this.shouldStream(record));
+      buffer = new OutboundBuffer(
+        record,
+        this.bot,
+        this.config.textChunkLimit,
+        this.logger,
+        this.shouldStream(record),
+        (text) => this.sendAssistant(record, text, 'flush'),
+      );
       this.buffers.set(sessionId, buffer);
     }
     buffer.append(text);
   }
 
-  /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式） */
+  /**
+   * 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式）。
+   * 开启分条时强制关闭流式：流式是「同一条消息反复全量重写」，
+   * 与「多条独立消息」互斥，两者只能选一个。
+   */
   private shouldStream(record: SessionRecord): boolean {
+    if (this.config.segmentedReply.enable) return false;
     return this.config.streaming
       && record.replyTarget.scope === 'c2c'
       && !!record.replyTarget.msgId;
@@ -194,7 +210,7 @@ class OutboundRouter {
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
 
-    this.trackText(sessionId, this.send(record, fullText, 'sendMarkdown'));
+    this.trackText(sessionId, this.sendAssistant(record, fullText, 'sendMarkdown'));
     this.buffers.delete(sessionId);
   }
 
@@ -225,7 +241,7 @@ class OutboundRouter {
     );
     if (!text) return;
 
-    void this.send(record, text, 'sendToolResult');
+    void this.sendSystem(record, text, 'sendToolResult');
   }
 
   /** 收集本轮声明的交付文件：事件总是先于 turn/end 到达，轮末统一投递 */
@@ -271,7 +287,7 @@ class OutboundRouter {
     void (async () => {
       await Promise.all([flushTask, pending]);
       if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
-        await this.send(record, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
+        await this.sendSystem(record, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined) {
         await this.deliverer.deliver(record, files);
@@ -280,16 +296,51 @@ class OutboundRouter {
     })();
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
-  private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
-    for (const chunk of chunks) {
-      try {
-        await this.bot.sendMarkdown(record.replyTarget, chunk);
-      } catch (err) {
-        this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+  /** 发送助手回复（唯一走分条策略的链路） */
+  private sendAssistant(record: SessionRecord, text: string, tag: string): Promise<void> {
+    return this.sendWithPolicy(record, text, tag, true);
+  }
+
+  /**
+   * 发送非模型回复（工具结果、轮次异常、系统提示）。
+   * onlyLlmResult=true（默认）时不分条，只做平台字符上限切块。
+   */
+  private sendSystem(record: SessionRecord, text: string, tag: string): Promise<void> {
+    return this.sendWithPolicy(record, text, tag, false);
+  }
+
+  /**
+   * 统一发送：按策略计划分条 -> 串行投递 + 条间停顿。
+   * 每条都经 sender.sendMarkdown（内含被动回复限额与 msgId 兜底）。
+   */
+  private async sendWithPolicy(
+    record: SessionRecord,
+    text: string,
+    tag: string,
+    assistant: boolean,
+  ): Promise<void> {
+    const config = this.config.segmentedReply;
+    const effective: SegmentedReplyConfig = assistant || !config.onlyLlmResult
+      ? config
+      : { ...config, enable: false };
+    const plan = planSegmentedReply(text, effective, {
+      limit: this.config.textChunkLimit,
+      logger: this.logger,
+    });
+    if (plan.bubbles.length === 0) return;
+    if (plan.reason !== undefined && plan.reason !== 'disabled' && plan.reason !== 'empty') {
+      this.logger.debug(
+        'im-qqbot: 不分条 reason=' + plan.reason + ' len=' + plan.length + ' tag=' + tag,
+      );
     }
+    await deliverSegmentedReply({
+      sender: this.bot,
+      target: record.replyTarget,
+      plan,
+      config: effective,
+      logger: this.logger,
+      tag,
+    });
   }
 }
 
@@ -309,6 +360,22 @@ export function createOutboundHandler(
   deliverer?: DeliverablesDelivererLike,
 ): OutboundHandlers {
   const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry, deliverer);
+
+  // 启动即打出分条生效参数：与 AstrBot 的「Segmented-reply interval: [2.5, 5.0]」等价，
+  // 用来在日志里确认配置真的进了运行时，而不是只写在了 yml 里。
+  const segmented = config.segmentedReply;
+  if (segmented.enable) {
+    const interval = segmented.intervalMethod === 'log'
+      ? `log(base=${segmented.logBase}, jitter=${segmented.logJitter}s)`
+      : `[${segmented.intervalMin}, ${segmented.intervalMax}]s`;
+    logger.info(
+      `im-qqbot: 分条发送已启用 mode=${segmented.splitMode} 间隔=${interval} 阈值=${segmented.wordsCountThreshold}/${segmented.forwardThreshold} 最多=${segmented.maxBubbles}条 onlyLlmResult=${segmented.onlyLlmResult}`,
+    );
+    if (segmented.maxBubbles > 3) {
+      logger.warn('im-qqbot: maxBubbles > 3 逼近被动回复限额 4 次，超出的气泡会被降级为主动推送');
+    }
+  }
+
   return {
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),

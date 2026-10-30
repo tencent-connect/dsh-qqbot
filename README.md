@@ -147,6 +147,28 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sendFile.restrictPaths` | boolean | `true` | 是否启用路径白名单（仅 media + cwd + extraRoots） |
 | `sendFile.extraRoots` | string[] | `[]` | 额外允许访问的根目录 |
 
+### 分条发送（segmentedReply）
+
+把一段回复拆成多条独立 QQ 消息（多气泡），条间按人类打字节奏停顿。
+完整语义、参数约束与排障见 [docs/segmented-reply.md](./docs/segmented-reply.md)。
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `segmentedReply.enable` | boolean | `false` | 总开关；开启后该会话强制关闭流式输出 |
+| `segmentedReply.onlyLlmResult` | boolean | `true` | 只切模型回复，工具结果 / 系统提示整条发 |
+| `segmentedReply.splitMode` | `regex`/`words`/`line` | `regex` | 切分方式 |
+| `segmentedReply.regex` | string | `.*?(?:[。！？!?~…]+\|\n+)\|.+$` | regex 模式切分点（必须含换行分支） |
+| `segmentedReply.splitWords` | string[] | `["。","？","！","~","…"]` | words 模式词表 |
+| `segmentedReply.contentCleanupRule` | string | `[。]+$` | 每段收尾清理（只锚定结尾） |
+| `segmentedReply.wordsCountThreshold` | number | `150` | 整段可见字数超过该值不分条 |
+| `segmentedReply.forwardThreshold` | number | `1500` | 超过该值整条发送（QQ 无合并转发） |
+| `segmentedReply.intervalMethod` | `random`/`log` | `random` | 条间间隔算法 |
+| `segmentedReply.intervalMin` | number | `2.5` | random 模式最小间隔（秒） |
+| `segmentedReply.intervalMax` | number | `5` | random 模式最大间隔（秒） |
+| `segmentedReply.logBase` | number | `2.6` | log 模式底数 |
+| `segmentedReply.logJitter` | number | `0.5` | log 模式抖动上限（秒） |
+| `segmentedReply.maxBubbles` | number | `3` | 单轮最多气泡数（被动回复限额 4 次） |
+
 ## 内置命令
 
 | 命令 | 说明 |

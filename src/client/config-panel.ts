@@ -14,7 +14,7 @@
  * 字段策略：只开放用户必要的配置；cwd 只读展示；超时与性能调优
  * 类字段走 profile patch / 环境变量。
  */
-import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
@@ -23,6 +23,24 @@ interface AccessControlWire {
   c2cAllow: string[];
   groupMode: 'open' | 'allowlist' | 'disabled';
   groupAllow: string[];
+}
+
+/** 分条发送配置（与 src/config.ts 的 SegmentedReplyConfig 对应的局部投影） */
+interface SegmentedReplyWire {
+  enable: boolean;
+  onlyLlmResult: boolean;
+  splitMode: 'regex' | 'words' | 'line';
+  regex: string;
+  splitWords: string[];
+  contentCleanupRule: string;
+  wordsCountThreshold: number;
+  forwardThreshold: number;
+  intervalMethod: 'random' | 'log';
+  intervalMin: number;
+  intervalMax: number;
+  logBase: number;
+  logJitter: number;
+  maxBubbles: number;
 }
 
 /** GET 回显的生效配置（appSecret 已剔除） */
@@ -37,7 +55,26 @@ type ConfigWire = {
   groupPrompt?: string;
   directPrompt?: string;
   access?: AccessControlWire;
+  segmentedReply?: SegmentedReplyWire;
   cwd?: string;
+};
+
+/** 老宿主未回显 segmentedReply 时的兜底（与 Schema 默认值一致） */
+const DEFAULT_SEGMENTED: SegmentedReplyWire = {
+  enable: false,
+  onlyLlmResult: true,
+  splitMode: 'regex',
+  regex: '.*?(?:[。！？!?~…]+|\\n+)|.+$',
+  splitWords: ['。', '？', '！', '~', '…'],
+  contentCleanupRule: '[。]+$',
+  wordsCountThreshold: 150,
+  forwardThreshold: 1500,
+  intervalMethod: 'random',
+  intervalMin: 2.5,
+  intervalMax: 5,
+  logBase: 2.6,
+  logJitter: 0.5,
+  maxBubbles: 3,
 };
 
 /** 样式注入标记（幂等） */
@@ -205,6 +242,35 @@ function FieldRow({ label, help, value, placeholder, onChange }: {
   );
 }
 
+/** 数字行：输入期间保留草稿，失焦/回车才提交（避免边输边被格式化） */
+function NumberRow({ label, help, value, min, max, onChange }: {
+  label: string; help?: string; value: number; min?: number; max?: number; onChange: (next: number) => void;
+}): ReactNode {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => { setDraft(String(value)); }, [value]);
+  const commit = (raw: string): void => {
+    const parsed = Number(raw);
+    if (raw.trim() === '' || !Number.isFinite(parsed)) { setDraft(String(value)); return; }
+    const lo = min ?? Number.NEGATIVE_INFINITY;
+    const hi = max ?? Number.POSITIVE_INFINITY;
+    onChange(Math.min(hi, Math.max(lo, parsed)));
+  };
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('span', { className: 'imqb2-label' }, label),
+    createElement('input', {
+      className: 'imqb2-input', value: draft, spellCheck: false, inputMode: 'decimal',
+      onChange: (event: ChangeEvent<HTMLInputElement>) => { setDraft(event.currentTarget.value); },
+      onBlur: (event: ChangeEvent<HTMLInputElement>) => { commit(event.currentTarget.value); },
+      onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key !== 'Enter') return;
+        commit(event.currentTarget.value);
+        event.currentTarget.blur();
+      },
+    }),
+    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+  );
+}
+
 /** 多行文本行 */
 function AreaRow({ label, help, value, rows, onChange }: {
   label: string; help?: string; value: string; rows?: number; onChange: (next: string) => void;
@@ -335,6 +401,49 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
 
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
   const access: AccessControlWire = form.access ?? { c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [] };
+  const segmented: SegmentedReplyWire = form.segmentedReply ?? DEFAULT_SEGMENTED;
+  const patchSegmented = (over: Partial<SegmentedReplyWire>): void => {
+    patch('segmentedReply', { ...segmented, ...over });
+  };
+  // 展开成独立子节点（避免数组子节点触发 key 警告）
+  const segmentedRows: ReactNode[] = segmented.enable
+    ? [
+        createElement(SwitchRow, {
+          key: 'seg-only-llm',
+          label: '仅模型回复分条', checked: segmented.onlyLlmResult,
+          help: '工具结果与系统提示不分条，避免把结构化输出切碎',
+          onChange: (v: boolean) => { patchSegmented({ onlyLlmResult: v }); },
+        }),
+        createElement(NumberRow, {
+          key: 'seg-interval-min',
+          label: '条间间隔下限（秒）', value: segmented.intervalMin, min: 0, max: 60,
+          help: '风控敏感参数：低于 2 秒容易被判定连发',
+          onChange: (v: number) => { patchSegmented({ intervalMin: v }); },
+        }),
+        createElement(NumberRow, {
+          key: 'seg-interval-max',
+          label: '条间间隔上限（秒）', value: segmented.intervalMax, min: 0, max: 60,
+          onChange: (v: number) => { patchSegmented({ intervalMax: v }); },
+        }),
+        createElement(NumberRow, {
+          key: 'seg-max-bubbles',
+          label: '单轮最多气泡数', value: segmented.maxBubbles, min: 1, max: 8,
+          help: 'QQ 对同一条消息的被动回复限额 4 次，建议不超过 3',
+          onChange: (v: number) => { patchSegmented({ maxBubbles: v }); },
+        }),
+        createElement(NumberRow, {
+          key: 'seg-threshold',
+          label: '分条字数上限', value: segmented.wordsCountThreshold, min: 1, max: 4000,
+          help: '整段回复超过这个字数就不分条，避免长分析被切成刷屏',
+          onChange: (v: number) => { patchSegmented({ wordsCountThreshold: v }); },
+        }),
+        createElement('p', {
+          key: 'seg-advanced-hint',
+          className: 'imqb2-hint',
+          style: { padding: '4px 0 8px' },
+        }, '高级参数（切分正则 / 收尾清理 / 间隔算法 / 合并阈值）请在 cordis.patch.yml 的 segmentedReply 段配置'),
+      ]
+    : [];
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -372,6 +481,12 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
       help: '回复内容分段实时推送到聊天',
       onChange: (v) => { patch('streaming', v); },
     }),
+    createElement(SwitchRow, {
+      label: '分条发送', checked: segmented.enable,
+      help: '把一条回复拆成多条消息发出（开启后该会话不再走流式输出）',
+      onChange: (v) => { patchSegmented({ enable: v }); },
+    }),
+    ...segmentedRows,
     createElement(SwitchRow, {
       label: '显示工具调用结果', checked: form.showToolResults ?? false,
       help: '在聊天中展示 agent 工具调用的结构化结果',

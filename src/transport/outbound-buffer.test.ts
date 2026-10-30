@@ -113,4 +113,26 @@ describe('OutboundBuffer', () => {
     expect(session.complete).toHaveBeenCalledTimes(1);
     expect(bot.sendMarkdown).not.toHaveBeenCalled(); // 不降级静态
   });
+
+  it('注入 sendText 时静态发送委托给它（分条策略只在路由层实现一次）', async () => {
+    const bot = createBot();
+    const sendText = vi.fn(async () => {});
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), false, sendText);
+
+    buffer.append('在呢\n吃了吗');
+    await buffer.flush();
+
+    expect(sendText).toHaveBeenCalledWith('在呢\n吃了吗');
+    expect(bot.sendMarkdown).not.toHaveBeenCalled(); // 不在缓冲层重复分条
+  });
+
+  it('未注入 sendText 时仍按字符上限自行切块（独立使用兼容）', async () => {
+    const bot = createBot();
+    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 5, createLogger(), false);
+
+    buffer.append('abc\ndef');
+    await buffer.flush();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+  });
 });
