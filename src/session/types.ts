@@ -19,6 +19,15 @@ export interface SessionEventLike {
   [key: string]: unknown;
 }
 
+/** ctx.tools 服务的最小接口（宿主可选提供；缺失时群聊工具收敛不生效） */
+export interface ToolScopeLike {
+  /**
+   * 把该 scope 从上层继承来的工具限制为 allow 名单（fail-closed，名单外不可见）。
+   * 多次调用取交集；返回一个 disposer（这里不持有，随 agent scope 一起回收）。
+   */
+  restrict(options: { allow: readonly string[] }): unknown;
+}
+
 /** dsh Agent 简化接口 */
 export interface DshAgent {
   readonly id: string;

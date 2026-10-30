@@ -102,6 +102,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
+| `groupToolAllow` | string[] | `[]` | 群聊工具白名单：非空时群会话只保留这些工具（空 = 不限制） |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
 | `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟 |
@@ -120,6 +121,22 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.c2cAllow` | string[] | `[]` | 私聊白名单（user openid） |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | 群聊访问模式 |
 | `access.groupAllow` | string[] | `[]` | 群聊白名单（group openid） |
+
+### 群聊工具白名单（groupToolAllow）
+
+群会话是整群共享的一条会话（`sessionKey` 只含 `group_openid`），群里任何成员都能驱动同一个 agent。`access.groupMode` 决定「哪个群能对话」，管不到「这个群能用什么工具」。
+
+`groupToolAllow` 非空时，群会话的工具可见范围收窄到名单内（fail-closed：名单外的工具对该会话不可见，模型既看不到也调不到）；私聊不受影响。留空（默认）保持原行为。
+
+```yaml
+groupToolAllow:
+  - web_search
+  - read
+```
+
+工具名用宿主注册的原始名（`bash`、`read`、`write`、`mcp__xxx__yyy` 等），写错名字只会让该工具不可见，不会报错。会话通过 `/new` 重建或 fork 后会重新应用。
+
+这是「收敛可见工具」，不是权限系统：名单内的工具仍按宿主权限运行（审批、沙箱照常生效）。
 
 ### 富媒体理解（media）
 
