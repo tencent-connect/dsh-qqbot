@@ -20,6 +20,7 @@ import {
   BIND_REFRESH_PATH,
   BIND_STATE_PATH,
   BIND_UNBIND_PATH,
+  toClientUrl,
   type BindStateWire,
 } from '../shared/bind-protocol.ts';
 
@@ -194,7 +195,7 @@ export function useBindState(enabled = true): { state: BindStateWire | null; gon
       const myGeneration = generation;
       const alive = (): boolean => myGeneration === generation && !stopped;
       try {
-        const res = await fetch(BIND_STATE_PATH, { cache: 'no-store' });
+        const res = await fetch(toClientUrl(BIND_STATE_PATH), { cache: 'no-store' });
         if (res.status === 404) {
           if (!stopped && !sawRoute) setGone(true);
           // sawRoute：HMR 窗口期，保留当前视图等待路由恢复
@@ -251,7 +252,7 @@ interface ManualResult { ok: boolean; message?: string; error?: string }
 /** 手动提交凭据（填写 / 更换共用） */
 async function submitManualCredentials(appId: string, appSecret: string): Promise<ManualResult> {
   try {
-    const res = await fetch(BIND_MANUAL_PATH, {
+    const res = await fetch(toClientUrl(BIND_MANUAL_PATH), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ appId, appSecret }),
@@ -350,7 +351,7 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
 
   const unbind = useCallback((): void => {
     if (!window.confirm('确定解绑吗？\n解绑后机器人立即下线，插件将重新进入扫码绑定流程。')) return;
-    void fetch(BIND_UNBIND_PATH, { method: 'POST' })
+    void fetch(toClientUrl(BIND_UNBIND_PATH), { method: 'POST' })
       .then(async (res) => {
         const body = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
         if (res.ok && body.ok === true) {
@@ -412,7 +413,7 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
 /** 未绑定视图：扫码 / 手动填写切换 */
 function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waiting' }> }): ReactNode {
   const [mode, setMode] = useState<'qr' | 'manual'>('qr');
-  const refresh = useCallback(() => { void fetch(BIND_REFRESH_PATH, { method: 'POST' }).catch(() => {}); }, []);
+  const refresh = useCallback(() => { void fetch(toClientUrl(BIND_REFRESH_PATH), { method: 'POST' }).catch(() => {}); }, []);
 
   if (mode === 'manual') {
     return createElement('div', { className: 'imqb-panel' },
