@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, extname } from 'node:path';
 import * as dns from 'node:dns';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
-import { downloadMediaAttachments } from './attachment.ts';
+import { downloadMediaAttachments, imageExtension, correctImageExt } from './attachment.ts';
 import type { Logger } from '../types.ts';
 
 vi.mock('../media/media-cleaner.ts', async () => {
@@ -63,5 +63,53 @@ describe('downloadMediaAttachments', () => {
     expect(readFileSync(result.localPath)).toEqual(bytes);
     expect(readdirSync(MEDIA_ROOT)).toEqual([basename(result.localPath)]);
     expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining(`→ ${result.localPath}`));
+  });
+});
+
+describe('imageExtension（纯函数：magic bytes 识别）', () => {
+  it.each([
+    { name: 'GIF89a', buf: Buffer.from('GIF89a\x01\x00', 'latin1'), ext: '.gif' },
+    { name: 'GIF87a', buf: Buffer.from('GIF87a', 'latin1'), ext: '.gif' },
+    { name: 'PNG', buf: Buffer.from('89504e470d0a1a0a', 'hex'), ext: '.png' },
+    { name: 'JPEG', buf: Buffer.from('ffd8ffe0', 'hex'), ext: '.jpg' },
+    { name: 'WebP', buf: Buffer.from('RIFF0000WEBP', 'latin1'), ext: '.webp' },
+    { name: 'BMP', buf: Buffer.from('BM00', 'latin1'), ext: '.bmp' },
+  ])('识别 $name → $ext', ({ buf, ext }) => {
+    expect(imageExtension(buf)).toBe(ext);
+  });
+
+  it('未知格式 → undefined', () => {
+    expect(imageExtension(Buffer.from('unknown-bytes'))).toBeUndefined();
+  });
+
+  it('短 buffer 不越界（安全落到 undefined）', () => {
+    expect(imageExtension(Buffer.from([0xff]))).toBeUndefined();          // JPEG 需 3 字节
+    expect(imageExtension(Buffer.from('RIFF', 'latin1'))).toBeUndefined(); // WebP 需 12 字节
+    expect(imageExtension(Buffer.alloc(0))).toBeUndefined();
+  });
+});
+
+describe('correctImageExt（纯函数：扩展名修正）', () => {
+  const gif = Buffer.from('GIF89a', 'latin1');
+  const jpeg = Buffer.from('ffd8ff', 'hex');
+
+  it('声明与真实不符 → 替换为真实扩展名，主体不变', () => {
+    expect(correctImageExt('/m/photo_123.png', gif)).toBe('/m/photo_123.gif');
+  });
+
+  it('声明与真实一致 → 原样返回', () => {
+    expect(correctImageExt('/m/photo.gif', gif)).toBe('/m/photo.gif');
+  });
+
+  it('jpg≈jpeg 视为等价 → 不改名', () => {
+    expect(correctImageExt('/m/photo.jpeg', jpeg)).toBe('/m/photo.jpeg');
+  });
+
+  it('大小写不敏感比较 → 保留原名', () => {
+    expect(correctImageExt('/m/photo.JPEG', jpeg)).toBe('/m/photo.JPEG');
+  });
+
+  it('未识别格式 → 原样返回', () => {
+    expect(correctImageExt('/m/photo.png', Buffer.from('xx'))).toBe('/m/photo.png');
   });
 });

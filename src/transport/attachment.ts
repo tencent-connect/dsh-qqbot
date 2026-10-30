@@ -21,11 +21,11 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 /** 下载结果 */
 export interface DownloadedFile {
-  /** 原始文件名（用于与消息附件关联） */
+  /** QQ 下发的原始文件名（仅作来源标注，扩展名不可信——可能与 localPath 不一致） */
   filename: string;
   /** 附件类型 */
   contentType: 'image' | 'video' | 'file';
-  /** 本地绝对路径 */
+  /** 本地绝对路径；图片扩展名已按 magic bytes 校正（判类型以此为准，勿用 filename） */
   localPath: string;
 }
 
@@ -86,20 +86,31 @@ function uniqueFilename(name: string): string {
   return `${stem}_${Date.now()}_${rand}${ext}`;
 }
 
-/** 根据魔数识别图片扩展名，不转码 */
-function imageExtension(buf: Buffer): string | undefined {
-  const head = buf.subarray(0, 6).toString('latin1');
-  if (head === 'GIF87a' || head === 'GIF89a') return '.gif';
-  if (buf.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return '.png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
-  if (buf.subarray(0, 4).toString('latin1') === 'RIFF'
+/**
+ * 按魔数（magic bytes）识别图片真实扩展名，无法识别返回 undefined。
+ *
+ * 纯函数、零 I/O：QQ 网关的 content_type 统一标 image/png 不可信，只有文件头
+ * 可靠。每个分支都带长度守卫，短于所需字节的 buffer 直接落到末尾 undefined。
+ */
+export function imageExtension(buf: Buffer): string | undefined {
+  if (buf.length >= 6) {
+    const head = buf.subarray(0, 6).toString('latin1');
+    if (head === 'GIF87a' || head === 'GIF89a') return '.gif';
+  }
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return '.png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return '.jpg';
+  if (buf.length >= 12
+    && buf.subarray(0, 4).toString('latin1') === 'RIFF'
     && buf.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp';
-  if (buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp';
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp';
   return undefined;
 }
 
-/** 按图片实际格式修正扩展名，保留文件名主体 */
-function imagePath(path: string, buf: Buffer): string {
+/**
+ * 按图片真实格式修正路径扩展名，保留文件名主体（纯函数）。
+ * 未识别 / 已一致 / jpg≈jpeg 时原样返回，避免无意义改名。
+ */
+export function correctImageExt(path: string, buf: Buffer): string {
   const realExt = imageExtension(buf);
   const ext = extname(path);
   const declaredExt = ext.toLowerCase();
@@ -145,8 +156,8 @@ async function assertSafeHostname(hostname: string): Promise<void> {
   }
 }
 
-/** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回下载字节数和最终路径 */
-async function download(url: string, destPath: string, maxBytes: number, isImage: boolean): Promise<{ bytes: number; localPath: string }> {
+/** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回字节 Buffer（不落盘） */
+async function download(url: string, maxBytes: number): Promise<Buffer> {
   const parsed = new URL(normalizeUrl(url));
   if (parsed.protocol !== 'https:') {
     throw new Error(`Only HTTPS allowed: ${parsed.protocol}`);
@@ -160,9 +171,7 @@ async function download(url: string, destPath: string, maxBytes: number, isImage
   if (buf.length > maxBytes) {
     throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);
   }
-  const localPath = isImage ? imagePath(destPath, buf) : destPath;
-  writeFileSync(localPath, buf);
-  return { bytes: buf.length, localPath };
+  return buf;
 }
 
 /**
@@ -190,21 +199,25 @@ export async function downloadMediaAttachments(
   const results: DownloadedFile[] = [];
   for (const att of targets) {
     const contentType = classifyContentType(att.content_type) as 'image' | 'video' | 'file';
-    let localPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
+    const destPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
 
     if (att.size > maxBytes) {
       logger.debug(`im-qqbot: skip download (${att.size}B too large): ${att.filename}`);
       continue; // 超限不下载，由 buildDynamicCtx 回退为描述
     }
 
-    let bytes: number;
+    let buf: Buffer;
     try {
-      ({ bytes, localPath } = await download(att.url, localPath, maxBytes, contentType === 'image'));
+      buf = await download(att.url, maxBytes);
     } catch (err) {
       logger.warn(`im-qqbot: download failed: ${att.filename} — ${err instanceof Error ? err.message : String(err)}`);
       continue; // 下载失败不加入结果，由 buildDynamicCtx 回退为描述
     }
-    logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(bytes)}) → ${localPath}`);
+
+    // 图片按真实格式校正扩展名（QQ 的 content_type 不可信），落盘到最终路径
+    const localPath = contentType === 'image' ? toPosixPath(correctImageExt(destPath, buf)) : destPath;
+    writeFileSync(localPath, buf);
+    logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(buf.length)}) → ${localPath}`);
 
     results.push({ filename: att.filename, contentType, localPath });
   }
