@@ -147,6 +147,29 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sendFile.restrictPaths` | boolean | `true` | Enable path allowlist (media + cwd + extraRoots only) |
 | `sendFile.extraRoots` | string[] | `[]` | Extra allowed root directories |
 
+### Segmented reply (segmentedReply)
+
+Splits one reply into several independent QQ messages (multiple bubbles), with a
+human-like pause between them. See [docs/segmented-reply.md](./docs/segmented-reply.md)
+for the full semantics, parameter constraints and troubleshooting.
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `segmentedReply.enable` | boolean | `false` | Master switch; disables streaming for the session while on |
+| `segmentedReply.onlyLlmResult` | boolean | `true` | Only split model replies; tool results / system notices stay whole |
+| `segmentedReply.splitMode` | `regex`/`words`/`line` | `regex` | Split strategy |
+| `segmentedReply.regex` | string | `.*?(?:[。！？!?~…]+\|\n+)\|.+$` | Split points for regex mode (must keep the newline branch) |
+| `segmentedReply.splitWords` | string[] | `["。","？","！","~","…"]` | Word list for words mode |
+| `segmentedReply.contentCleanupRule` | string | `[。]+$` | Per-bubble trailing cleanup (anchor at the end only) |
+| `segmentedReply.wordsCountThreshold` | number | `150` | Replies longer than this (visible chars) are not split |
+| `segmentedReply.forwardThreshold` | number | `1500` | Replies longer than this are sent as one message (QQ has no merged forward) |
+| `segmentedReply.intervalMethod` | `random`/`log` | `random` | Delay algorithm between bubbles |
+| `segmentedReply.intervalMin` | number | `2.5` | Min delay for random mode (seconds) |
+| `segmentedReply.intervalMax` | number | `5` | Max delay for random mode (seconds) |
+| `segmentedReply.logBase` | number | `2.6` | Log-mode base (larger = flatter) |
+| `segmentedReply.logJitter` | number | `0.5` | Log-mode random jitter (seconds) |
+| `segmentedReply.maxBubbles` | number | `3` | Max bubbles per reply (QQ allows 4 passive replies per msgId) |
+
 ## Built-in Commands
 
 | Command | Description |
