@@ -19,6 +19,7 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
+import { createLegacyTrust, type TrustPolicy } from './request-trust.ts';
 import { AccessControlSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
@@ -85,6 +86,14 @@ export interface BindRoutesOptions {
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
   onUpdateConfig?: (config: Record<string, unknown>) => boolean;
+  /**
+   * 浏览器来源信任围栏（默认：仅 Origin/Host 同源比较）。
+   *
+   * setup 从宿主服务推断后注入与宿主 `/api` 一致的 Host/Origin 围栏
+   * （见 request-trust.ts），补上 DNS rebinding 防线；旧宿主无信任服务时
+   * 回落默认值，行为与历史版本一致。
+   */
+  isTrustedRequest?: TrustPolicy;
 }
 
 /** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
@@ -153,53 +162,42 @@ export function registerBindRoutes(
   };
   const handleManualSubmit = options.onManualCredentials ?? defaultManual;
 
+  // 信任围栏：setup 注入宿主对齐的实现；未注入时保持历史行为
+  const trust = options.isTrustedRequest ?? createLegacyTrust();
+
   const disposers = [
     webServer.register({
       kind: 'exact',
       path: BIND_STATE_PATH,
-      handler: (req, res) => { handleState(req, res, service, options); },
+      handler: (req, res) => { handleState(req, res, trust, service, options); },
     }),
     webServer.register({
       kind: 'exact',
       path: BIND_REFRESH_PATH,
-      handler: (req, res) => { handleRefresh(req, res, service); },
+      handler: (req, res) => { handleRefresh(req, res, trust, service); },
     }),
     webServer.register({
       kind: 'exact',
       path: BIND_MANUAL_PATH,
-      handler: (req, res) => handleManual(req, res, handleManualSubmit),
+      handler: (req, res) => handleManual(req, res, trust, handleManualSubmit),
     }),
     webServer.register({
       kind: 'exact',
       path: BIND_UNBIND_PATH,
-      handler: (req, res) => handleUnbind(req, res, options),
+      handler: (req, res) => handleUnbind(req, res, trust, options),
     }),
     webServer.register({
       kind: 'exact',
       path: BIND_CONFIG_PATH,
-      handler: (req, res) => handleConfig(req, res, options),
+      handler: (req, res) => handleConfig(req, res, trust, options),
     }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
   return () => { for (const dispose of disposers) dispose(); };
 }
 
-/**
- * 请求来源校验（最小 CSRF 防护）。
- *
- * 带 Origin 的请求必须与 Host 同源；同源 fetch 与 Desktop IPC 桥
- * （后者会删除 origin 头）均放行。本路由数据不敏感且动作无害，
- * 该级别的防护足够。
- */
-function trusted(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  if (origin === undefined) return true;
-  try {
-    return new URL(origin).host === req.headers.host;
-  } catch {
-    return false;
-  }
-}
+// 来源信任围栏见 request-trust.ts：setup 按宿主能力注入与宿主 /api 一致的
+// Host/Origin 围栏（loopback / 监听地址 / trustedHosts），未注入时为历史同源比较。
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -213,10 +211,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 function handleState(
   req: IncomingMessage,
   res: ServerResponse,
+  trust: TrustPolicy,
   service: BindingService | null,
   options: BindRoutesOptions,
 ): void {
-  if (!trusted(req)) {
+  if (!trust(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
   }
@@ -233,8 +232,8 @@ function handleState(
   sendJson(res, 200, service === null ? { phase: 'starting' } : service.wireState());
 }
 
-function handleRefresh(req: IncomingMessage, res: ServerResponse, service: BindingService | null): void {
-  if (!trusted(req)) {
+function handleRefresh(req: IncomingMessage, res: ServerResponse, trust: TrustPolicy, service: BindingService | null): void {
+  if (!trust(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
   }
@@ -277,9 +276,10 @@ function parseCredentials(body: unknown): SetupCredentials | null {
 async function handleManual(
   req: IncomingMessage,
   res: ServerResponse,
+  trust: TrustPolicy,
   submit: (credentials: SetupCredentials) => ManualSubmitResult,
 ): Promise<void> {
-  if (!trusted(req)) {
+  if (!trust(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
   }
@@ -309,8 +309,8 @@ async function handleManual(
 }
 
 /** 解绑：仅已绑定态可执行；移除 profile patch 中的凭据并触发 HMR 重载 */
-function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): void {
-  if (!trusted(req)) {
+function handleUnbind(req: IncomingMessage, res: ServerResponse, trust: TrustPolicy, options: BindRoutesOptions): void {
+  if (!trust(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
   }
@@ -351,8 +351,8 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
  * - GET：回显当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）
  * - POST：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载
  */
-async function handleConfig(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): Promise<void> {
-  if (!trusted(req)) {
+async function handleConfig(req: IncomingMessage, res: ServerResponse, trust: TrustPolicy, options: BindRoutesOptions): Promise<void> {
+  if (!trust(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
   }
