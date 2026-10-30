@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 import { BindingService } from './binding-service.ts';
 import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
+import { createRouteTrust } from './request-trust.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
@@ -88,6 +89,13 @@ export async function ensureCredentials(
   }).inject(['webServer'], (scoped) => {
     const webServer = (scoped as unknown as { webServer?: unknown }).webServer as WebServerLike | undefined;
     if (webServer === undefined || typeof webServer.register !== 'function') return;
+    // 与宿主 /api 对齐的来源信任围栏：优先采用宿主 connection 判定，其次复刻
+    // webServer.host/protocol + webStartup.trustedHosts，旧宿主回落同源比较
+    const isTrustedRequest = createRouteTrust({
+      connection: safeService(scoped, 'connection'),
+      webStartup: safeService(scoped, 'webStartup'),
+      webServer: safeService(scoped, 'webServer'),
+    });
     const disposeRoutes = registerBindRoutes(webServer, service, logger, {
       // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
       onManualCredentials: (credentials) => {
@@ -95,6 +103,7 @@ export async function ensureCredentials(
         return persistCredentials(credentials, logger);
       },
       currentConfig: () => options.config,
+      isTrustedRequest,
     });
     // 回调作用域（服务卸载/替换、插件卸载）连带注销路由
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
@@ -117,10 +126,16 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
   }).inject(['webServer'], (scoped) => {
     const webServer = (scoped as unknown as { webServer?: unknown }).webServer as WebServerLike | undefined;
     if (webServer === undefined || typeof webServer.register !== 'function') return;
+    const isTrustedRequest = createRouteTrust({
+      connection: safeService(scoped, 'connection'),
+      webStartup: safeService(scoped, 'webStartup'),
+      webServer: safeService(scoped, 'webServer'),
+    });
     const disposeRoutes = registerBindRoutes(webServer, null, logger, {
       boundAppId: () => appId,
       onManualCredentials: (credentials) => persistCredentials(credentials, logger),
       currentConfig: () => config,
+      isTrustedRequest,
     });
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
       return disposeRoutes;
@@ -134,4 +149,16 @@ function persistCredentials(credentials: SetupCredentials, logger: Logger): { pe
   return persisted
     ? { persisted: true }
     : { persisted: false, error: '无法定位 profile 目录或写入失败，请改用环境变量配置' };
+}
+
+/**
+ * ctx.get 的非抛出版本：宿主服务缺失/访问被守卫拒绝时返回 undefined，
+ * 让信任围栏按能力降级而不是让路由注册失败。
+ */
+function safeService(ctx: Context, name: string): unknown {
+  try {
+    return (ctx as unknown as { get(service: string): unknown }).get(name);
+  } catch {
+    return undefined;
+  }
 }
