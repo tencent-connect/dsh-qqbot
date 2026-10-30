@@ -6,6 +6,17 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.6.0] - 2026-10-30
+
+### New Features
+
+- **Segmented reply (multiple bubbles)**: splits one reply into several independent QQ messages with a human-like pause between them (2.5–5 s randomized by default). The strategy follows AstrBot's `segmented_reply` values: split on punctuation/newlines, split model replies only, skip splitting above a visible-character threshold, cap the bubble count to respect the passive-reply quota; fenced code blocks and GFM tables are never cut. A new "Segmented reply" group is available in the settings page; advanced parameters live in the `segmentedReply` section. See [docs/segmented-reply.md](./docs/segmented-reply.md).
+
+### Notes
+
+- Segmented reply and streaming are mutually exclusive: enabling it turns streaming off for the session (streaming rewrites one message in place, so it cannot produce multiple bubbles).
+- Disabled by default; set `segmentedReply.enable: true` to opt in. When off, behavior is identical to 0.5.4.
+
 ## [0.5.4] - 2026-10-28
 
 ### New Features

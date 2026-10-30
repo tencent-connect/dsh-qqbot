@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createOutboundHandler } from './outbound.ts';
 import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
 import type { SessionManager, SessionRecord } from '../session/index.ts';
-import type { ImQQBotConfig } from '../config.ts';
+import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import type { SegmentedReplyConfig } from './segmented-reply.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 
 function createLogger(): Logger {
@@ -36,12 +37,13 @@ function createRecord(target: ReplyTarget, sessionId = 'sess-qq'): SessionRecord
 }
 
 function createConfig(overrides?: Partial<ImQQBotConfig>): ImQQBotConfig {
-  return {
-    streaming: true,
-    textChunkLimit: 4500,
-    showToolResults: false,
-    ...overrides,
-  } as unknown as ImQQBotConfig;
+  // 走真实 Schema，确保默认值（segmentedReply / sendFile / access ...）与运行时一致
+  return { ...ConfigSchema({}), streaming: true, ...overrides };
+}
+
+/** 分条子配置：默认开启 + 零间隔（单测里不真等待） */
+function segmented(over?: Partial<SegmentedReplyConfig>): SegmentedReplyConfig {
+  return { ...ConfigSchema({}).segmentedReply, enable: true, intervalMin: 0, intervalMax: 0, ...over };
 }
 
 /** 组装 handler：manager 按 sessionId 返回 record（默认 c2c 私聊） */
@@ -309,5 +311,86 @@ describe('OutboundRouter: deliverables/presented', () => {
     await Promise.resolve();
 
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+});
+
+describe('OutboundRouter: 分条发送（多气泡）', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'stop' } } };
+  const assistantMessage = (text: string) => ({
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text }] } },
+  });
+
+  it('开启分条：c2c 强制关闭流式，一行一条发出', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ segmentedReply: segmented() }) });
+
+    outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeStreamFrame('sess-qq', delta('a1', '在呢\n吃了吗\n睡吧'));
+    await vi.advanceTimersByTimeAsync(200);
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.openStream).not.toHaveBeenCalled();
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(3);
+    expect(bot.sendMarkdown).toHaveBeenNthCalledWith(1, c2cTarget, '在呢');
+    expect(bot.sendMarkdown).toHaveBeenNthCalledWith(3, c2cTarget, '睡吧');
+  });
+
+  it('条间停顿按 interval 生效：第二条要等够间隔才发出', async () => {
+    const { outbound, bot } = setup({
+      config: createConfig({ segmentedReply: segmented({ intervalMin: 2.5, intervalMax: 2.5 }) }),
+    });
+
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, assistantMessage('a\nb'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2499);
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+  });
+
+  it('超过字数阈值不分条：长回复整条发出', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ segmentedReply: segmented() }) });
+
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, assistantMessage('一'.repeat(200) + '\n二'));
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('onlyLlmResult=true：系统提示（轮次异常）不分条', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ segmentedReply: segmented() }) });
+
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'E_BROKEN', message: '第一行\n第二行' } } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('E_BROKEN'));
+  });
+
+  it('默认关闭分条：c2c 仍走流式，不发多条', async () => {
+    const { outbound, bot, session } = setup();
+
+    outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeStreamFrame('sess-qq', delta('a1', '一条\n两条'));
+    await vi.advanceTimersByTimeAsync(200);
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.openStream).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    expect(session.complete).toHaveBeenCalledTimes(1);
   });
 });

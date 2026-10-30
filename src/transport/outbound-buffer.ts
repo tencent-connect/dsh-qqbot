@@ -25,6 +25,12 @@ export interface QQBotSender {
   openStream(target: ReplyTarget): StreamSessionLike;
 }
 
+/**
+ * 静态发送策略：由 OutboundRouter 注入，统一走「分条 / 平台切块」那一套，
+ * 避免缓冲层与路由层各写一份发送逻辑。
+ */
+export type BufferTextSender = (text: string) => Promise<void>;
+
 export class OutboundBuffer {
   private buffer = '';
   private flushing = false;
@@ -33,6 +39,7 @@ export class OutboundBuffer {
   private readonly bot: QQBotSender;
   private readonly limit: number;
   private readonly logger: Logger;
+  private readonly sendText: BufferTextSender | undefined;
 
   public constructor(
     record: SessionRecord,
@@ -40,11 +47,13 @@ export class OutboundBuffer {
     limit: number,
     logger: Logger,
     streamingEnabled: boolean,
+    sendText?: BufferTextSender,
   ) {
     this.record = record;
     this.bot = bot;
     this.limit = limit;
     this.logger = logger;
+    this.sendText = sendText;
     this.writer = streamingEnabled
       ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS })
       : null;
@@ -80,8 +89,11 @@ export class OutboundBuffer {
       }
 
       // 降级：静态发送（writer 不存在 or 流式失败）
-      const chunks = chunkMarkdownText(this.buffer, this.limit);
-      for (const chunk of chunks) {
+      if (this.sendText !== undefined) {
+        await this.sendText(this.buffer);
+        return;
+      }
+      for (const chunk of chunkMarkdownText(this.buffer, this.limit)) {
         await this.bot.sendMarkdown(this.record.replyTarget, chunk);
       }
     } catch (err) {

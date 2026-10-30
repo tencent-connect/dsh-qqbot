@@ -1,6 +1,6 @@
 {
   "name": "@tencent-connect/dsh-qqbot",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "icon": "./assets/icons/qq_logo.svg",
   "description": "在 QQ 私聊和群聊里直接对话 DeepSeek Harness。 Chat with DeepSeek Harness in QQ private and group chats.",
   "type": "module",
@@ -26,7 +26,8 @@
     "test": "vitest run",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "clean": "rm -rf dist lib",
-    "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js"
+    "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js",
+    "preview:segmentation": "node scripts/preview-segmentation.mjs"
   },
   "keywords": [
     "deepseek-harness",

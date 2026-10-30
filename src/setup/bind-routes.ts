@@ -19,7 +19,7 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema } from '../config.ts';
+import { AccessControlSchema, SegmentedReplySchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
@@ -93,6 +93,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'access',
+  'segmentedReply',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -107,6 +108,7 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
   access: (v) => AccessControlSchema(v as never),
+  segmentedReply: (v) => SegmentedReplySchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {

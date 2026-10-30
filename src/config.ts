@@ -2,6 +2,7 @@
  * dsh-im-qqbot 插件配置 Schema
  */
 import Schema from '@deepseek-ai/schemastery';
+import type { SegmentedReplyConfig } from './transport/segmented-reply.ts';
 
 export interface AccessControlConfig {
   /** C2C 访问模式 */
@@ -75,6 +76,8 @@ export interface ImQQBotConfig {
   textChunkLimit: number;
   /** 是否启用流式输出（群聊始终不启用） */
   streaming: boolean;
+  /** 分条发送（多气泡）：策略与参数见 docs/segmented-reply.md */
+  segmentedReply: SegmentedReplyConfig;
   /** 每会话最大闲置时长(ms)，超时自动回收 */
   sessionIdleTimeout: number;
   /** 并发队列最大长度 */
@@ -107,6 +110,28 @@ export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),
 });
 
+/** 分条发送子 Schema（独立导出：config 路由的服务端校验复用） */
+export const SegmentedReplySchema: Schema<SegmentedReplyConfig> = Schema.object({
+  enable: Schema.boolean().default(false).description('分条发送总开关（关闭时一次回复只发一条）'),
+  onlyLlmResult: Schema.boolean().default(true).description('只对模型回复分条；工具结果 / 系统提示不分'),
+  splitMode: Schema.union(['regex', 'words', 'line']).default('regex').description('切分方式：regex 标点/换行、words 词表、line 逐行'),
+  regex: Schema.string()
+    .default('.*?(?:[。！？!?~…]+|\\n+)|.+$')
+    .description('regex 模式的切分正则（须匹配出带分隔符的片段）'),
+  splitWords: Schema.array(Schema.string())
+    .default(['。', '？', '！', '~', '…'])
+    .description('words 模式的切分词表'),
+  contentCleanupRule: Schema.string().default('[。]+$').description('每段收尾清理正则（只锚定结尾，勿写 [。]+）'),
+  wordsCountThreshold: Schema.number().min(1).default(150).description('整段可见字数 <= 该值才分条（防长分析被切碎）'),
+  forwardThreshold: Schema.number().min(1).default(1500).description('整段可见字数 > 该值不分条（QQ 无合并转发，整条发送）'),
+  intervalMethod: Schema.union(['random', 'log']).default('random').description('条间间隔算法'),
+  intervalMin: Schema.number().min(0).default(2.5).description('random 模式最小间隔(秒)，风控敏感参数'),
+  intervalMax: Schema.number().min(0).default(5).description('random 模式最大间隔(秒)'),
+  logBase: Schema.number().min(1.01).default(2.6).description('log 模式底数（越大越平缓，仅 intervalMethod=log 生效）'),
+  logJitter: Schema.number().min(0).default(0.5).description('log 模式随机抖动上限(秒)'),
+  maxBubbles: Schema.number().min(1).default(3).description('单轮最多气泡数（QQ 同一来源消息被动回复限额 4 次）'),
+});
+
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appId: Schema.string().default('').description('QQ 机器人 AppID'),
   appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
@@ -119,6 +144,22 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
+  segmentedReply: SegmentedReplySchema.default({
+    enable: false,
+    onlyLlmResult: true,
+    splitMode: 'regex',
+    regex: '.*?(?:[。！？!?~…]+|\\n+)|.+$',
+    splitWords: ['。', '？', '！', '~', '…'],
+    contentCleanupRule: '[。]+$',
+    wordsCountThreshold: 150,
+    forwardThreshold: 1500,
+    intervalMethod: 'random',
+    intervalMin: 2.5,
+    intervalMax: 5,
+    logBase: 2.6,
+    logJitter: 0.5,
+    maxBubbles: 3,
+  }).description('分条发送（多气泡）：把一段回复拆成多条 QQ 消息'),
   sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)'),
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),

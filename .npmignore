@@ -7,4 +7,5 @@ docs/
 .env.example
 .dsh-sessions/
 *.tsbuildinfo
+*.patch
 node_modules/
