@@ -14,7 +14,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, type ReactNode } from 'react';
-import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
+import { BIND_STATE_PATH, toClientUrl } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 
@@ -228,7 +228,7 @@ function watchAndPrompt(right: SidebarRightLike | undefined): () => void {
       return;
     }
     try {
-      const res = await fetch(BIND_STATE_PATH, { cache: 'no-store' });
+      const res = await fetch(toClientUrl(BIND_STATE_PATH), { cache: 'no-store' });
       if (res.ok) {
         const body = (await res.json()) as { phase?: string };
         if (body.phase === 'waiting' && !opened && right !== undefined) {

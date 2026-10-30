@@ -15,7 +15,7 @@
  * 类字段走 profile patch / 环境变量。
  */
 import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { BIND_CONFIG_PATH, toClientUrl } from '../shared/bind-protocol.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -264,7 +264,7 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
 
   useEffect(() => {
     let stopped = false;
-    void fetch(BIND_CONFIG_PATH, { cache: 'no-store' })
+    void fetch(toClientUrl(BIND_CONFIG_PATH), { cache: 'no-store' })
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as { config: ConfigWire };
@@ -305,7 +305,7 @@ export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
     }
 
     setBusy(true);
-    void fetch(BIND_CONFIG_PATH, {
+    void fetch(toClientUrl(BIND_CONFIG_PATH), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(changed),
