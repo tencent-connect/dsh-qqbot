@@ -102,6 +102,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
+| `groupToolAllow` | string[] | `[]` | Group-chat tool allowlist: when non-empty, group sessions keep only these tools (empty = unrestricted) |
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min |
@@ -120,6 +121,22 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.c2cAllow` | string[] | `[]` | Direct-chat allowlist (user openid) |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
 | `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
+
+### Group-chat tool allowlist (groupToolAllow)
+
+A group session is shared by the whole group (`sessionKey` only carries `group_openid`), so every member drives the same agent. `access.groupMode` decides *which groups may talk*, not *which tools a group may use*.
+
+When `groupToolAllow` is non-empty, the group session's tool surface is narrowed to that list (fail-closed: tools outside it are invisible to the model and cannot be called); direct chats are unaffected. Empty (default) keeps the previous behaviour.
+
+```yaml
+groupToolAllow:
+  - web_search
+  - read
+```
+
+Names are the host's registered tool names (`bash`, `read`, `write`, `mcp__xxx__yyy`, ...); a typo only hides that tool. The policy is re-applied when the session is rebuilt via `/new` or fork.
+
+This narrows visibility; it is not a permission system — allowlisted tools still run under the host's own approval and sandbox rules.
 
 ### Rich media (media)
 

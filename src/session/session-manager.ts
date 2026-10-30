@@ -24,6 +24,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
+import { applyGroupToolAllow, resolveGroupToolAllow } from './group-tools.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
@@ -31,6 +32,7 @@ import type {
   DshAgent,
   DshAgentHandle,
   DshAgentRegistry,
+  ToolScopeLike,
   AgentPresetsLike,
   PresetComposition,
   PresetEntry,
@@ -349,6 +351,7 @@ export class SessionManager {
     record.agentPreset = composed.agentPreset;
     record.lastActivity = Date.now();
 
+    this.restrictGroupTools(record.agent, record.scope);
     void oldHandle.dispose().catch(() => {});
     this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
@@ -482,6 +485,25 @@ export class SessionManager {
     }
   }
 
+  /**
+   * 群聊会话按 groupToolAllow 收敛工具可见范围。
+   *
+   * 群会话是整群共享的（sessionKey 只含 group_openid），名单非空时把工具收窄到
+   * 名单内，避免群里任何人凭一句话就驱动 bash / 文件读写 / MCP。未配置时原样返回。
+   */
+  private restrictGroupTools(agent: DshAgent, scope: ChatScope): void {
+    const allow = resolveGroupToolAllow(scope, this.config.groupToolAllow);
+    if (!allow) return;
+    const applied = applyGroupToolAllow(
+      agent.ctx as Context & { readonly tools?: ToolScopeLike },
+      allow,
+      (message) => this.logger.warn(`im-qqbot: ${message}`),
+    );
+    if (applied) {
+      this.logger.info(`group tools restricted: allow=${allow.length} names=${allow.join(',')}`);
+    }
+  }
+
   /** 获取或恢复或创建会话（get → resume → create）；同 key 并发合并为一次 */
   async getOrCreate(
     scope: ChatScope,
@@ -589,6 +611,7 @@ export class SessionManager {
       agentPreset,
     };
 
+    this.restrictGroupTools(agent, scope);
     this.sessions.set(key, record);
     return record;
   }
