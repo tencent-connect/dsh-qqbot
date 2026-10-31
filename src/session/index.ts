@@ -5,6 +5,11 @@
  */
 export { SessionManager } from './session-manager.ts';
 export { IdleEvictor } from './idle-evictor.ts';
+export {
+  qqChannelOf,
+  registerQqChannelProjection,
+  type QqChannelState,
+} from './channel-declaration.ts';
 export type {
   AgentSetup,
   SessionEventLike,
