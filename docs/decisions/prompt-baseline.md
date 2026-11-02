@@ -2,6 +2,7 @@
 
 > 只读调研，未改任何代码。基线日期：2026-11-01。
 > 仓库根：`projects/agent-research/deepseek-harness-plugins/dsh-qqbot-upstream-compatible`
+> 本文保留重构前的历史基线，源码行号、旧提示词上限与延迟生效行为不代表当前实现。当前补充提示词和人设每步读取最新值，群聊与私聊补充提示词各上限 80,000 个字符；使用方式见[默认配置与消息记录](../guides/settings-and-message-records.md)，实现入口见[提示词注册](../../src/prompt/install.ts)。
 
 ## 现状结构树
 

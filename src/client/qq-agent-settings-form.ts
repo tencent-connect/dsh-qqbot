@@ -1,6 +1,6 @@
 import { createElement as h, useState, type ChangeEvent, type ReactNode } from 'react';
 import { Button, Input, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { QQAgentSettings, QQExecutionSettings } from '../shared/agent-settings.ts';
+import { QQ_EXTRA_PROMPT_MAX_CHARS, type QQAgentSettings, type QQExecutionSettings } from '../shared/agent-settings.ts';
 import type { ConversationSandboxMode, SlashCommandDescriptor, ToolCatalogEntry } from '../shared/conversation-protocol.ts';
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { defaultModelLabel, defaultPresetLabel, findModel, modelChoiceId, modelLabel, presetLabel } from './host-selectors.ts';
@@ -215,7 +215,7 @@ export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false
     })(),
     ((): ReactNode => {
       // 补充提示词按 scope 分离：会话设置只显示当前 scope；新对话默认值两个都显示。
-      const field = (key: 'promptGroup' | 'promptDirect', label: string): ReactNode => h('label', { className: 'imqc-field', key }, h('span', null, label), h('textarea', { rows: 4, value: settings[key], disabled, maxLength: 20_000, 'aria-label': label, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...settings, [key]: event.target.value }) }));
+      const field = (key: 'promptGroup' | 'promptDirect', label: string): ReactNode => h('label', { className: 'imqc-field', key }, h('span', null, label), h('textarea', { rows: 4, value: settings[key], disabled, maxLength: QQ_EXTRA_PROMPT_MAX_CHARS, 'aria-label': label, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...settings, [key]: event.target.value }) }));
       return scope === 'defaults' ? [field('promptGroup', '群聊补充提示词'), field('promptDirect', '私聊补充提示词')] : (chatScope === 'group' ? field('promptGroup', '群聊补充提示词') : field('promptDirect', '私聊补充提示词'));
     })(),
     h('div', { className: 'imqc-inline' }, h('span', null, '斜杠命令'), h(Switch, { label: '斜杠命令', checked: settings.slashCommands, disabled, onChange: slashCommands => onChange({ ...settings, slashCommands }) })),

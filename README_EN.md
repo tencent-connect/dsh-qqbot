@@ -75,7 +75,7 @@ Open QQ Bots for a dedicated sidebar grouped by group chats and private chats. S
 
 Open Settings to manage the account, access rules and defaults for new peers. Change credentials and Unbind remain visible. New-peer defaults contain the Agent preset, native execution permission, model, extra prompt, working directory and slash-command switch. Changes apply only to peers admitted afterward.
 
-Each peer has its own settings. Model and permission changes apply while idle. Agent preset, working directory and extra prompt changes apply to the next QQ Session. The phone `/preset` command still starts a new Session and preserves history.
+Each peer has its own settings. Model and permission changes apply while idle. Saved extra prompts and persona changes take effect when the prompt is assembled at each step. Group and private-chat extra prompts are configured separately, with an 80,000-character limit each. Only Agent preset and working directory changes require a new QQ Session. The phone `/preset` command still starts a new Session and preserves history.
 
 Unsaved settings drafts stay in the current browser tab and never include AppSecret. The UI follows DSH's light and dark themes. The native selectors have been verified with DSH `0.2.2-alpha.2`; older client seed tables and directory APIs are untested.
 
@@ -130,7 +130,7 @@ Web and QQ share the current Session and native Inbox. Web input replies only on
 
 ### Independent settings for each group or contact
 
-The native QQ settings view has only Settings and Message records. Edit reception, alias, Agent configuration and record count. Historical Sessions appear under their peer in the left sidebar.
+The native QQ settings view has only Settings and Message records. Edit reception, alias and Agent configuration. Message records are kept indefinitely and can be cleared manually. Historical Sessions appear under their peer in the left sidebar.
 
 Native execution uses the selected Agent's actual tools, sandbox and approval policy. Custom tools provide searchable multi-selection and restrict that toolset further. Existing resource and approval constraints remain until the owner explicitly confirms replacing them. Read-only does not confine all reads to the working directory.
 
@@ -138,7 +138,7 @@ Web administration uses DSH authentication. QQ owners may use slash commands eve
 
 ### Recording and model background
 
-Newly admitted groups and private chats retain the latest 1,000 logical QQ inbound and outbound messages by default. Existing day-based retention remains until a record count is explicitly saved. Recording, background selection and automatic replies are independent. A recording change does not grant tools or cancel an Agent turn. Existing unexpired records remain queryable after recording is disabled.
+QQ inbound and outbound text is kept indefinitely, with no automatic cleanup. Use Clear message records in the peer's Message records view to remove recorded text manually; message IDs remain for deduplication. Recording, background selection and automatic replies are independent. Clearing records does not delete native Session history or change Agent tool permissions.
 
 Recent background defaults to all three limits of 10 messages, 10 minutes and 4,000 characters. History queries require an explicit `qqbot_group_history` grant. Unapproved and disabled peers retain discovery identity without saving new text. Only events actually pushed by QQ can be recorded.
 

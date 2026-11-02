@@ -32,21 +32,25 @@ An admitted, deduplicated ordinary message can supply a reply source without men
 
 ## Group background and permissions
 
-Passive messages do not start a model or become synthetic native user/message events. Newly admitted groups and private chats retain the latest 1,000 inbound and outbound records. Existing peers retain their previous recording rule until a count is explicitly saved. Recording is independent of model background selection and reply triggering. Turning it off stops new recorded text while existing unexpired records remain queryable. Actual requests, selected background, replies and tool activity use native Session persistence.
+QQ inbound and outbound text is kept indefinitely, with no automatic cleanup. Use Clear message records in the peer's Message records view to remove recorded text manually; message IDs remain for deduplication. Recording is independent of model background selection, reply triggering and permissions. Passive messages do not start a model or become synthetic native user/message events. Actual requests, selected background, replies and tool activity use native Session persistence.
 
 Each group chooses the background available to its Agent. Saving records does not grant tools; Agent queries also require `qqbot_group_history`, while Web record queries do not start a model. Recent background defaults to all three bounds of 10 messages, 10 minutes and 4,000 characters. Consumption advances only after confirmed admission. `/new` starts a new background boundary.
 
 Account access and the peer switch control admission, the recording setting controls records, and the reply switch controls Agent triggering. The account mention rule initializes newly discovered groups, not existing groups. Unapproved or disabled peers retain discovery identity and previous history without saving new text. Disabling also restricts QQ sends and related tools. The bot can use only messages actually pushed by QQ; local configuration does not grant full group-message access.
 
-Global defaults are copied when each new peer is first admitted. The peer editor contains reception, alias, Agent preset, model, native permission, prompt, working directory, slash commands and message count. Native execution uses the Agent's actual tools and approval policy. Custom tools restrict that set by stable tool identity. Existing resource and extra-approval limits require explicit confirmation before replacement. Read-only does not confine reads to the workspace. Child and outbound guards remain effective.
+Global defaults are copied when each new peer is first admitted. The peer editor contains reception, alias, Agent preset, model, native permission, extra prompt, working directory and slash commands. Message records are kept indefinitely and can be cleared manually.
+
+Saved extra prompts and persona changes take effect when the prompt is assembled at each step. Group and private-chat extra prompts are configured separately, with an 80,000-character limit each. Only Agent preset and working directory changes require a new Session.
+
+Native execution uses the Agent's actual tools and approval policy. Custom tools restrict that set by stable tool identity. Existing resource and extra-approval limits require explicit confirmation before replacement. Read-only does not confine reads to the workspace. Child and outbound guards remain effective.
 
 `/model` keeps context. `/preset` creates a new Session while idle. `/new`, `/reset` and `/clear` retain history. `/stop` stops work and keeps native queued input. Group administrators do not automatically become bot controllers.
 
 ## Rotation and migration
 
-Sessions rotate at a safe idle boundary without native queued inputs after seven days or 1,000 QQ messages by default. Native history remains. This build does not physically delete it. Record retention cleans plugin inbound and outbound text and its query copies. Minimal operation IDs and terminal results remain to prevent replay. Native Session history is retained separately.
+Sessions rotate at a safe idle boundary without native queued inputs after seven days or 1,000 QQ messages by default. Native history remains. This build does not physically delete it. Message records are kept indefinitely and can be cleared manually. Minimal operation IDs and terminal results remain to prevent replay. Native Session history is retained separately.
 
-Binding, reliable Session associations, model preferences, group policies and former standalone analysis Sessions remain. Old group records use a read-only compatibility view. No native history is backfilled and no tasks are replayed. Existing recent and interaction peers start recording from the migration time with a seven-day limit, while their background policy and tool grants remain unchanged. The UI shows the recording start time. Old record-mode peers retain their configured limit.
+Binding, reliable Session associations, model preferences, group policies and former standalone analysis Sessions remain. Old group records use a read-only compatibility view. No native history is backfilled and no tasks are replayed. Older records are shown under their historical rules; new records are kept indefinitely and can be cleared manually. Background policies and tool grants remain unchanged.
 
 Mem0, Qdrant, memory tools and automatic extraction are absent. Old memory configuration is ignored and obsolete tool grants are removed. Existing backend data and historical tool results are not deleted or rewritten.
 

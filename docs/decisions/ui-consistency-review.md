@@ -2,6 +2,8 @@
 
 日期：2026-10-31。范围：QQ 客户端全部设置表面及相关公开宿主控件；对照未修改的 DSH Host。
 
+> 历史审查快照：下文的问题、源码路径与行号描述审查当时的实现；部分文件现已删除或拆分，因此旧源码位置保留为文本引用。当前界面与设置行为见[QQ 会话与 DSH 原生聊天](../guides/native-sessions.md)。
+
 本审查为只读检查（实现与浏览器），未改动代码、配置、权限或绑定。以下整改项按结论落实。
 
 ## 总体结论
@@ -16,15 +18,15 @@
 
 | 页面 | 来源与数量 | 问题及建议 |
 | --- | --- | --- |
-| 侧栏工作区弹窗 | [qq-sidebar.ts:161](../../../src/client/qq-sidebar.ts#L161)，1处 | 系统 select；工作区标题未本地化。复用原生 Menu 组合与公共显示名 helper。 |
-| 对话概览 | [conversation-panel.ts:138](../../../src/client/conversation-panel.ts#L138)，2处 | Agent 预设、工作区均为 select；与侧栏工作区操作有独立表单实现。 |
-| 群策略 | [conversation-policy.ts:74](../../../src/client/conversation-policy.ts#L74)，7处 | 模板、复制配置、分类批量、逐工具权限、执行沙箱、默认权限、上下文模式。 |
-| 全局模型与预设 | [config-selectors.ts:57](../../../src/client/config-selectors.ts#L57) | 已使用公共 Menu，具备 portal、selectedId、锚点宽度及独立列表类名，可作为插件统一选择器基础；触发按钮仍可进一步复用公共 Button。 |
-| 绑定与全局配置 | [bind-page.ts:281](../../../src/client/bind-page.ts#L281)、[config-panel.ts:81](../../../src/client/config-panel.ts#L81) | 自写按钮、输入、开关与分段控件，尺寸和焦点样式与对话表单不同。解绑还有 window.confirm，不能跟随原生覆盖层。 |
-| 所有者、历史、换新、群记录 | [conversation-panel.ts:46](../../../src/client/conversation-panel.ts#L46)、[conversation-settings.ts:13](../../../src/client/conversation-settings.ts#L13) | 原生按钮与手写数字、搜索、textarea、checkbox混用，应统一字段外观与状态。 |
-| 抽屉与发送预览 | [conversation-panel.ts:62](../../../src/client/conversation-panel.ts#L62) | 自制 Dialog、焦点循环、Escape 和层级，与侧栏公共 Modal 并存。 |
+| 侧栏工作区弹窗 | `src/client/qq-sidebar.ts:161`，1处 | 系统 select；工作区标题未本地化。复用原生 Menu 组合与公共显示名 helper。 |
+| 对话概览 | `src/client/conversation-panel.ts:138`，2处 | Agent 预设、工作区均为 select；与侧栏工作区操作有独立表单实现。 |
+| 群策略 | `src/client/conversation-policy.ts:74`，7处 | 模板、复制配置、分类批量、逐工具权限、执行沙箱、默认权限、上下文模式。 |
+| 全局模型与预设 | `src/client/config-selectors.ts:57` | 已使用公共 Menu，具备 portal、selectedId、锚点宽度及独立列表类名，可作为插件统一选择器基础；触发按钮仍可进一步复用公共 Button。 |
+| 绑定与全局配置 | `src/client/bind-page.ts:281`、`src/client/config-panel.ts:81` | 自写按钮、输入、开关与分段控件，尺寸和焦点样式与对话表单不同。解绑还有 window.confirm，不能跟随原生覆盖层。 |
+| 所有者、历史、换新、群记录 | `src/client/conversation-panel.ts:46`、`src/client/conversation-settings.ts:13` | 原生按钮与手写数字、搜索、textarea、checkbox混用，应统一字段外观与状态。 |
+| 抽屉与发送预览 | `src/client/conversation-panel.ts:62` | 自制 Dialog、焦点循环、Escape 和层级，与侧栏公共 Modal 并存。 |
 
-`.imqc` 输入使用1px边框、7px/9px padding和bg-base；账号配置另写0.5px边框、34px高度与bg-layer-3。两套规格分别位于 [conversation-styles.ts:11](../../../src/client/conversation-styles.ts#L11) 和 [config-panel.ts:81](../../../src/client/config-panel.ts#L81)。不能把两者都使用语义颜色当作原生样式已经一致。
+`.imqc` 输入使用1px边框、7px/9px padding和bg-base；账号配置另写0.5px边框、34px高度与bg-layer-3。两套规格分别位于 `src/client/conversation-styles.ts:11` 和 `src/client/config-panel.ts:81`。不能把两者都使用语义颜色当作原生样式已经一致。
 
 自定义树节点按钮属于导航行，可保留。需要删除的是重复控件外观与宽泛 CSS 覆盖，不是机械替换所有 button/textarea。
 
@@ -52,9 +54,9 @@ Menu 在抽屉中应使用 portal、锚点最小宽度和独立 listClassName，
 
 ## 需同时处理的表单语义问题
 
-1. **权限确认文案错误。** [conversation-policy.ts:178](../../../src/client/conversation-policy.ts#L178) 将所有非read-only模式显示为“工作区可写”，而目录实际包含完全权限等选项。预览必须使用当前权限目录的显示名，不改变真实提交值。
-2. **前后端约束不一致。** [UI字符上限:165](../../../src/client/conversation-policy.ts#L165) 为40,000，[服务端:95](../../../src/policy/validation.ts#L95) 为32,000。默认permission与执行sandbox分别在两个tab修改，服务端又[要求已知沙箱模式一致:98](../../../src/policy/validation.ts#L98)。表单需基于统一约束派生有效状态，避免用户保存时才被拒绝。
-3. **所有者未就绪被显示成零值。** [conversation-panel.ts:53](../../../src/client/conversation-panel.ts#L53) 将尚无目录快照视为0个，并允许打开空编辑器及提交。读取中/失败应与真正空列表区分，禁止用未就绪草稿覆盖名单。该失效分支为静态发现，本轮未注入网络故障验证。
+1. **权限确认文案错误。** `src/client/conversation-policy.ts:178` 将所有非read-only模式显示为“工作区可写”，而目录实际包含完全权限等选项。预览必须使用当前权限目录的显示名，不改变真实提交值。
+2. **前后端约束不一致。** UI字符上限（`src/client/conversation-policy.ts:165`）为40,000，服务端上限（`src/policy/validation.ts:95`）为32,000。默认permission与执行sandbox分别在两个tab修改，服务端又要求已知沙箱模式一致（`src/policy/validation.ts:98`）。表单需基于统一约束派生有效状态，避免用户保存时才被拒绝。
+3. **所有者未就绪被显示成零值。** `src/client/conversation-panel.ts:53` 将尚无目录快照视为0个，并允许打开空编辑器及提交。读取中/失败应与真正空列表区分，禁止用未就绪草稿覆盖名单。该失效分支为静态发现，本轮未注入网络故障验证。
 4. **保存中行为不统一。** 全局配置有fieldset disabled，策略表单大部分字段则仍可编辑。需要统一忙态，明确保存的草稿版本及失败后的保留行为。
 5. **自制tabs缺少原生键盘契约。** 一级和二级tabs需使用公共SegmentedTabs或补齐方向键、roving tabindex、tabpanel关联，不能只有role与选中颜色。
 

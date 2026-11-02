@@ -13,7 +13,7 @@
  *    验证本插件条目正确、其他条目集合不变，失败则回滚原内容。
  */
 import { resolve } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { parseDocument, isMap, isSeq, isScalar, YAMLMap, type Document, type YAMLSeq } from 'yaml';
 import type { Logger } from '../types.ts';
 
@@ -52,6 +52,17 @@ interface EditContext {
 /** 编辑结果：false = 文档无需变更（幂等，不写不触 mtime）；true = 变更或强制写回 */
 type EditResult = boolean;
 
+/** Restrict stale temporary files before writing any profile credentials. */
+function writePrivateFile(path: string, content: string): void {
+  const fd = openSync(path, 'w', 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, content, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * 对 cordis.patch.yml 做一次「读 → 原地编辑 → 原子写 → 验证」的事务。
  *
@@ -82,7 +93,10 @@ function editProfilePatch(
 
     // 2. 原地编辑
     const changed = applyEdit(doc, edit);
-    if (!changed && !options.force) return true;
+    if (!changed && !options.force) {
+      chmodSync(patchPath, 0o600);
+      return true;
+    }
 
     const next = doc.toString({ lineWidth: 0 });
 
@@ -97,7 +111,7 @@ function editProfilePatch(
     // 4. 原子写：同目录临时文件 + rename（同分区保证原子）
     const tmpPath = `${patchPath}.imqqbot.tmp`;
     try {
-      writeFileSync(tmpPath, next, 'utf8');
+      writePrivateFile(tmpPath, next);
       renameSync(tmpPath, patchPath);
     } catch (err) {
       try { unlinkSync(tmpPath); } catch { /* 临时文件可能不存在 */ }
@@ -116,8 +130,13 @@ function editProfilePatch(
     } catch (err) {
       log.warn(`写入验证失败，回滚 cordis.patch.yml: ${err instanceof Error ? err.message : String(err)}`);
       const rollback = `${patchPath}.imqqbot.rollback`;
-      writeFileSync(rollback, before, 'utf8');
-      renameSync(rollback, patchPath);
+      try {
+        writePrivateFile(rollback, before);
+        renameSync(rollback, patchPath);
+      } catch (rollbackError) {
+        try { unlinkSync(rollback); } catch { /* 临时文件可能不存在 */ }
+        throw rollbackError;
+      }
       return false;
     }
     return true;

@@ -2,6 +2,8 @@
 
 日期：2026-10-31。范围为 QQ 插件全部用户流程，承接[原生组件一致性审查](ui-consistency-review.md)。审查为只读检查，不涉及宿主改动。
 
+> 历史审查快照：下文的问题、源码路径与行号描述审查当时的实现；部分文件现已删除或拆分，因此旧源码位置保留为文本引用。当前设置与记录行为见[默认配置与消息记录](../guides/settings-and-message-records.md)，其中补充提示词和人设已改为每步现读，记录默认全部保留并手动清空。
+
 审查基于 QQ 插件源码与浏览器实现核对。
 
 ## 结论与优先级
@@ -12,18 +14,18 @@
 
 | 优先顺序 | 触发与实际结果 | 来源 | 证据与最小修正 |
 | --- | --- | --- | --- |
-| 1 | v1草稿未保存后关闭，另一处v2撤销工具；重开旧草稿却拿v2作基线，确认会重新提交旧授权且无冲突提示 | [conversation-policy.ts:35](../../../src/client/conversation-policy.ts#L35)、[提交:183](../../../src/client/conversation-policy.ts#L183) | 实际组件配离线hooks替身复现 read=allow、expectedVersion=2。缓存草稿同时保存原基线及版本；只有明确重新载入才能更新基线。 |
-| 2 | QQ触发消息在进入处理前持有reservation，自动换新又要求reservation为0，达到天数/条数也不会通过正常触发路径换新 | [gate:51](../../../src/gateway/conversation-gate.ts#L51)、[换新判断:85](../../../src/runtime/conversation-service.ts#L85) | 真实gate配离线service探针：达阈值下一条触发remove=0，释放预约的对照remove=1。修当前消费预约与后续排队预约的安全边界，补入口回归。 |
-| 3 | native工作能力模式隐藏沙箱字段，修改默认权限却不更新对应沙箱；选择工作区可写/完全权限会被后端拒绝，完全权限还无对应资源下拉项 | [UI:118](../../../src/client/conversation-policy.ts#L118)、[权限:149](../../../src/client/conversation-policy.ts#L149)、[后端:98](../../../src/policy/validation.ts#L98) | 纯函数离线探针确认拒绝。统一派生有效权限与沙箱，不能让用户寻找隐藏字段手动配对。 |
-| 4 | 停用/准入先更新policy，再写profile；第二步失败返回400，但前一步已改变状态，可能还取消任务 | [conversation-routes.ts:45](../../../src/runtime/conversation-routes.ts#L45) | 实际路由配替身service、临时损坏profile复现400且receiveEnabled=false/version=2；持久化顺序由真实service源码确认。处理部分完成状态；不能用泛化失败掩盖已撤权，也不能声称恢复JSON便能恢复已取消任务。 |
-| 5 | 发送记录只首次读取；之后发送完成不更新。失败后按钮仍可点击，但同operationId只返回原失败结果，不是重试 | [DeliveryPanel:150](../../../src/client/conversation-panel.ts#L150)、[确认:184](../../../src/client/conversation-panel.ts#L184)、[幂等:439](../../../src/runtime/conversation-service.ts#L439) | 静态链路与现有幂等测试确认；组件异步场景尚未运行。增加刷新/订阅；本次发送终态明确结束，保留unknown不自动重试。显示分段已接受数，不能把部分发送等同全部失败。 |
-| 6 | 表单允许提交不符合真实约束的值，权限确认还低估授权范围 | [字符数:165](../../../src/client/conversation-policy.ts#L165)、[权限文案:178](../../../src/client/conversation-policy.ts#L178)、[后端上限:95](../../../src/policy/validation.ts#L95) | UI上限40000而后端32000，离线校验已复现。非只读模式都显示工作区可写，应使用目录真实名称。 |
+| 1 | v1草稿未保存后关闭，另一处v2撤销工具；重开旧草稿却拿v2作基线，确认会重新提交旧授权且无冲突提示 | `src/client/conversation-policy.ts:35`、`src/client/conversation-policy.ts:183` | 实际组件配离线hooks替身复现 read=allow、expectedVersion=2。缓存草稿同时保存原基线及版本；只有明确重新载入才能更新基线。 |
+| 2 | QQ触发消息在进入处理前持有reservation，自动换新又要求reservation为0，达到天数/条数也不会通过正常触发路径换新 | `src/gateway/conversation-gate.ts:51`、`src/runtime/conversation-service.ts:85` | 真实gate配离线service探针：达阈值下一条触发remove=0，释放预约的对照remove=1。修当前消费预约与后续排队预约的安全边界，补入口回归。 |
+| 3 | native工作能力模式隐藏沙箱字段，修改默认权限却不更新对应沙箱；选择工作区可写/完全权限会被后端拒绝，完全权限还无对应资源下拉项 | `src/client/conversation-policy.ts:118`、`src/client/conversation-policy.ts:149`、`src/policy/validation.ts:98` | 纯函数离线探针确认拒绝。统一派生有效权限与沙箱，不能让用户寻找隐藏字段手动配对。 |
+| 4 | 停用/准入先更新policy，再写profile；第二步失败返回400，但前一步已改变状态，可能还取消任务 | `src/runtime/conversation-routes.ts:45` | 实际路由配替身service、临时损坏profile复现400且receiveEnabled=false/version=2；持久化顺序由真实service源码确认。处理部分完成状态；不能用泛化失败掩盖已撤权，也不能声称恢复JSON便能恢复已取消任务。 |
+| 5 | 发送记录只首次读取；之后发送完成不更新。失败后按钮仍可点击，但同operationId只返回原失败结果，不是重试 | `src/client/conversation-panel.ts:150`、`src/client/conversation-panel.ts:184`、`src/runtime/conversation-service.ts:439` | 静态链路与现有幂等测试确认；组件异步场景尚未运行。增加刷新/订阅；本次发送终态明确结束，保留unknown不自动重试。显示分段已接受数，不能把部分发送等同全部失败。 |
+| 6 | 表单允许提交不符合真实约束的值，权限确认还低估授权范围 | `src/client/conversation-policy.ts:165`、`src/client/conversation-policy.ts:178`、`src/policy/validation.ts:95` | UI上限40000而后端32000，离线校验已复现。非只读模式都显示工作区可写，应使用目录真实名称。 |
 
 此外，所有者未加载时被显示为0并可打开空编辑器，策略输入在保存期间仍可改，详见上一轮审查。前者的故障状态尚未做浏览器注入，后者未证实丢失草稿，不能扩大为已发生的数据丢失。
 
 ### 行为本身可保留，但描述错误
 
-- `/preset reset`实际创建新Session，帮助却承诺保留当前上下文：[help.ts:49](../../../src/commands/help.ts#L49)与[session-manager.ts:350](../../../src/session/session-manager.ts#L350)。旧历史仍在，不等于新会话继续携带旧上下文。
+- `/preset reset`实际创建新Session，帮助却承诺保留当前上下文：`src/commands/help.ts:49`与`src/session/session-manager.ts:350`。旧历史仍在，不等于新会话继续携带旧上下文。
 - `processingTimeoutMs`目前覆盖SDK入站处理，不能宣称是原生Agent整轮生成的超时上限。原生输入确认持久化后enqueue已返回，SDK watchdog随next结束；没有对应的Agent取消连接。该项为静态链路发现，未跑计时场景。
 - 在当前工作区重新选择相同工作区，服务按无操作处理，但按钮仍承诺新建。应禁用当前项，或统一“切换并新建”的实际语义。
 - `/bot-status`与`/bot-version`主要读热缓存，重启/闲置回收后的“无活跃会话/默认模型”不代表持久会话不存在。应恢复读取或明确区分缓存状态与当前QQ映射。

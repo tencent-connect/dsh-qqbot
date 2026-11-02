@@ -1,6 +1,8 @@
 import type { ConversationSandboxMode } from './conversation-protocol.ts';
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 
+export const QQ_EXTRA_PROMPT_MAX_CHARS = 80_000;
+
 export type QQExecutionSettings =
   | { kind: 'native'; permission: ConversationSandboxMode }
   | { kind: 'custom'; permission: ConversationSandboxMode; tools: string[] };
@@ -36,6 +38,10 @@ function text(value: unknown, field: string, max: number): string {
   if (typeof value !== 'string' || value.length > max || value.includes('\0')) throw new TypeError(`${field} 无效`);
   return value;
 }
+function extraPrompt(value: unknown, field: string): string {
+  if (typeof value === 'string' && value.length > QQ_EXTRA_PROMPT_MAX_CHARS) throw new TypeError(`${field}不能超过 ${QQ_EXTRA_PROMPT_MAX_CHARS} 个字符`);
+  return text(value, field, QQ_EXTRA_PROMPT_MAX_CHARS);
+}
 
 export function validateQQAgentSettings(value: unknown): QQAgentSettings {
   const data = object(value);
@@ -67,9 +73,9 @@ export function validateQQAgentSettings(value: unknown): QQAgentSettings {
   if (typeof data.slashCommands !== 'boolean') throw new TypeError('QQ 斜杠命令开关无效');
   const defaultEffort = data.reasoningEffort === undefined || data.reasoningEffort === null ? undefined : text(data.reasoningEffort, '推理强度', 64).trim();
   // 迁移期：旧 prompt 归入当前 scope 由调用方处理；校验层把旧 prompt 同时落到两个字段可见处由上层决定。
-  const legacyPrompt = data.prompt === undefined ? undefined : text(data.prompt, '提示词', 80000);
-  const promptGroup = data.promptGroup === undefined ? (legacyPrompt ?? '') : text(data.promptGroup, '群聊补充提示词', 80000);
-  const promptDirect = data.promptDirect === undefined ? (legacyPrompt ?? '') : text(data.promptDirect, '私聊补充提示词', 80000);
+  const legacyPrompt = data.prompt === undefined ? undefined : extraPrompt(data.prompt, '提示词');
+  const promptGroup = data.promptGroup === undefined ? (legacyPrompt ?? '') : extraPrompt(data.promptGroup, '群聊补充提示词');
+  const promptDirect = data.promptDirect === undefined ? (legacyPrompt ?? '') : extraPrompt(data.promptDirect, '私聊补充提示词');
   return { preset: text(data.preset, 'Agent 预设', 256).trim(), model, ...(defaultEffort ? { reasoningEffort: defaultEffort as ReasoningEffortId } : {}), promptGroup, promptDirect, cwd, execution: checkedExecution, slashCommands: data.slashCommands };
 }
 

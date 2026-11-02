@@ -4,13 +4,12 @@
 export const EXTRA_SECTION_NAME = 'qqbot:extra';
 export const EXTRA_ORDER = 460;
 
-export const EXTRA_MAX_CHARS = 20000;
+export { QQ_EXTRA_PROMPT_MAX_CHARS as EXTRA_MAX_CHARS } from '../shared/agent-settings.ts';
 
 export interface ScopePrompts { group?: string; direct?: string }
 
-/** 取当次场景的补充提示词；先按场景筛选再截断，避免另一场景内容占预算。 */
+/** 取当次场景的补充提示词；长度已在设置写入时校验，注入时保留完整内容。 */
 export function selectExtraPrompt(prompts: ScopePrompts, scope: import('./scope.ts').QQScope): string {
   const raw = (scope === 'group' ? prompts.group : prompts.direct) ?? '';
-  const text = raw.trim();
-  return text.length > EXTRA_MAX_CHARS ? text.slice(0, EXTRA_MAX_CHARS) : text;
+  return raw.trim();
 }

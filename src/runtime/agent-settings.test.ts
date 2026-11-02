@@ -9,6 +9,7 @@ import { setApprovalPolicy, type ApprovalPolicy } from '@deepseek-ai/dsh-user-ap
 import { ConfigSchema } from '../config.ts';
 import type { SessionManager } from '../session/session-manager.ts';
 import type { SessionRecord } from '../session/types.ts';
+import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 import { ConversationService } from './conversation-service.ts';
 
 const roots: string[] = [];
@@ -46,21 +47,34 @@ function fixture() {
 describe('idle per-peer Agent settings', () => {
   it('applies model and native setters; extra prompt applies immediately while cwd/preset defer to the next Session', async () => {
     const f = fixture(); const before = f.service.requireEntry(f.key);
-    const settings = { ...before.settings!, model: { provider: 'p', model: 'new' }, promptGroup: 'next prompt', cwd: '/tmp/next-cwd', preset: 'chosen', execution: { kind: 'native' as const, permission: 'workspace-write' as const }, slashCommands: false };
+    const tail = 'LAST_GROUP_INSTRUCTION';
+    const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
+    const settings = { ...before.settings!, model: { provider: 'p', model: 'new' }, promptGroup: prompt, promptDirect: 'PRIVATE_SCOPE_ONLY', cwd: '/tmp/next-cwd', preset: 'chosen', execution: { kind: 'native' as const, permission: 'workspace-write' as const }, slashCommands: false };
     const notice = await f.service.saveSettings(f.key, before.policy.version, settings, 'alias', true);
     expect(notice).toContain('新会话生效');
     expect(f.select).toHaveBeenCalledExactlyOnceWith(settings.model);
     expect(f.session.snapshotEvents()).toContainEqual(expect.objectContaining({ type: 'sandbox/mode', data: { mode: 'workspace-write' } }));
     expect(f.session.snapshotEvents()).toContainEqual(expect.objectContaining({ type: 'approval/policy', data: { policy: 'ask' } }));
     // 补充提示词即时生效：保存后当前 session 的人设 prompt 立刻反映新值。
-    expect(f.service.rolePrompt(f.session.id)).toContain('next prompt');
+    expect(f.service.rolePrompt(f.session.id)).toContain(prompt);
+    expect(f.service.rolePrompt(f.session.id)).not.toContain('PRIVATE_SCOPE_ONLY');
     expect(f.service.requireEntry(f.key).currentSessionId).toBe(f.session.id);
     expect(f.service.requireEntry(f.key).settings).toEqual(settings);
     expect(f.agent.cancel).not.toHaveBeenCalled();
     expect(f.service.slashAllowed('group', 'g', 'actor')).toBe(false);
     f.service.store.setOwnerIds(['superadmin']);
     expect(f.service.slashAllowed('group', 'g', 'superadmin')).toBe(true);
-    f.service.store.bindSession(f.key, 'next'); expect(f.service.rolePrompt('next')).toContain('next prompt');
+    f.service.store.bindSession(f.key, 'next'); expect(f.service.rolePrompt('next')).toContain(prompt);
+  });
+  it.each(['promptGroup', 'promptDirect'])('rejects an over-limit %s before changing live or persisted settings', async field => {
+    const f = fixture();
+    const before = f.service.requireEntry(f.key);
+    const events = f.session.snapshotEvents();
+    const settings = { ...before.settings!, [field]: 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS + 1), model: { provider: 'p', model: 'new' } };
+    await expect(f.service.saveSettings(f.key, before.policy.version, settings, 'rejected alias', false)).rejects.toThrow('不能超过 80000 个字符');
+    expect(f.service.requireEntry(f.key)).toEqual(before);
+    expect(f.session.snapshotEvents()).toEqual(events);
+    expect(f.select).not.toHaveBeenCalled();
   });
   it('rejects busy edits and recording conflicts before changing live or persisted settings', async () => {
     const f = fixture(); const before = f.service.requireEntry(f.key);

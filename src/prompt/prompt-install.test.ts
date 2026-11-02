@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import { installQQPrompt, type QQPromptEntry } from '../prompt/index.ts';
+import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 
 type Sec = { name: string; order: number; text: string | ((c: unknown) => string) };
 function fakeSystemPrompt() {
@@ -48,6 +49,19 @@ describe('installQQPrompt (DSH section/context 注册)', () => {
     extra = 'NEWEX'; persona = '# X' + NL + 'NEWPER';
     const t = sp.renderSections();
     expect(t).toContain('NEWEX'); expect(t).toContain('NEWPER'); expect(t).not.toContain('OLDEX'); expect(t).not.toContain('OLDPER');
+  });
+  it.each(['group', 'c2c'] as const)('injects the complete current %s prompt after a live edit and keeps the other scope out', scope => {
+    const sp = fakeSystemPrompt();
+    let prompts = { group: 'OLD_GROUP', direct: 'OLD_DIRECT' };
+    installQQPrompt(sp.ctx, entry({ scope, extraPrompts: () => prompts }));
+    expect(sp.renderSections()).toContain(scope === 'group' ? 'OLD_GROUP' : 'OLD_DIRECT');
+    const tail = scope === 'group' ? 'GROUP_FINAL_INSTRUCTION' : 'DIRECT_FINAL_INSTRUCTION';
+    const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
+    prompts = scope === 'group' ? { group: prompt, direct: 'OTHER_SCOPE_ONLY' } : { group: 'OTHER_SCOPE_ONLY', direct: prompt };
+    const rendered = sp.renderSections();
+    expect(rendered).toContain(prompt);
+    expect(rendered).not.toContain('OTHER_SCOPE_ONLY');
+    expect(rendered).not.toContain(scope === 'group' ? 'OLD_GROUP' : 'OLD_DIRECT');
   });
   it('turn-meta reflects setTurnMeta', () => {
     const sp = fakeSystemPrompt(); const h = installQQPrompt(sp.ctx, entry());

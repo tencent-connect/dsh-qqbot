@@ -4,13 +4,60 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConversationStore } from './index.ts';
-import { defaultQQAgentSettings } from '../shared/agent-settings.ts';
+import { defaultQQAgentSettings, QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 
 const roots: string[] = [];
 function fixture() { const root = mkdtempSync(join(tmpdir(), 'qq-agent-settings-')); roots.push(root); return { root, store: new ConversationStore(root, 'account') }; }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('QQ account defaults and per-peer settings', () => {
+  it('reloads both scope prompts at the supported 80,000-character limit without losing their tails', () => {
+    const { root, store } = fixture();
+    expect(QQ_EXTRA_PROMPT_MAX_CHARS).toBe(80_000);
+    const prompt = (tail: string): string => 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
+    const settings = { ...defaultQQAgentSettings(), promptGroup: prompt('GROUP_TAIL'), promptDirect: prompt('DIRECT_TAIL') };
+    const entry = store.ensure('group', 'long-prompt');
+    store.updateDefaults(1, settings);
+    store.updateSettings(entry.key, entry.policy.version, settings, '', true);
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.defaults()).toEqual({ version: 2, settings });
+    expect(reloaded.get(entry.key)?.settings).toEqual(settings);
+    expect(reloaded.ensure('c2c', 'new-person').settings).toEqual(settings);
+  });
+  it.each([
+    ['promptGroup', '群聊补充提示词'], ['promptDirect', '私聊补充提示词'],
+  ])('rejects an over-limit %s write without changing defaults or peer settings', (field, label) => {
+    const { root, store } = fixture();
+    const entry = store.ensure('group', 'rejected-prompt');
+    const defaults = store.defaults();
+    const path = join(root, `conversations-${createHash('sha256').update('account').digest('hex')}.json`);
+    const persisted = readFileSync(path, 'utf8');
+    const settings = { ...defaultQQAgentSettings(), [field]: 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS + 1) };
+    expect(() => store.updateDefaults(defaults.version, settings)).toThrow(`${label}不能超过 80000 个字符`);
+    expect(() => store.updateSettings(entry.key, entry.policy.version, settings, 'rejected alias', false)).toThrow(`${label}不能超过 80000 个字符`);
+    expect(store.defaults()).toEqual(defaults);
+    expect(store.get(entry.key)).toEqual(entry);
+    expect(readFileSync(path, 'utf8')).toBe(persisted);
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.defaults()).toEqual(defaults);
+    expect(reloaded.get(entry.key)).toMatchObject(entry);
+  });
+  it('loads a legacy prompt at the existing 80,000-character limit', () => {
+    const { root, store } = fixture();
+    const entry = store.ensure('c2c', 'legacy-prompt');
+    const path = join(root, `conversations-${createHash('sha256').update('account').digest('hex')}.json`);
+    const catalog = JSON.parse(readFileSync(path, 'utf8'));
+    const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - 'LEGACY_TAIL'.length) + 'LEGACY_TAIL';
+    for (const settings of [catalog.defaults.settings, catalog.entries[0].settings]) {
+      settings.prompt = prompt;
+      delete settings.promptGroup;
+      delete settings.promptDirect;
+    }
+    writeFileSync(path, JSON.stringify(catalog));
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.defaults().settings).toMatchObject({ promptGroup: prompt, promptDirect: prompt });
+    expect(reloaded.get(entry.key)?.settings).toMatchObject({ promptGroup: prompt, promptDirect: prompt });
+  });
   it('persists versioned defaults for new peers without altering existing group or private peers', () => {
     const { root, store } = fixture();
     const group = store.ensure('group', 'old-group'); const direct = store.ensure('c2c', 'old-person');

@@ -52,9 +52,12 @@ describe('extra prompt', () => {
     expect(selectExtraPrompt({ group: 'g', direct: 'd' }, 'c2c')).toBe('d');
     expect(selectExtraPrompt({ group: '', direct: undefined }, 'group')).toBe('');
   });
-  it('truncates to max', () => {
-    const long = 'x'.repeat(EXTRA_MAX_CHARS + 10);
-    expect(selectExtraPrompt({ group: long }, 'group').length).toBe(EXTRA_MAX_CHARS);
+  it.each(['group', 'c2c'] as const)('preserves the full accepted prompt including the tail for %s', scope => {
+    const tail = '最后一条指令';
+    const long = 'x'.repeat(EXTRA_MAX_CHARS - tail.length) + tail;
+    expect(selectExtraPrompt({ group: long, direct: long }, scope)).toBe(long);
+    expect(selectExtraPrompt({ group: long, direct: 'direct only' }, 'c2c')).toBe('direct only');
+    expect(selectExtraPrompt({ group: 'group only', direct: long }, 'group')).toBe('group only');
   });
 });
 

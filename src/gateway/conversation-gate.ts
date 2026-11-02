@@ -1,4 +1,4 @@
-import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { QQMiddlewareContext } from '../middleware/qq-context.ts';
 import type { SessionManager } from '../session/session-manager.ts';
 import { redactRecordingText } from '../runtime/recording-redaction.ts';
 import { cacheMsgId } from '../transport/msgid-cache.ts';
@@ -6,7 +6,7 @@ import { cacheMsgId } from '../transport/msgid-cache.ts';
 interface MentionIdentity { id?: string; member_openid?: string; is_you?: boolean }
 /** Discovery retains identity only, even when an existing allowlist blocks content. */
 export function conversationDiscovery(manager: SessionManager) {
-  return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
+  return async (ctx: QQMiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message;
     const scope = msg.kind === 'group' ? 'group' : 'c2c';
     const peerId = scope === 'group' ? msg.groupOpenid : msg.senderId;
@@ -21,7 +21,7 @@ export function wasBotMentioned(event: string, content: string, mentions: readon
   return [...content.matchAll(/<@!?([^>]+)>/g)].some(match => selfIds.has(match[1] ?? ''));
 }
 export function conversationGate(manager: SessionManager) {
-  return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
+  return async (ctx: QQMiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const service = manager.conversations;
     if (!service) { await next(); return; }
     const msg = ctx.message;
@@ -31,14 +31,15 @@ export function conversationGate(manager: SessionManager) {
     if (!service.admitted(scope, peerId)) { ctx.stop('conversation-disabled'); return; }
     const entry = service.store.ensure(scope, peerId, { senderId: msg.senderId, senderName: msg.senderName, allMessages: msg.rawEventType === 'GROUP_MESSAGE_CREATE', admitted: true });
     const mentioned = scope !== 'group' || wasBotMentioned(msg.rawEventType, msg.content, msg.mentions ?? [], service.selfIds);
-    ctx.state.mention = { wasMentioned: mentioned, shouldAnswer: !entry.policy.requireMention || mentioned, implicit: false, reason: mentioned ? 'passthrough' : 'no_mention' };
     const isCommand = msg.content.replace(/<@!?[^>]+>/g, '').trim().startsWith('/');
-    const isAnswer = manager.questionChannel?.canAcceptText?.(scope, peerId, msg.content, msg.senderId) ?? false;
-    const isTrigger = !isAnswer && entry.policy.replyEnabled !== false && (!entry.policy.requireMention || mentioned) && !msg.content.replace(/<@!?[^>]+>/g, '').trim().startsWith('/');
+    const isAnswer = !isCommand && (manager.questionChannel?.canAcceptText?.(scope, peerId, msg.content, msg.senderId) ?? false);
+    const provenance = isCommand ? 'command' : isAnswer ? 'interaction' : 'qq';
+    ctx.state.mention = { wasMentioned: mentioned, shouldAnswer: isAnswer || !entry.policy.requireMention || mentioned, implicit: isAnswer && !mentioned, reason: mentioned || isAnswer ? 'passthrough' : 'no_mention' };
+    const isTrigger = !isAnswer && entry.policy.replyEnabled !== false && (!entry.policy.requireMention || mentioned) && !isCommand;
     const text = msg.content.replace(/<@!?([^>]+)>/g, (tag, id: string) => service.selfIds.has(id) ? '' : tag).trim();
     const receipt = await service.ingestion.run(entry.key, async () => service.recordInbound(entry.key, {
       id: msg.messageId, senderId: msg.senderId, senderName: msg.senderName || '', text: redactRecordingText(text, [service.config.appSecret]),
-      contextEligible: !isCommand && !isAnswer, provenance: isCommand ? 'command' : isAnswer ? 'interaction' : 'qq',
+      contextEligible: !isCommand && !isAnswer, provenance,
       at: Date.parse(msg.timestamp) || Date.now(), mentioned,
       attachments: (msg.attachments ?? []).map(att => {
         const ct = att.content_type || '';
@@ -52,10 +53,10 @@ export function conversationGate(manager: SessionManager) {
     }, isTrigger));
     if (!receipt.accepted) { ctx.stop('duplicate-message'); return; }
     const { releaseTrigger } = receipt;
-    ctx.state.qqRecord = { cursor: receipt.cursor, ...(releaseTrigger ? { releaseTrigger } : {}) };
+    ctx.state.qqRecord = { cursor: receipt.cursor, provenance, ...(releaseTrigger ? { releaseTrigger } : {}) };
     cacheMsgId(scope, peerId, msg.messageId, Date.parse(msg.timestamp));
-    if (entry.policy.replyEnabled === false && !isCommand) { ctx.stop('automatic-reply-disabled'); return; }
-    if (scope === 'group' && entry.policy.requireMention && !mentioned) { ctx.stop('mention-gate:no_mention'); return; }
+    if (entry.policy.replyEnabled === false && !isCommand && !isAnswer) { ctx.stop('automatic-reply-disabled'); return; }
+    if (scope === 'group' && entry.policy.requireMention && !mentioned && !isAnswer) { ctx.stop('mention-gate:no_mention'); return; }
     // SDK slash middleware requires an AT event even when full-message payloads
     // carry a valid structured mention. Canonicalize only verified self mentions.
     if (scope === 'group' && mentioned) msg.rawEventType = 'GROUP_AT_MESSAGE_CREATE';

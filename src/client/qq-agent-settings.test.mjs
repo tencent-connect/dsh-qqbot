@@ -16,8 +16,9 @@ import { QQAgentSettingsForm } from './qq-agent-settings-form.ts';
 import { QQDefaultsSettings } from './qq-defaults-settings.ts';
 import { QQPeerSettings } from './qq-peer-settings.ts';
 import { testT } from './qq-locale.ts';
-import { QQSessionStore } from './qq-session-store.ts';
+import { QQSessionStore, useQQSessionStore } from './qq-session-store.ts';
 import { defaultPolicy } from '../policy/validation.ts';
+import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 
 let root, container, sequence = 0;
 beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container); });
@@ -71,6 +72,26 @@ function peer(store, value) { return h(QQPeerSettings, { store, entry: value, to
 function snapshot(store, value, defaults = store.getSnapshot().directory.defaults) { return { snapshot: { conversations: [value], tools, ownerIds: [], defaults } }; }
 
 describe('shared Agent settings draft form', () => {
+  it.each([
+    ['group', '群聊补充提示词', '私聊补充提示词', 'promptGroup'],
+    ['c2c', '私聊补充提示词', '群聊补充提示词', 'promptDirect'],
+  ])('allows the complete 80,000-character prompt for %s and leaves the other scope unchanged', async (chatScope, label, hiddenLabel, key) => {
+    const changes = vi.fn();
+    function Form() { const [draft, update] = useState(settings({ promptGroup: 'original group', promptDirect: 'original direct' })); return h(QQAgentSettingsForm, { settings: draft, tools, catalog, chatScope, onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
+    await act(async () => root.render(h(Form)));
+    expect(field(label).maxLength).toBe(QQ_EXTRA_PROMPT_MAX_CHARS);
+    expect(container.querySelector(`[aria-label="${hiddenLabel}"]`)).toBeNull();
+    const tail = 'FINAL_INSTRUCTION';
+    const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
+    await edit(label, prompt);
+    expect(field(label).value).toBe(prompt);
+    expect(changes.mock.calls.at(-1)[0]).toEqual(settings({ promptGroup: 'original group', promptDirect: 'original direct', [key]: prompt }));
+  });
+  it('uses the same prompt limit for both global default fields', async () => {
+    await act(async () => root.render(h(QQAgentSettingsForm, { settings: settings(), tools, catalog, scope: 'defaults', onRefreshCatalog: vi.fn(), onChange: vi.fn() })));
+    expect(field('群聊补充提示词').maxLength).toBe(QQ_EXTRA_PROMPT_MAX_CHARS);
+    expect(field('私聊补充提示词').maxLength).toBe(QQ_EXTRA_PROMPT_MAX_CHARS);
+  });
   it('uses native permission labels, keeps the custom base visible, and updates stable tool IDs', async () => {
     const changes = vi.fn();
     function Form() { const [draft, update] = useState(settings()); return h(QQAgentSettingsForm, { settings: draft, tools, catalog, askTools: ['read'], onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
@@ -123,13 +144,22 @@ describe('shared Agent settings draft form', () => {
 describe('peer settings persistence', () => {
   it('saves shared settings without a message-count field or creating a Session/turn', async () => {
     const { store, value, perform } = setup();
-    perform.mockImplementation(async action => snapshot(store, { ...value, alias: action.alias, settings: action.settings, policy: { ...value.policy, version: 2 } }));
-    await act(async () => root.render(peer(store, value)));
-    await edit('QQ 备注', '新备注'); await edit('群聊补充提示词', '下次会话的指令');
+    perform.mockImplementation(async action => {
+      const result = snapshot(store, { ...value, alias: action.alias, settings: action.settings, policy: { ...value.policy, version: 2 } });
+      store.accept(result.snapshot);
+      return result;
+    });
+    function LivePeer() { const state = useQQSessionStore(store); return peer(store, state.directory.conversations[0]); }
+    await act(async () => root.render(h(LivePeer)));
+    const tail = 'FINAL_SAVED_INSTRUCTION';
+    const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
+    await edit('QQ 备注', '新备注'); await edit('群聊补充提示词', prompt);
     await click('保存会话设置');
     expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'settings', key: value.key, expectedVersion: 1, alias: '新备注', receiveEnabled: true,
-      settings: { ...value.settings, promptGroup: '下次会话的指令' } });
+      settings: { ...value.settings, promptGroup: prompt } });
     expect(container.textContent).toContain('补充提示词立即生效');
+    expect(container.textContent).toContain('Agent 预设与工作目录在下次新会话生效');
+    expect(field('群聊补充提示词').value).toBe(prompt);
     expect(store.getSnapshot().overlay).toBeNull();
     // 记录默认全部保留：不再有"保留消息记录条数"输入，改为"清空消息记录"入口。
     expect(container.textContent).not.toContain('保留消息记录条数');
