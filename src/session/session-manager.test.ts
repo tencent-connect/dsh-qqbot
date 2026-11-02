@@ -386,3 +386,45 @@ describe('getOrCreate — E3 连带（prefs 损坏导致映射丢失）', () => 
     expect(allLogText(logger)).toMatch(/model-prefs\.json/); // 不再静默
   });
 });
+
+describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () => {
+  /** 带 workspaceRegistry 的 ctx（sessionPersistence 缺省为「磁盘无会话」） */
+  function workspaceCtx(workspaceRegistry: unknown): Context {
+    return {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') return { stat: async () => undefined };
+        if (name === 'workspaceRegistry') return workspaceRegistry;
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+  }
+
+  it('创建会话后用 workspaceDir() 挂载（cwd 与 meta.cwd 同源，避免 attachSession 校验失败）', async () => {
+    const ws = { path: join(env.home, 'workspace'), attachSession: vi.fn().mockResolvedValue(undefined) };
+    const workspaceRegistry = { create: vi.fn().mockResolvedValue(ws) };
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const manager = createManagerWithCtx(registry, workspaceCtx(workspaceRegistry));
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    // attach 是 fire-and-forget，等待其落到工作区
+    await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith(record.sessionId));
+    // 关键回归：cwd 必须等于 meta.cwd（resolveAgentCwd(config.cwd)），而非 process.cwd()
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'));
+  });
+
+  it('恢复会话时同样挂载（升级后老会话在下一次创建记录时补挂）', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-current');
+    const ws = { path: join(env.home, 'workspace'), attachSession: vi.fn().mockResolvedValue(undefined) };
+    const workspaceRegistry = { create: vi.fn().mockResolvedValue(ws) };
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, workspaceCtx(workspaceRegistry));
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(record.sessionId).toBe('session-current');
+    await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith('session-current'));
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'));
+  });
+});
