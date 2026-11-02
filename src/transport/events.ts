@@ -8,6 +8,7 @@
 
 /** 原始 dsh 事件（弱类型，来自 ctx.on('session/event')） */
 export interface RawSessionEvent {
+  readonly seq?: number;
   type: string;
   data: Record<string, unknown>;
 }

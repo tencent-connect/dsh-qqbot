@@ -2,10 +2,12 @@
  * 宿主 API 适配层 — 收口所有版本漂移点，一次探测按需复用。
  *
  * 宿主新旧版本 API 形态不同（本插件踩过的漂移：events → snapshotEvents、
- * presets.serviceFor 实例方法 → serviceForAgent 模块函数、./fork 子路径导出）。
+ * presets.serviceFor 实例方法 → serviceForAgent 模块函数）。
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { SessionId } from '@deepseek-ai/dsh-session';
+import type { DshAgent } from '../session/types.ts';
 
 /** 日志最小接口 */
 export interface AdapterLogger {
@@ -20,75 +22,18 @@ export interface HostAdapter {
   serviceFor(agent: { ctx: unknown }, name: string): Promise<unknown | undefined>;
   /** 全局服务读取（未注册返回 undefined，不抛） */
   globalService(name: string): unknown | undefined;
-  /** 官方 fork seed 构造；旧宿主无导出时返回 undefined */
-  buildForkSeed(events: readonly unknown[], boundary: number): Promise<readonly unknown[] | undefined>;
-  /** 会话 header 读取（取 agentPreset 等）；会话不存在、服务缺失或读取失败返回 undefined */
-  sessionHeader(sessionId: string): Promise<SessionHeaderLike | undefined>;
-  /**
-   * 会话是否存在于持久化层。
-   *
-   * `undefined` = 没有求证手段（宿主未注册 sessionPersistence，或其形态不含
-   * `stat`）。调用方不得把它当成「不存在」——那正是重建已存在会话、撞出重复
-   * id 的根因。后端真故障时照常抛出。
-   */
-  sessionExists(sessionId: string): Promise<boolean | undefined>;
+  /** 通过原生控制器合并并发恢复，避免与默认会话页创建不同 Agent。 */
+  resolveAgent(sessionId: string): Promise<DshAgent | undefined>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
 
-/** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
-export interface SessionHeaderLike {
-  agentPreset?: string;
-}
-
-/**
- * 持久化服务的最小只读契约。
- *
- * 只用 `stat`：它不读事件日志、不取写所有权，且**会话不存在时返回 `undefined`
- * 而非抛错**，正好是存在性判定需要的语义。不用 `open`（会争写所有权）、不用
- * `list`（全量扫描）。
- */
-interface SessionPersistenceLike {
-  stat(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
-}
-
-/**
- * 取出可用的持久化服务；形态不匹配返回 undefined。
- *
- * 宿主服务是版本漂移点，必须探测方法是否存在再调用：直接调用缺失的方法会抛
- * `TypeError`，与「后端故障」混在一起，让调用方误以为求证过了。
- */
-function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
-  const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
-  return typeof persistence?.stat === 'function' ? persistence : undefined;
-}
-
 /** 模块级函数的动态 import 结果缓存（spec 变量路径绕开本地依赖类型检查） */
-const moduleCache = new Map<string, Record<string, unknown> | undefined>();
-
-async function importModule(spec: string, logger?: AdapterLogger): Promise<Record<string, unknown> | undefined> {
-  if (moduleCache.has(spec)) return moduleCache.get(spec);
-  let mod: Record<string, unknown> | undefined;
-  try {
-    mod = (await import(spec)) as Record<string, unknown>;
-  } catch {
-    mod = undefined;
-    logger?.warn(`host adapter: module not resolvable: ${spec}`);
-  }
-  moduleCache.set(spec, mod);
-  return mod;
-}
-
-export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAdapter {
+export function createHostAdapter(ctx: Context, _logger?: AdapterLogger): HostAdapter {
   const capabilities: string[] = [];
 
   // events 读取路径只有运行时才能确定，sessionEvents 内自适应
   capabilities.push('sessionEvents(s自适应)');
-
-  // 可能在插件启动后才注册，sessionExists/sessionHeader 内每次重新探测；此处仅记录启动时形态
-  capabilities.push(statCapablePersistence(ctx)
-    ? 'sessionPersistence.stat(可用)'
-    : 'sessionPersistence.stat(不可用，会话存在性判定降级)');
 
   let resolveFn: ((agent: { ctx: unknown }, name: string) => unknown | undefined) | undefined;
   const presets = safeGet(ctx, 'agentPresets') as
@@ -111,56 +56,30 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
     },
 
     async serviceFor(agent, name) {
-      if (resolveFn) {
-        try {
-          const found = resolveFn(agent, name);
-          if (found) return found;
-        } catch { /* 宿主实现差异，走模块函数 */ }
-      }
-      const mod = await importModule('@deepseek-ai/dsh-agent-presets', logger);
-      const fn = mod?.serviceForAgent as
-        | ((ctx: unknown, agent: { ctx: unknown }, name: string) => unknown)
-        | undefined;
-      if (typeof fn !== 'function') return undefined;
+      // 宿主通过 resolveFn 提供按名称解析 agent 级服务；无该能力时本层不提供（不再回退到已不存在的模块）。
+      if (!resolveFn) return undefined;
       try {
-        return fn(ctx, agent, name);
+        return resolveFn(agent, name);
       } catch {
         return undefined;
       }
+    },
+
+    async resolveAgent(sessionId) {
+      const controller = safeGet(ctx, 'sessionController') as {
+        resolveAgent?(id: SessionId): Promise<{ agent: DshAgent } | { error: Error & { code?: string } }>;
+      } | undefined;
+      if (!controller?.resolveAgent) throw new Error('当前宿主缺少原生会话恢复接口，原会话保持不变。');
+      const result = await controller.resolveAgent(SessionId(sessionId));
+      if ('agent' in result) return result.agent;
+      if (result.error.code === 'session/not-found') return undefined;
+      throw result.error;
     },
 
     globalService(name) {
       return safeGet(ctx, name);
     },
 
-    async sessionHeader(sessionId) {
-      const persistence = statCapablePersistence(ctx);
-      if (!persistence) return undefined;
-      try {
-        return (await persistence.stat(sessionId))?.header;
-      } catch {
-        return undefined; // 读不到 preset 不该阻断会话打开，回落到当前 effective preset
-      }
-    },
-
-    async sessionExists(sessionId) {
-      const persistence = statCapablePersistence(ctx);
-      if (!persistence) return undefined;
-      return (await persistence.stat(sessionId)) !== undefined;
-    },
-
-    async buildForkSeed(events, boundary) {
-      const mod = await importModule('@deepseek-ai/dsh-session/fork', logger);
-      const fn = mod?.buildForkSeed as
-        | ((events: readonly unknown[], boundary: number) => readonly unknown[])
-        | undefined;
-      if (typeof fn !== 'function') return undefined;
-      try {
-        return fn(events, boundary);
-      } catch {
-        return undefined;
-      }
-    },
   };
 }
 
@@ -173,7 +92,5 @@ function safeGet(ctx: Context, name: string): unknown {
   }
 }
 
-/** 测试辅助：清空模块缓存 */
-export function _resetAdapterCache(): void {
-  moduleCache.clear();
-}
+/** 测试辅助：模块缓存已移除，保留空实现以兼容既有测试调用。 */
+export function _resetAdapterCache(): void { /* no-op */ }

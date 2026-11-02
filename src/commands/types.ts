@@ -12,6 +12,8 @@ export interface CommandDeps {
   manager: SessionManager;
   config: ImQQBotConfig;
   logger?: Logger;
+  /** Internal caller identity, set only by the authenticated Web adapter; never read from message data. */
+  origin?: 'qq' | 'web-owner';
 }
 
 /** 命令分类：agent = 底层 agent 通用能力，qqbot = 插件特有 */

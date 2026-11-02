@@ -1,29 +1,24 @@
 /**
  * SettingsReader — settings.yaml 只读解析
  *
- * 从 ~/.dsh/settings.yaml 中读取模型配置信息。
+ * 从当前 DSH_HOME 的 settings.yaml 中读取旧版模型配置信息。
  * 只读，不修改 settings.yaml。
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import type { ModelRoute, ModelEntry } from './types.ts';
 
-/** settings.yaml 中的 provider 配置结构 */
-interface SettingsProviderConfig {
-  models?: Array<{ id?: string; name?: string }>;
-  [key: string]: unknown;
-}
-
-/** settings.yaml 的 llm-pi-ai 段结构 */
-interface LlmPiAiSettings {
-  providers?: Record<string, SettingsProviderConfig>;
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 export class SettingsReader {
-  /** settings.yaml 缓存 */
-  private settingsCache: Record<string, unknown> | null | undefined;
+  constructor(private readonly homeDir?: string) {}
 
   /**
    * 从 settings.yaml 的 agent-default-model 字段读取默认模型路由
@@ -32,12 +27,17 @@ export class SettingsReader {
     const settings = this.loadSettings();
     if (!settings) return undefined;
 
-    const defaultModel = settings['agent-default-model'] as
-      | { provider?: string; model?: string }
-      | undefined;
+    const defaultModel = record(settings['agent-default-model']);
 
-    if (defaultModel?.provider && defaultModel?.model) {
-      return { provider: defaultModel.provider, model: defaultModel.model };
+    if (typeof defaultModel?.provider === 'string' && defaultModel.provider !== ''
+      && typeof defaultModel.model === 'string' && defaultModel.model !== '') {
+      return {
+        provider: defaultModel.provider,
+        model: defaultModel.model,
+        ...typeof defaultModel.reasoningEffort === 'string' && defaultModel.reasoningEffort !== ''
+          ? { reasoningEffort: ReasoningEffortId(defaultModel.reasoningEffort) }
+          : {},
+      };
     }
     return undefined;
   }
@@ -50,14 +50,16 @@ export class SettingsReader {
     if (!settings) return [];
 
     const models: ModelEntry[] = [];
-    const llmPiAi = settings['llm-pi-ai'] as LlmPiAiSettings | undefined;
+    const providers = record(record(settings['llm-pi-ai'])?.providers);
 
-    if (llmPiAi?.providers) {
-      for (const [providerName, providerConfig] of Object.entries(llmPiAi.providers)) {
-        if (Array.isArray(providerConfig?.models)) {
-          for (const m of providerConfig.models) {
-            if (m.id) {
-              models.push({ provider: providerName, id: m.id, name: m.name || undefined });
+    if (providers) {
+      for (const [providerName, providerConfig] of Object.entries(providers)) {
+        const declared = record(providerConfig)?.models;
+        if (Array.isArray(declared)) {
+          for (const entry of declared) {
+            const model = record(entry);
+            if (typeof model?.id === 'string' && model.id !== '') {
+              models.push({ provider: providerName, id: model.id, name: typeof model.name === 'string' ? model.name : undefined });
             }
           }
         }
@@ -72,24 +74,19 @@ export class SettingsReader {
    */
   readProviders(): string[] {
     const settings = this.loadSettings();
-    const llmPiAi = settings?.['llm-pi-ai'] as LlmPiAiSettings | undefined;
-    return llmPiAi?.providers ? Object.keys(llmPiAi.providers) : [];
+    const providers = record(record(settings?.['llm-pi-ai'])?.providers);
+    return providers ? Object.keys(providers) : [];
   }
 
   private loadSettings(): Record<string, unknown> | null {
-    if (this.settingsCache !== undefined) return this.settingsCache;
-
     try {
-      const settingsPath = resolve(homedir(), '.dsh', 'settings.yaml');
-      if (!existsSync(settingsPath)) {
-        this.settingsCache = null;
-        return null;
-      }
+      const home = this.homeDir ?? process.env.DSH_HOME ?? resolve(homedir(), '.dsh');
+      const settingsPath = resolve(home, 'settings.yaml');
+      if (!existsSync(settingsPath)) return null;
       const content = readFileSync(settingsPath, 'utf8');
-      this.settingsCache = yaml.load(content) as Record<string, unknown> | null;
-      return this.settingsCache;
+      const loaded: unknown = yaml.load(content);
+      return record(loaded) ?? null;
     } catch {
-      this.settingsCache = null;
       return null;
     }
   }

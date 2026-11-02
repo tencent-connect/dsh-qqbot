@@ -5,10 +5,17 @@
  * 避免各模块各自 `resolve(homedir(), '.dsh-qqbot', ...)` 造成漂移。
  */
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
-/** 插件数据根目录（区别于宿主的 ~/.dsh） */
-export const PLUGIN_HOME = resolve(homedir(), '.dsh-qqbot');
+/** A dedicated data root isolates preferences and media between Host instances. */
+export function resolvePluginHome(dataDir: string | undefined, userHome: string): string {
+  if (dataDir === undefined || dataDir.trim() === '') return resolve(userHome, '.dsh-qqbot');
+  if (!isAbsolute(dataDir)) throw new Error('QQBOT_DATA_DIR must be an absolute path');
+  return resolve(dataDir);
+}
+
+/** 默认保持已有数据路径；隔离实例通过 QQBOT_DATA_DIR 指定独立目录。 */
+export const PLUGIN_HOME = resolvePluginHome(process.env.QQBOT_DATA_DIR, homedir());
 
 /**
  * agent 工作目录：显式配置优先（空串视为未配置），缺省 PLUGIN_HOME/workspace。

@@ -35,7 +35,14 @@ export interface ApprovalButtonData {
   n?: string;
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData;
+/** 认领确认按钮：n=待确认 nonce，d=confirm|cancel */
+export interface ClaimButtonData {
+  t: 'claim';
+  d: 'confirm' | 'cancel';
+  n: string;
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | ClaimButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -46,7 +53,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'claim')) {
       return parsed as ButtonData;
     }
   } catch {

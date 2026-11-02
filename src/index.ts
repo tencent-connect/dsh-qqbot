@@ -12,10 +12,11 @@ import type { DshAgentRegistry } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
+import { RuntimeState, RUNTIME_ERROR_HINTS } from './runtime/state.ts';
 
 // ── Cordis 插件元数据 ──
 export const name = 'im-qqbot';
-export const inject = ['agents'];
+export const inject = ['agents', 'sessionController', 'workspaceRegistry', 'permissionPresets'];
 export const Config = ConfigSchema;
 
 export type { ImQQBotConfig } from './config.ts';
@@ -24,6 +25,9 @@ export type { ImQQBotConfig } from './config.ts';
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
+
+  const runtime = new RuntimeState();
+  ctx.effect(() => () => { runtime.setPhase('stopped'); }, 'im-qqbot.runtime');
 
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
@@ -36,10 +40,10 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
     // 无限期等待用户扫码会阻塞 Host ready——Desktop 界面无法进入、
     // Web 的 URL 延迟输出。绑定编排（路由/呈现/生命周期）在
     // ensureCredentials 的同步阶段即完成，凭据就绪后由异步链接管。
-    void ensureCredentials(ctx, { logger, config: { ...config } })
+    void ensureCredentials(ctx, { logger, config: { ...config }, runtime })
       .then((credentials): void => {
         if (!credentials) {
-          // null 包括：扫码取消、手动提交（已另行持久化）、流程失败
+          // null 包括扫码取消或手动提交（已另行持久化）
           logger.info('扫码绑定流程结束（未获取凭据或已手动配置）');
           return;
         }
@@ -60,7 +64,8 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
           ...config,
           appId: credentials.appId,
           appSecret: credentials.appSecret,
-        }, logger).catch((err: unknown) => {
+        }, logger, runtime).catch((err: unknown) => {
+          runtime.setPhase('failed', RUNTIME_ERROR_HINTS.terminal);
           logger.error(`网关启动失败: ${err instanceof Error ? err.message : String(err)}`);
         });
       })
@@ -74,9 +79,9 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   // 已绑定：注册常驻路由（状态回显 + 手动编辑/更换凭据 + 配置编辑）
-  registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
+  registerBoundCredentialRoutes(ctx, logger, appId, { ...config }, runtime);
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 
-  await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+  await bootstrapGateway(ctx, agents, resolvedConfig, logger, runtime);
 }

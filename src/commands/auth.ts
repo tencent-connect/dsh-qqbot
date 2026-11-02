@@ -5,7 +5,8 @@
  * 必须在 c2cAllow；身份缺失同样拒绝（fail-closed）。open 模式放行。
  */
 import type { SlashCommandHandlerContext } from '@tencent-connect/qqbot-nodejs';
-import type { Logger } from '../types.ts';
+import type { ChatScope, Logger } from '../types.ts';
+import type { CommandDeps } from './types.ts';
 
 /** 鉴权配置投影（结构化，便于单测） */
 export interface CommandAuthConfigLike {
@@ -30,5 +31,15 @@ export function commandAllowlistAuth(
       return DENIED;
     }
     return true;
+  };
+}
+
+/** Menus and mutations share the service's authorization range. */
+export function selectionMenuAccess(deps: Pick<CommandDeps, 'manager' | 'origin'>, scope: ChatScope, peerId: string, actor: string, kind: 'model' | 'preset') {
+  const service = deps.manager.conversations;
+  const allowed = service?.allowedSelections(scope, peerId, kind);
+  return {
+    editable: !service || deps.origin === 'web-owner' || service.canManage(scope, peerId, actor),
+    allows: (value: string): boolean => !allowed || allowed.includes(value),
   };
 }

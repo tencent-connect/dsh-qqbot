@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, utimesSync, statSync, rmSync, readdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync, utimesSync, statSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseDocument, isSeq, type YAMLSeq } from 'yaml';
@@ -221,6 +221,78 @@ describe('updateProfileConfig', () => {
     expect(after).toContain('- id: im-qqbot');
     expect(after).toContain('requireMention: false');
     expect(after).not.toContain('appId: x');
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('profile patch private permissions', () => {
+  it('新建凭据文件为 0600', () => {
+    expect(persistCredentialsToProfile(credentials, dir, log)).toBe(true);
+    expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(['credentials', 'config', 'unbind'])('%s 写回把现存 0644 patch 和临时文件收紧为 0600', operation => {
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    const temporaryPath = `${patchPath}.imqqbot.tmp`;
+    writeFileSync(temporaryPath, 'stale temporary file', 'utf8');
+    chmodSync(patchPath, 0o644);
+    chmodSync(temporaryPath, 0o644);
+
+    const ok = operation === 'credentials' ? persistCredentialsToProfile(credentials, dir, log)
+      : operation === 'config' ? updateProfileConfig({ requireMention: false }, dir, log)
+      : removeCredentialsFromProfile(dir, log);
+
+    expect(ok).toBe(true);
+    expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+    expect(existsSync(temporaryPath)).toBe(false);
+    expect(entryIds(readFileSync(patchPath, 'utf8'))).toEqual(['insert', 'ui-settings', 'im-qqbot', 'llm-deepseek']);
+  });
+
+  it.each(['credentials', 'config'])('%s 幂等保存仅收紧权限，正文和 mtime 不变', operation => {
+    const content = '- id: im-qqbot\n  config:\n    appId: test-app\n    appSecret: test-secret\n    requireMention: true\n';
+    writeFileSync(patchPath, content, 'utf8');
+    chmodSync(patchPath, 0o644);
+    const past = new Date(Date.now() - 1000);
+    utimesSync(patchPath, past, past);
+
+    expect(operation === 'credentials' ? persistCredentialsToProfile(credentials, dir, log)
+      : updateProfileConfig({ requireMention: true }, dir, log)).toBe(true);
+
+    expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+    expect(statSync(patchPath).mtimeMs).toBe(past.getTime());
+    expect(readFileSync(patchPath, 'utf8')).toBe(content);
+  });
+
+  it('读回校验失败经现存 0644 回滚文件恢复原文，结果为 0600', () => {
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    const rollbackPath = `${patchPath}.imqqbot.rollback`;
+    writeFileSync(rollbackPath, 'stale rollback', 'utf8');
+    chmodSync(rollbackPath, 0o644);
+    let secretReads = 0;
+    // Change the expected value only at verification to exercise real rollback I/O.
+    const changingCredentials = { appId: 'test-app', get appSecret() { return ++secretReads === 1 ? 'test-secret' : 'verification-mismatch'; } };
+
+    expect(persistCredentialsToProfile(changingCredentials, dir, log)).toBe(false);
+
+    expect(readFileSync(patchPath, 'utf8')).toBe(SHARED_PATCH);
+    expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(['cordis.patch.yml']);
+  });
+
+  it('并发编辑触发重读合并，保留外部内容并收紧权限', () => {
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    const external = `${SHARED_PATCH}\n- id: added-externally\n  config: { enabled: true }\n`;
+    let edits = 0;
+    const patch = { get requireMention() {
+      if (++edits === 1) writeFileSync(patchPath, external, 'utf8');
+      return false;
+    } };
+
+    expect(updateProfileConfig(patch, dir, log)).toBe(true);
+    expect(edits).toBe(2);
+    expect(readFileSync(patchPath, 'utf8')).toContain('added-externally');
+    expect(readFileSync(patchPath, 'utf8')).toContain('requireMention: false');
+    expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual(['cordis.patch.yml']);
   });
 });
 

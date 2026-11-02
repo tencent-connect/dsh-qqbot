@@ -3,6 +3,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
+import type { ModelRoute } from '../model/types.ts';
 
 /** AgentSetup hook 类型 */
 export type AgentSetup = (agentCtx: Context) => Promise<void> | void;
@@ -25,12 +26,19 @@ export interface DshAgent {
   readonly ctx: Context;
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
-  /** 底层 session（fork 时作为 source；snapshotEvents 用于统计/导出） */
+  /** 宿主记录的当前选择；较早宿主可能不提供。 */
+  readonly model?: {
+    current(): Readonly<ModelRoute> | undefined;
+    select?(route: Readonly<ModelRoute>): void;
+  };
+  readonly inbox?: { readonly nextTurn: readonly unknown[]; readonly nextStep: readonly unknown[] };
+  /** 底层 session（snapshotEvents 用于统计/导出） */
   readonly session: {
     readonly id: string;
+    readonly header?: { readonly cwd?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
-  cancel(cause: { kind: string }): void;
+  cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;
   /** 运行一个非 turn 维护任务（compact 等需要 idle 时串行执行的操作） */
@@ -62,12 +70,9 @@ export interface CompactOutcome {
 }
 
 /** preset 切换结果 */
-export interface PresetSwitchOutcome {
-  ok: boolean;
-  reason?: 'unavailable' | 'unknown-preset' | 'broken' | 'failed';
-  presetId?: string;
-  message?: string;
-}
+export type PresetSwitchOutcome =
+  | { ok: true; presetId?: string; sessionId?: string }
+  | { ok: false; reason: 'unavailable' | 'unknown-preset' | 'broken' | 'failed'; message?: string };
 
 export interface DshAgentHandle {
   agent: DshAgent;
@@ -80,17 +85,14 @@ export interface DshAgentRegistry {
   /** 从持久化存储恢复 session */
   resume(options: {
     resumeSessionId: string;
-    agentOptions?: { provider?: string; model?: string };
+    agentOptions?: Partial<ModelRoute>;
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
   /** 创建全新 session */
   create(options: {
     sessionId: string;
-    meta?: { cwd?: string; isSeeded?: boolean; parentSession?: string; agentPreset?: string };
-    seed?: readonly unknown[];
-    /** 继承前缀长度（seeded fork 用，对齐宿官方 commands.fork） */
-    inheritedEventCount?: number;
-    agentOptions?: { provider?: string; model?: string };
+    meta?: { cwd?: string; agentPreset?: string };
+    agentOptions?: Partial<ModelRoute>;
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
 }
@@ -100,6 +102,7 @@ export interface AgentPresetsLike {
   readonly defaultId: string;
   resolve(id?: string): Promise<{ id: string; broken?: string }>;
   mount(agentCtx: Context, id?: string): Promise<unknown>;
+  presetForSession?(session: DshAgent['session']): string | null;
   /** 列出所有可用 preset */
   list(): Promise<Array<{ id: string; name?: string; description?: string; broken?: string }>>;
 }
@@ -129,6 +132,8 @@ export interface SessionRecord {
   senderId: string;
   lastActivity: number;
   agentPreset?: string;
+  /** 本 record 建立或切换时采用的路由，供旧宿主回显。 */
+  modelRoute?: ModelRoute;
 }
 
 /** 会话状态信息（/status 用） */
@@ -138,6 +143,8 @@ export interface SessionStatus {
   provider?: string;
   model?: string;
   preset?: string;
+  /** 新会话采用的预设，可与当前 Session 已选择的组合不同。 */
+  nextPreset?: string;
   lastActivity?: number;
   messageCount?: number;
 }
