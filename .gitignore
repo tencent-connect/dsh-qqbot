@@ -1,6 +1,6 @@
 node_modules/
 dist/
-docs/
+# docs 结构：guides/(用户文档) decisions/(方案与审查) scratch/(一次性交接与验收)
 .env
 .dsh-sessions/
 *.tsbuildinfo
@@ -9,3 +9,10 @@ cordis.dev.yml
 # lib/ 构建产物入库（GitHub 安装开箱即用），但排除类型与 sourcemap
 lib/**/*.d.ts
 lib/**/*.map
+
+# Python helpers used by the local protocol tests
+tests/e2e/__pycache__/
+# Retired custom-Host probe; depends on local, untracked workbench tooling.
+tests/e2e/memory-removal-check.py
+
+.audit/

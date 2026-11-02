@@ -16,6 +16,7 @@ export interface CachedReplyId {
   /** msg: 消息 id；event: 带 INTERACTION_CREATE 前缀的完整事件 id */
   id: string;
 }
+export interface CachedReplySource extends CachedReplyId { expiresAt: number }
 
 interface CachedEntry {
   target: CachedReplyId;
@@ -34,18 +35,20 @@ function cacheKey(scope: ChatScope, targetId: string): string {
   return `${scope}:${targetId}`;
 }
 
-function push(scope: ChatScope, targetId: string | undefined, target: CachedReplyId): void {
+function push(scope: ChatScope, targetId: string | undefined, target: CachedReplyId, at = Date.now()): void {
   if (!scope || !targetId || !target.id) return;
   const key = cacheKey(scope, targetId);
   const existing = cache.get(key);
+  const timestamp = Math.min(Date.now(), Number.isFinite(at) ? at : Date.now());
   if (existing) {
+    if (existing.some(entry => entry.target.kind === target.kind && entry.target.id === target.id)) return;
     cache.delete(key);
-    existing.push({ target, timestamp: Date.now() });
+    existing.push({ target, timestamp });
     if (existing.length > MAX_PER_TARGET) existing.shift();
     cache.set(key, existing);
     return;
   }
-  cache.set(key, [{ target, timestamp: Date.now() }]);
+  cache.set(key, [{ target, timestamp }]);
   if (cache.size > MAX_TARGETS) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
@@ -53,9 +56,9 @@ function push(scope: ChatScope, targetId: string | undefined, target: CachedRepl
 }
 
 /** 记录普通消息 msgId */
-export function cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId: string | undefined): void {
+export function cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId: string | undefined, at?: number): void {
   if (!msgId) return;
-  push(scope, targetId, { kind: 'msg', id: msgId });
+  push(scope, targetId, { kind: 'msg', id: msgId }, at);
 }
 
 /** 记录互动事件 eventId（内部拼 INTERACTION_CREATE 前缀） */
@@ -66,15 +69,18 @@ export function cacheEventId(scope: ChatScope, targetId: string | undefined, eve
 
 /** 获取所有未过期的被动回复目标（按时间倒序，最新在前） */
 export function getCachedReplyIds(scope: ChatScope, targetId: string): CachedReplyId[] {
+  return getCachedReplySources(scope, targetId).filter(source => source.expiresAt > Date.now()).map(({ kind, id }) => ({ kind, id }));
+}
+
+/** Retain expiry metadata for UI status without refreshing or consuming a reply source. */
+export function getCachedReplySources(scope: ChatScope, targetId: string): CachedReplySource[] {
   const list = cache.get(cacheKey(scope, targetId));
   if (!list || list.length === 0) return [];
-  const now = Date.now();
   const ttl = scope === 'group' ? TTL_GROUP : TTL_C2C;
-  const result: CachedReplyId[] = [];
+  const result: CachedReplySource[] = [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (now - list[i]!.timestamp < ttl) {
-      result.push(list[i]!.target);
-    }
+    const entry = list[i];
+    if (entry) result.push({ ...entry.target, expiresAt: entry.timestamp + ttl });
   }
   return result;
 }

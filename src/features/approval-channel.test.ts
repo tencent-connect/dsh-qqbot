@@ -29,6 +29,22 @@ function createSender(sent: SentMessage[]) {
   };
 }
 
+function createDelayedSender(sent: SentMessage[]) {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const delivery = new Promise<void>((accept, fail) => { resolve = accept; reject = fail; });
+  return {
+    sender: {
+      sendMarkdown: vi.fn((_target: ReplyTarget, content: string, opts?: { keyboard?: unknown }) => {
+        sent.push({ text: content, opts });
+        return delivery;
+      }),
+    },
+    resolve,
+    reject,
+  };
+}
+
 const sessionKey = (scope: ChatScope, peerId: string): string => `qqbot:app:${scope}:${peerId}`;
 
 /** 默认开放模式（不校验）；allowlist 模式用 makeConfig('allowlist', [...]) */
@@ -41,11 +57,11 @@ function makeRecord(key: string, scope: ChatScope = 'c2c'): ApprovalSessionRecor
 }
 
 function createManager(opts?: {
-  findBySessionId?: (id: string) => ApprovalSessionRecordLike | undefined;
+  interactionRecord?: (id: string) => ApprovalSessionRecordLike | undefined;
   getSessionRecord?: (scope: ChatScope, peerId: string) => ApprovalSessionRecordLike | undefined;
 }) {
   return {
-    findBySessionId: opts?.findBySessionId ?? (() => undefined),
+    interactionRecord: opts?.interactionRecord ?? (() => undefined),
     getSessionRecord: opts?.getSessionRecord ?? ((scope: ChatScope, peerId: string) => makeRecord(sessionKey(scope, peerId), scope)),
   };
 }
@@ -118,11 +134,9 @@ function installAndCapture(ch: ApprovalChannel, sent: SentMessage[]): {
   return { handler: captured.handler!, ...(captured.options !== undefined ? { options: captured.options } : {}) };
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 describe('buildApprovalKeyboard', () => {
   it('builds two mutually-exclusive buttons with type-tagged data', () => {
-    const kb = buildApprovalKeyboard();
+    const kb = buildApprovalKeyboard('approval-test');
     const buttons = kb.content.rows[0]?.buttons ?? [];
     expect(buttons).toHaveLength(2);
 
@@ -130,11 +144,11 @@ describe('buildApprovalKeyboard', () => {
     expect(allow.group_id).toBe('approval');
     expect(allow.action.type).toBe(1);
     expect(allow.action.click_limit).toBe(1);
-    expect(JSON.parse(allow.action.data)).toEqual({ t: 'approval', d: 'allow' });
+    expect(JSON.parse(allow.action.data)).toEqual({ t: 'approval', d: 'allow', n: 'approval-test' });
 
     const deny = buttons[1]!;
     expect(deny.group_id).toBe('approval');
-    expect(JSON.parse(deny.action.data)).toEqual({ t: 'approval', d: 'deny' });
+    expect(JSON.parse(deny.action.data)).toEqual({ t: 'approval', d: 'deny', n: 'approval-test' });
   });
 });
 
@@ -149,10 +163,26 @@ describe('buildApprovalText', () => {
 });
 
 describe('ApprovalChannel.install', () => {
+  it('delegates Web approvals to the native answerer even with a valid QQ delivery record', async () => {
+    const sent: SentMessage[] = [];
+    const interactionRecord = vi.fn(() => undefined);
+    const sender = createSender(sent);
+    const ch = new ApprovalChannel(createManager({ interactionRecord }), sender, { ...makeConfig(), askTimeoutMs: 60 }, createLogger());
+    const { handler } = installAndCapture(ch, sent);
+    const nativeAnswer = vi.fn(async (): Promise<ApprovalOutcome> => 'allowed-once');
+    const request = makeRequest({ id: 'sess-web-send-to-qq', callId: 'web-tool-call' });
+
+    expect(await handler(request, nativeAnswer)).toBe('allowed-once');
+    expect(interactionRecord).toHaveBeenCalledWith('sess-web-send-to-qq');
+    expect(nativeAnswer).toHaveBeenCalledExactlyOnceWith();
+    expect(sender.sendMarkdown).not.toHaveBeenCalled();
+    expect(sent).toEqual([]);
+  });
+
   it('routes QQ sessions to park and delegates others to next', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
       makeConfig(),
       createLogger(),
@@ -166,7 +196,6 @@ describe('ApprovalChannel.install', () => {
 
     // QQ 会话 → park（发消息 + 挂起）
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.opts?.keyboard).toBeDefined();
 
@@ -178,7 +207,7 @@ describe('ApprovalChannel.install', () => {
   it('recovers the gated command from the session log', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
       makeConfig(),
       createLogger(),
@@ -187,7 +216,6 @@ describe('ApprovalChannel.install', () => {
 
     const events = [{ type: 'tool/call', data: { callId: 'c1', arguments: JSON.stringify({ command: 'ls -la' }) } }];
     const p = handler(makeRequest({ id: 'sess-qq', callId: 'c1', events }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     expect(sent[0]!.text).toContain('ls -la');
 
     ch.cancelPending(sessionKey('c2c', 'peer-qq'));
@@ -196,7 +224,7 @@ describe('ApprovalChannel.install', () => {
 
   it('registers a global waterfall listener without probing the approval service', () => {
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: () => undefined }),
+      createManager({ interactionRecord: () => undefined }),
       createSender([]),
       makeConfig(),
       createLogger(),
@@ -210,7 +238,7 @@ describe('ApprovalChannel.install', () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
       createManager({
-        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+        interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
       }),
       createSender(sent),
       makeConfig('allowlist', ['owner-1']),
@@ -219,7 +247,6 @@ describe('ApprovalChannel.install', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     expect(sent).toHaveLength(1);
 
     // 群互动事件点击者字段为 group_member_openid（user_openid 不填）：
@@ -237,7 +264,7 @@ describe('ApprovalChannel.install', () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
       createManager({
-        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+        interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
       }),
       createSender(sent),
       makeConfig('allowlist', ['owner-1']),
@@ -246,14 +273,12 @@ describe('ApprovalChannel.install', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const first = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     // 第一张卡片作废（cancel）
     ch.cancelPending(sessionKey('group', 'group-1'));
     await expect(first).resolves.toBe('cancelled');
 
     // 第二次审批 → 新卡片（新 nonce）
     const second = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     expect(sent).toHaveLength(2);
 
     // 用第一张卡片的 data（旧 nonce）点击 → 拒绝，审批保持挂起
@@ -269,7 +294,7 @@ describe('ApprovalChannel.install', () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
       createManager({
-        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
+        interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('group', 'group-1'), 'group') : undefined),
       }),
       createSender(sent),
       makeConfig('allowlist', ['owner-1']),
@@ -278,7 +303,6 @@ describe('ApprovalChannel.install', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
 
     // 事件不带任何点击者标识 → 拒绝
     expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { group: 'group-1' }))).toBe(false);
@@ -291,7 +315,7 @@ describe('ApprovalChannel.install', () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
       createManager({
-        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined),
+        interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined),
       }),
       createSender(sent),
       makeConfig('allowlist', ['peer-qq']),
@@ -300,7 +324,6 @@ describe('ApprovalChannel.install', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
 
     // 转发场景：点击者 user_openid ≠ 名单成员 → 无效
     expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'forwarded-user' }))).toBe(false);
@@ -312,7 +335,7 @@ describe('ApprovalChannel.install', () => {
   it('still sends the prompt when the session log is unavailable', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
       makeConfig(),
       createLogger(),
@@ -320,7 +343,6 @@ describe('ApprovalChannel.install', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq', noSession: true }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.text).toContain('bash');
 
@@ -330,10 +352,32 @@ describe('ApprovalChannel.install', () => {
 });
 
 describe('ApprovalChannel.handleInteraction', () => {
+  it('accepts a decision before the send promise settles and removes the abort listener', async () => {
+    const sent: SentMessage[] = [];
+    const delivery = createDelayedSender(sent);
+    const controller = new AbortController();
+    const removeAbort = vi.spyOn(controller.signal, 'removeEventListener');
+    const ch = new ApprovalChannel(
+      createManager({ interactionRecord: () => makeRecord(sessionKey('c2c', 'peer-qq')) }),
+      delivery.sender,
+      makeConfig(),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const result = handler(makeRequest({ signal: controller.signal }), () => Promise.resolve('unavailable'));
+    const event = makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' });
+    expect(ch.handleInteraction(event)).toBe(true);
+    await expect(result).resolves.toBe('allowed-once');
+    expect(removeAbort).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(ch.handleInteraction(event)).toBe(false);
+    delivery.resolve();
+  });
+
   it('settles deny as rejected and ignores unknown buttons', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
       makeConfig(),
       createLogger(),
@@ -341,7 +385,6 @@ describe('ApprovalChannel.handleInteraction', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
 
     // 非审批按钮 → false，不消费
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'x', i: 0 }), { user: 'peer-qq' }))).toBe(false);
@@ -352,10 +395,72 @@ describe('ApprovalChannel.handleInteraction', () => {
 });
 
 describe('ApprovalChannel.cancelPending', () => {
+  it('does not send a request that was already aborted', async () => {
+    const sent: SentMessage[] = [];
+    const sender = createSender(sent);
+    const controller = new AbortController();
+    controller.abort();
+    const ch = new ApprovalChannel(
+      createManager({ interactionRecord: () => makeRecord(sessionKey('c2c', 'peer-qq')) }),
+      sender,
+      makeConfig(),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    await expect(handler(makeRequest({ signal: controller.signal }), () => Promise.resolve('unavailable')))
+      .resolves.toBe('cancelled');
+    expect(sender.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('cancels during delivery without waiting for the send promise', async () => {
+    const sent: SentMessage[] = [];
+    const delivery = createDelayedSender(sent);
+    const controller = new AbortController();
+    const removeAbort = vi.spyOn(controller.signal, 'removeEventListener');
+    const ch = new ApprovalChannel(
+      createManager({ interactionRecord: () => makeRecord(sessionKey('c2c', 'peer-qq')) }),
+      delivery.sender,
+      makeConfig(),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const result = handler(makeRequest({ signal: controller.signal }), () => Promise.resolve('unavailable'));
+    controller.abort();
+    await expect(result).resolves.toBe('cancelled');
+    expect(removeAbort).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(false);
+    delivery.resolve();
+  });
+
+  it('keeps the next approval pending when an evicted request fails delivery late', async () => {
+    const sent: SentMessage[] = [];
+    const delivery = createDelayedSender(sent);
+    const sender = createSender(sent);
+    sender.sendMarkdown.mockImplementationOnce(delivery.sender.sendMarkdown);
+    const ch = new ApprovalChannel(
+      createManager({ interactionRecord: () => makeRecord(sessionKey('c2c', 'peer-qq')) }),
+      sender,
+      makeConfig(),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const first = handler(makeRequest(), () => Promise.resolve('unavailable'));
+    ch.cancelPending(sessionKey('c2c', 'peer-qq'));
+    await expect(first).resolves.toBe('cancelled');
+    const next = handler(makeRequest(), () => Promise.resolve('unavailable'));
+    delivery.reject(new Error('late network failure'));
+    await Promise.resolve();
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(true);
+    await expect(next).resolves.toBe('allowed-once');
+  });
+
   it('cancels a pending approval on session eviction', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
       createSender(sent),
       makeConfig(),
       createLogger(),
@@ -363,22 +468,28 @@ describe('ApprovalChannel.cancelPending', () => {
     const { handler } = installAndCapture(ch, sent);
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
-    await sleep(20);
 
     ch.cancelPending(sessionKey('c2c', 'peer-qq'));
     await expect(p).resolves.toBe('cancelled');
   });
 
   it('fails closed as unavailable when sending fails', async () => {
+    const sent: SentMessage[] = [];
+    const delivery = createDelayedSender(sent);
+    const controller = new AbortController();
+    const removeAbort = vi.spyOn(controller.signal, 'removeEventListener');
     const ch = new ApprovalChannel(
-      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
-      { sendMarkdown: vi.fn(async () => { throw new Error('network down'); }) },
+      createManager({ interactionRecord: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      delivery.sender,
       makeConfig(),
       createLogger(),
     );
-    const { handler } = installAndCapture(ch, []);
+    const { handler } = installAndCapture(ch, sent);
 
-    await expect(handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome)))
-      .resolves.toBe('unavailable');
+    const result = handler(makeRequest({ signal: controller.signal }), () => Promise.resolve('unavailable'));
+    delivery.reject(new Error('network down'));
+    await expect(result).resolves.toBe('unavailable');
+    expect(removeAbort).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(ch.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(false);
   });
 });

@@ -15,10 +15,10 @@ export function newCommand({ manager }: CommandDeps): CategorizedCommand {
     name: ['new', 'reset', 'clear'],
     category: 'agent',
     scope: 'all',
-    description: '开始新会话（清空上下文）',
-    handler: (cmdCtx) => {
+    description: '开始新会话（/reset、/clear 同义；保留模型与预设覆盖）',
+    handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
-      void manager.remove(scope, peerId);
+      await manager.remove(scope, peerId);
       return '已开启新会话 ✓';
     },
   };

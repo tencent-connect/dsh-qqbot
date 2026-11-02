@@ -26,7 +26,9 @@
     "test": "vitest run",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "clean": "rm -rf dist lib",
-    "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js"
+    "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js",
+    "dev:link-host": "node scripts/link-stock-host.mjs",
+    "check:stock-host": "node scripts/check-stock-host.mjs"
   },
   "keywords": [
     "deepseek-harness",
@@ -41,7 +43,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=20.3.0"
+    "node": "^22.19.0 || >=24.0.0"
   },
   "repository": {
     "type": "git",
@@ -59,11 +61,8 @@
       "platform": "web"
     },
     "compatibility": {
-      "dshReleases": {
-        "0.1.0-rc.8": "compatible",
-        "0.2.0-rc.2": "compatible"
-      },
-      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛。客户端依赖 settings.section / sidebarRightTabs / sidebar.right.pane.tab 席位契约与 dsh.client 模块系统，宿主大版本升级后请重新验收席位行为。"
+      "dshReleases": {},
+      "note": "使用未修改 DSH 的公开 Session、Inbox、工作区及客户端扩展接口。兼容性以隔离安装和运行验收记录为准，不要求定制宿主补丁。"
     }
   },
   "dependencies": {
@@ -76,11 +75,32 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.2-alpha.2",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-scope": ">=0.2.2-alpha.2",
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6",
     "@deepseek-ai/schemastery": ">=3.18.1",
-    "@tencent-connect/qqbot-connector": "1.2.0"
+    "@tencent-connect/qqbot-connector": "1.2.0",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-tool-executor-native": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-tool-executor-ptc": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-session": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-alpha.2",
+    "@deepseek-ai/dsh-commands": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-workspace": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-permission-presets": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-workspace": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-chat": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-api-workspace-controller": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-api-session-controller": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-user-questions": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.2.2-alpha.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": ">=0.2.2-alpha.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -100,23 +120,69 @@
     },
     "@deepseek-ai/dsh-user-approval": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-sandbox-policy": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-tool-executor-native": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-tool-executor-ptc": {
+      "optional": false
+    },
+    "@deepseek-ai/dsh-scope": {
+      "optional": false
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/cordis": "link:../../deepseek-harness/vendor/cordis",
+    "@deepseek-ai/dsh-agent": "link:../../deepseek-harness/packages/core/agent",
+    "@deepseek-ai/dsh-agent-preset-registry": "link:../../deepseek-harness/packages/preset/agent-preset-registry",
+    "@deepseek-ai/dsh-api-remotes": "link:../../deepseek-harness/packages/api/remotes",
+    "@deepseek-ai/dsh-client-locale": "link:../../deepseek-harness/packages/client/locale",
+    "@deepseek-ai/dsh-client-ui-primitives": "link:../../deepseek-harness/packages/client/ui-primitives",
+    "@deepseek-ai/dsh-llm": "link:../../deepseek-harness/packages/llm/llm",
+    "@deepseek-ai/dsh-scope": "link:../../deepseek-harness/packages/core/scope",
+    "@deepseek-ai/dsh-session": "link:../../deepseek-harness/packages/core/session",
+    "@deepseek-ai/dsh-system-prompt": "link:../../deepseek-harness/packages/core/system-prompt",
+    "@deepseek-ai/dsh-user-approval": "link:../../deepseek-harness/packages/interaction/user-approval",
+    "@deepseek-ai/schemastery": "link:../../deepseek-harness/vendor/schemastery",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.2.0",
     "@types/qrcode": "^1.5.5",
     "@types/react": "~18.3.1",
+    "@types/react-dom": "18.3.7",
     "react": "^18.2.0",
+    "react-dom": "18.3.1",
     "tsdown": "^0.22.2",
     "typescript": "^5.5.0",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "@deepseek-ai/dsh-sandbox-policy": "link:../../deepseek-harness/packages/sandbox/sandbox-policy",
+    "@deepseek-ai/dsh-tool-executor-native": "link:../../deepseek-harness/packages/core/tool-executor-native",
+    "@deepseek-ai/dsh-tool-executor-ptc": "link:../../deepseek-harness/packages/core/tool-executor-ptc",
+    "@deepseek-ai/dsh-client-ui-session": "link:../../deepseek-harness/packages/client/ui-session",
+    "@deepseek-ai/dsh-client-ui-conversation": "link:../../deepseek-harness/packages/client/ui-conversation",
+    "@deepseek-ai/dsh-typert-protocol": "link:../../deepseek-harness/packages/typert/protocol",
+    "@deepseek-ai/dsh-commands": "link:../../deepseek-harness/packages/interaction/commands",
+    "@deepseek-ai/dsh-workspace": "link:../../deepseek-harness/packages/workspace/workspace",
+    "@deepseek-ai/dsh-permission-presets": "link:../../deepseek-harness/packages/interaction/permission-presets",
+    "@deepseek-ai/dsh-client-ui-workspace": "link:../../deepseek-harness/packages/client/ui-workspace",
+    "@deepseek-ai/dsh-client-ui-renderer": "link:../../deepseek-harness/packages/client/ui-renderer",
+    "@deepseek-ai/dsh-client-ui-chat": "link:../../deepseek-harness/packages/client/ui-chat",
+    "@deepseek-ai/dsh-client-ui-slots": "link:../../deepseek-harness/packages/client/ui-slots",
+    "@deepseek-ai/dsh-api-workspace-controller": "link:../../deepseek-harness/packages/api/workspace-controller",
+    "@deepseek-ai/dsh-api-session-controller": "link:../../deepseek-harness/packages/api/session-controller",
+    "@deepseek-ai/dsh-user-questions": "link:../../deepseek-harness/packages/interaction/user-questions",
+    "@deepseek-ai/dsh-tools": "link:../../deepseek-harness/packages/core/tools",
+    "@deepseek-ai/dsh-client-ui-layout": "link:../../deepseek-harness/packages/client/ui-layout",
+    "@deepseek-ai/dsh-agent-loop": "link:../../deepseek-harness/packages/core/agent-loop",
+    "@deepseek-ai/dsh-tool-skill": "link:../../deepseek-harness/packages/skill/tool-skill",
+    "@deepseek-ai/dsh-session-projection": "link:../../deepseek-harness/packages/session/session-projection",
+    "@deepseek-ai/dsh-tool-testkit": "link:../../deepseek-harness/packages/test-support/tool-testkit",
+    "@deepseek-ai/dsh-time-context": "link:../../deepseek-harness/packages/context/time-context",
+    "@deepseek-ai/dsh-client-ui-sidebar": "link:../../deepseek-harness/packages/client/ui-sidebar"
   }
 }

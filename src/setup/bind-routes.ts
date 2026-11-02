@@ -11,6 +11,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Logger } from '../types.ts';
+import { RUNTIME_STATE_PATH, type RuntimeStateWire } from '../shared/runtime-protocol.ts';
 import type { BindingService } from './binding-service.ts';
 import {
   persistCredentialsToProfile,
@@ -66,6 +67,8 @@ export interface BindRoutesOptions {
    * 已绑定 fiber 注册路由时提供；待绑定流程不提供。
    */
   boundAppId?: () => string | null;
+  /** Current instance runtime snapshot; omitted when no runtime observer is installed. */
+  runtimeState?: () => RuntimeStateWire;
   /**
    * 手动凭据提交处理（默认：persist 到 profile patch）。
    * 待绑定流程会注入「先终止扫码轮询」的包装。
@@ -156,6 +159,11 @@ export function registerBindRoutes(
   const disposers = [
     webServer.register({
       kind: 'exact',
+      path: RUNTIME_STATE_PATH,
+      handler: (req, res) => { handleRuntime(req, res, options); },
+    }),
+    webServer.register({
+      kind: 'exact',
       path: BIND_STATE_PATH,
       handler: (req, res) => { handleState(req, res, service, options); },
     }),
@@ -208,6 +216,24 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     'cache-control': 'no-store',
   });
   res.end(payload);
+}
+
+/** Runtime visibility uses the same authentication and origin checks as binding. */
+function handleRuntime(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): void {
+  if (!trusted(req)) {
+    sendJson(res, 403, { error: 'forbidden' });
+    return;
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { error: 'method not allowed' });
+    return;
+  }
+  const state = options.runtimeState?.();
+  if (!state) {
+    sendJson(res, 503, { error: 'runtime unavailable' });
+    return;
+  }
+  sendJson(res, 200, state);
 }
 
 function handleState(
@@ -363,8 +389,8 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   if (req.method === 'GET') {
     const current = options.currentConfig?.() ?? {};
-    // appSecret 永不回传；其余（含只读 cwd）原样回显
-    const { appSecret: _s, ...safe } = current;
+    // Never return secrets or configuration belonging to the retired memory backend.
+    const { appSecret: _s, memory: _retired, ...safe } = current;
     sendJson(res, 200, { config: safe });
     return;
   }

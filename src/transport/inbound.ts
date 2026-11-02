@@ -10,6 +10,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { assembleUserBlocks } from '../prompt/index.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -19,7 +20,6 @@ import {
   type DownloadedFile,
   type MediaKind,
 } from './attachment.ts';
-import { clearGroupHistory } from '../features/history-store.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -57,6 +57,7 @@ interface MentionState {
 }
 
 interface MiddlewareState {
+  qqRecord?: { cursor: number; releaseTrigger?: () => void };
   quote?: ResolvedQuote;
   history?: HistoryEntry[];
   envelope?: string;
@@ -91,6 +92,19 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
+  const scope = ctx.message.kind === 'group' ? 'group' : 'c2c';
+  const peerId = scope === 'group' ? ctx.message.groupOpenid : ctx.message.senderId;
+  if (!peerId) return;
+  const service = manager.conversations;
+  if (service) return service.queue.run(service.store.key(scope, peerId), async () => {
+    // Only this trigger has reached execution; future triggers retain their reservations.
+    (ctx.state as MiddlewareState).qqRecord?.releaseTrigger?.();
+    if (!service.admitted(scope, peerId)) return;
+    await executeInbound(ctx, manager, config, logger);
+  });
+  return executeInbound(ctx, manager, config, logger);
+}
+async function executeInbound(ctx: MiddlewareContext, manager: SessionManager, _config: ImQQBotConfig, logger: Logger): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
   const { bot } = ctx;
@@ -105,16 +119,17 @@ export async function handleInbound(
   };
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, logger);
+  let agentBody = assembleAgentBody(msg, mwState, scope, logger);
 
   if (!agentBody) return;
 
-  logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
+  logger.info(`Processing: scope=${scope} peerId=${peerId} message=${msg.messageId}`);
 
   // ── 获取或创建会话 ──
+  const service = manager.conversations;
   let record;
   try {
-    record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
+    record = service ? await service.activityRecord(service.store.key(scope, peerId), msg.senderId, replyTarget, true) : await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
@@ -127,27 +142,35 @@ export async function handleInbound(
   }
 
   // ── 构建 UserMessage → followup ──
-  const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
+  const entry = service?.ensure(scope, peerId, msg.senderId, msg.senderName);
+  const senderName = msg.senderName || (scope === 'c2c' ? entry?.alias || entry?.name : undefined) || shortSenderId(msg.senderId);
+  const cutoff = mwState.qqRecord?.cursor;
+  const background = service && cutoff !== undefined ? service.background(record, cutoff, msg.messageId) : undefined;
+  const dynamicContext = buildDynamicCtx(msg, mwState);
+  // 来源/@/发送者/时间已移入 turn-meta runtime context；正文只保留 [媒体路径]+[引用/背景]+[用户正文]。
+  const bodyWithMedia = dynamicContext ? `${dynamicContext}${agentBody}` : agentBody;
+  // 不再把群聊背景塞进 user 正文（气泡里会显示一长串 [来源消息: …] 噪声）；只显示用户真实内容。
+  const blocks = assembleUserBlocks({ body: bodyWithMedia });
+  const content: ContentBlock[] = blocks.map((text) => ({ type: 'text' as const, text }));
+  const source = { kind: 'user' as const, qq: { senderId: msg.senderId, senderName, messageId: msg.messageId, conversationKey: entry?.key ?? record.sessionKey, contextPartCount: content.length, ...(background ? {backgroundCursor: background.cursor, backgroundMessageIds: background.messageIds} : {}) } };
+  const message = createUserMessage({ content, source });
 
-  const message = createUserMessage({
-    content,
-    source: { kind: 'user' as const },
+  // 本轮元信息暂存（按 messageId）；其轮次 turn/start 时才写入 prompt 槽，防背靠背消息覆盖。
+  const msgAt = ((): number => { const n = Number(msg.timestamp); if (Number.isFinite(n) && n > 0) return n < 1e12 ? n * 1000 : n; const p = Date.parse(msg.timestamp); return Number.isFinite(p) ? p : Date.now(); })();
+  service?.stashTurnMeta(msg.messageId, {
+    scope, senderName, senderId: msg.senderId, mentioned: mwState.mention?.wasMentioned === true, at: msgAt, now: Date.now(),
   });
 
-  record.agent.followup(message);
+  if (service) {
+    const cursor = background?.cursor ?? service.store.snapshotBackground(record.sessionKey, msg.messageId).cursor;
+    const row = service.requireEntry(record.sessionKey).sessions.find(item => item.sessionId === record.sessionId);
+    service.store.noteReceived(record.sessionKey, record.sessionId, row?.receivedMessages ?? 0);
+    await service.enqueueQQ(record, message, { messageId: msg.messageId, senderId: msg.senderId, text: msg.content, attachments: msg.attachments ?? [] }, cursor, background?.messageIds ?? []);
+  } else {
+    record.agent.followup(message);
+  }
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
-  if (scope === 'group') {
-    clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
-  }
-
-  // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
-  try {
-    await record.agent.whenIdle();
-  } catch (err) {
-    logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -171,14 +194,7 @@ function assembleAgentBody(
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
   const quotePart = buildQuotePart(state.quote);
-  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
-
-  const dynamicCtx = buildDynamicCtx(msg, state);
-
-  const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned);
-
-  return agentBody;
+  return `${quotePart}${userContent}`;
 }
 
 /**
@@ -216,12 +232,7 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger:
     }
   }
 
-  // 附件类型标签（媒体路径由 buildDynamicCtx 提供，这里只提示「带了什么」）
-  const attachmentTags = buildAttachmentTags(msg.attachments);
-  if (attachmentTags) {
-    parts.push(attachmentTags);
-  }
-
+  // 附件不在此重复：本地路径/URL/文件名由 buildDynamicCtx 统一给出（含下载失败兜底）。
   return parts.join('\n');
 }
 
@@ -234,27 +245,6 @@ function buildQuotePart(quote?: ResolvedQuote): string {
   const quoteText = quote.text || quote.entry?.content || 'Original content unavailable';
 
   return `[Quoted message begins]\n${quoteText}\n[Quoted message ends]\n[Current message]\n`;
-}
-
-/**
- * Layer 3: 带发送者标签的用户消息
- */
-function buildUserMessage(
-  userContent: string,
-  quotePart: string,
-  senderId: string,
-  senderName: string | undefined,
-  isGroup: boolean,
-  wasMentioned: boolean,
-): string {
-  if (!isGroup) {
-    return `${quotePart}${userContent}`;
-  }
-
-  const mentionTag = wasMentioned ? ' (@you)' : '';
-  const displayName = senderName ?? shortSenderId(senderId);
-  const senderTag = `[${displayName} (${senderId})]`;
-  return `${quotePart}${senderTag} ${userContent}${mentionTag}`;
 }
 
 /**
@@ -278,12 +268,10 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
       lines.push(`- ${renderMediaLine(kind, att.filename, d?.localPath, att.url, att.size)}`);
     }
 
-    // 语音：有 ASR 文本才带文本，否则只带链接（纯文本模型无法消费音频）
+    // 语音转录已在正文以 [Voice message] 注入，这里不重复；仅当无转录时补链接。
     if (voices.length > 0) {
-      const asrTexts = voices.map(a => a.asr_refer_text).filter(Boolean);
-      if (asrTexts.length > 0) {
-        lines.push(`- ASR: ${asrTexts.join(' | ')}`);
-      } else {
+      const hasAsr = voices.some(a => a.asr_refer_text);
+      if (!hasAsr) {
         const urls = voices.map(a => a.url).filter(Boolean);
         if (urls.length > 0) lines.push(`- Voice: ${urls.join(', ')}`);
       }
@@ -336,33 +324,7 @@ function renderMediaLine(
   }
 }
 
-/**
- * Layer 5: 最终 agentBody 拼合
- */
-function buildAgentBody(
-  base: string,
-  history: HistoryEntry[] | undefined,
-  isGroup: boolean,
-  wasMentioned: boolean,
-): string {
-  if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base;
-  }
 
-  const historyLines = history.map(h => {
-    const name = h.senderName ?? shortSenderId(h.senderId);
-    return `[${name} (${h.senderId})] ${h.content}`;
-  });
-
-  return [
-    '[Chat history begins]',
-    ...historyLines,
-    '',
-    '[Chat history ends]',
-    '[Current message]',
-    base,
-  ].join('\n');
-}
 
 // ══════════════════════════════════════════════════════════════
 // 辅助函数
@@ -405,33 +367,6 @@ function extractVoiceTexts(
   }
 
   return results;
-}
-
-/**
- * 附件类型标签（Layer 1 用户消息主体里的轻量提示）。
- * 只标注「带了什么类型的附件」，去重；媒体本地路径在 buildDynamicCtx 提供。
- */
-function buildAttachmentTags(attachments?: RawAttachment[]): string {
-  if (!attachments || attachments.length === 0) return '';
-
-  const labels: Record<string, string> = {
-    image: '[图片]',
-    video: '[视频]',
-    file: '[文件]',
-  };
-
-  const seen = new Set<string>();
-  const tags: string[] = [];
-
-  for (const att of attachments) {
-    const kind = classifyContentType(att.content_type);
-    if (kind === 'voice' || seen.has(kind)) continue;
-    seen.add(kind);
-    const label = labels[kind];
-    if (label) tags.push(label);
-  }
-
-  return tags.join(' ');
 }
 
 function formatFileSize(bytes: number): string {

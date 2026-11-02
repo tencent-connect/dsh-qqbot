@@ -1,313 +1,131 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type {} from '@deepseek-ai/dsh-agent/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Context } from '@deepseek-ai/cordis';
+import { createAssistantMessage, createMessage, createUserMessage, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm';
+import { Session, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session';
+import { ConfigSchema } from '../config.ts';
+import { ConversationService } from '../runtime/conversation-service.ts';
+import type { SessionManager } from '../session/session-manager.ts';
+import type { DshAgent, SessionRecord } from '../session/types.ts';
+import type { ReplyTarget } from '../types.ts';
 import { createOutboundHandler } from './outbound.ts';
-import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
-import type { SessionManager, SessionRecord } from '../session/index.ts';
-import type { ImQQBotConfig } from '../config.ts';
-import type { Logger, ReplyTarget } from '../types.ts';
 
-function createLogger(): Logger {
-  return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-}
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function createSession(): StreamSessionLike {
-  return { update: vi.fn().mockResolvedValue(undefined), complete: vi.fn().mockResolvedValue(undefined) };
-}
-
-function createBot(session: StreamSessionLike): QQBotSender {
-  return {
-    sendMarkdown: vi.fn().mockResolvedValue(undefined),
-    openStream: vi.fn(() => session),
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'qq-outbound-turn-')); roots.push(root);
+  const session = Session.create(SessionId('native'));
+  const nextTurn: UserMessage[] = [];
+  const nextStep: UserMessage[] = [];
+  const flush = vi.fn(async (_session: Session) => true);
+  const live = new Map<string, DshAgent>();
+  const sessions = { get: (id: string) => id === session.id ? session : undefined, flush };
+  const agents = { get: (id: string) => live.get(id) };
+  const ctx = { on: () => () => {}, effect: () => {}, get: (name: string) => name === 'sessions' ? sessions : name === 'agents' ? agents : undefined } as unknown as Context;
+  const agent: DshAgent = {
+    id: session.id, ctx, session, status: 'idle', inbox: { nextTurn, nextStep },
+    model: { current: () => ({ provider: 'p', model: 'm' }) }, cancel: vi.fn(), whenIdle: async () => {},
+    runMaintenance: async task => task(new AbortController().signal),
+    followup(message: UserMessage) {
+      const start = nextTurn.length; nextTurn.push(message);
+      session.append('agent/inbox/spliced', { target: 'next-turn', start, inserted: [message] });
+    },
   };
-}
-
-const c2cTarget: ReplyTarget = { scope: 'c2c', targetId: 'user1', msgId: 'msg1' };
-const groupTarget: ReplyTarget = { scope: 'group', targetId: 'group1', msgId: 'msg1' };
-
-function createRecord(target: ReplyTarget, sessionId = 'sess-qq'): SessionRecord {
-  return {
-    sessionKey: 'k',
-    sessionId,
-    replyTarget: target,
-    agent: {},
-    handle: {},
-    createdAt: 0,
-    lastActiveAt: 0,
-  } as unknown as SessionRecord;
-}
-
-function createConfig(overrides?: Partial<ImQQBotConfig>): ImQQBotConfig {
-  return {
-    streaming: true,
-    textChunkLimit: 4500,
-    showToolResults: false,
-    ...overrides,
-  } as unknown as ImQQBotConfig;
-}
-
-/** 组装 handler：manager 按 sessionId 返回 record（默认 c2c 私聊） */
-function setup(opts?: {
-  record?: SessionRecord | undefined;
-  config?: ImQQBotConfig;
-  deliverer?: { deliver: ReturnType<typeof vi.fn> };
-}) {
-  const session = createSession();
-  const bot = createBot(session);
-  const record = 'record' in (opts ?? {}) ? opts!.record : createRecord(c2cTarget);
+  live.set(session.id, agent);
+  const record: SessionRecord = {
+    sessionKey: 'qqbot:fixture:group:g', sessionId: session.id, scope: 'group', peerId: 'g', senderId: 'actor', agentPreset: 'standard',
+    agent, handle: { agent, dispose: async () => {} }, lastActivity: 0,
+    replyTarget: { scope: 'group', targetId: 'g', msgId: 'incoming-1' },
+  };
   const manager = {
-    findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    getDefaultModel: () => ({ provider: 'p', model: 'm' }), getDefaultPreset: () => 'standard',
+    getSessionRecord: (scope: string, peerId: string) => scope === 'group' && peerId === 'g' ? record : undefined,
+    findBySessionId: (id: string) => id === session.id ? record : undefined,
   } as unknown as SessionManager;
-  const outbound = createOutboundHandler(
-    manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer,
-  );
-  return { outbound, bot, session };
+  const config = ConfigSchema.default({ appId: 'fixture', appSecret: 'dummy', cwd: root, streaming: true, showToolResults: true })();
+  const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const sendMarkdown = vi.fn(async (_target: ReplyTarget, _text: string) => undefined);
+  const stream = { update: vi.fn(async () => {}), complete: vi.fn(async () => {}) };
+  const openStream = vi.fn(() => stream);
+  const sender = { sendMarkdown, openStream };
+  const deliver = vi.fn(async () => {});
+  const service = new ConversationService(ctx, manager, config, logger, root);
+  service.entry(record.scope, record.peerId); service.store.bindSession(record.sessionKey, record.sessionId);
+  service.setSender(sender); manager.conversations = service;
+  const outbound = createOutboundHandler(manager, sender, config, logger, undefined, { deliver });
+  const route = (event: SessionEvent) => outbound.routeSessionEvent(session, { type: event.type, data: { ...event.data }, seq: event.seq });
+  const drain = () => new Promise<void>(resolve => setImmediate(resolve));
+  async function begin(qq: boolean) {
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: qq ? 'QQ input' : 'Web input' }] });
+    const admitted = qq ? service.enqueueQQ(record, message, { messageId: 'incoming-1', senderId: 'actor' }, 0, []) : Promise.resolve();
+    if (!qq) {
+      nextTurn.push(message);
+      route(session.append('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [message] }));
+    }
+    route(session.append('turn/start', { turn: 1 })); nextTurn.splice(0);
+    route(session.append('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }));
+    route(session.append('step/start', { turn: 1, step: 1 }));
+    route(session.append('user/message', message, { surfaceOp: 'append' }));
+    await admitted;
+  }
+  function assistant(text: string, step = 1) {
+    const message = createAssistantMessage({ source: { provider: 'fixture', model: 'fixture' }, content: [{ type: 'reasoning', text: 'Private reasoning' }, { type: 'text', text }] });
+    route(session.append('assistant/message', { turn: 1, step, message, stream: [] }, { surfaceOp: 'append' }));
+  }
+  function finish(step = 1) {
+    route(session.append('step/end', { turn: 1, step }));
+    route(session.append('turn/end', { turn: 1, reason: { kind: 'completed' } }));
+  }
+  return { session, service, record, outbound, sendMarkdown, openStream, stream, deliver, flush, logger, route, drain, begin, assistant, finish };
 }
 
-const delta = (attemptId: string, text: string) => ({ kind: 'text-delta' as const, attemptId, text });
-const start = (attemptId: string) => ({ kind: 'attempt-start' as const, attemptId });
-
-describe('OutboundRouter.routeStreamFrame', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+describe('native outbound delivery', () => {
+  it('ignores stream frames, chunks, tool output and presented files until a verified QQ turn completes', async () => {
+    const f = fixture(); await f.begin(true);
+    f.outbound.routeStreamFrame(f.session.id, { kind: 'attempt-start', attemptId: 'attempt-1' });
+    f.outbound.routeStreamFrame(f.session.id, { kind: 'text-delta', attemptId: 'attempt-1', text: 'Live text' });
+    f.outbound.routeSessionEvent(f.session, { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: 'Legacy chunk' } } });
+    const callId = ToolCallId('read-1');
+    const toolMessage = createAssistantMessage({ source: { provider: 'fixture', model: 'fixture' }, content: [
+      { type: 'text', text: 'Tool narration' }, { type: 'tool-call', id: callId, name: 'read', arguments: '{"path":"report.txt"}' },
+    ] });
+    f.route(f.session.append('assistant/message', { turn: 1, step: 1, message: toolMessage, stream: [] }, { surfaceOp: 'append' }));
+    f.route(f.session.append('tool/call', { turn: 1, step: 1, callId, name: 'read', arguments: '{"path":"report.txt"}' }));
+    const result = createMessage({ role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId, content: [{ type: 'text', text: 'Private tool result' }] });
+    f.route(f.session.append('tool/result', { turn: 1, step: 1, message: result }, { surfaceOp: 'append' }));
+    f.outbound.routeSessionEvent(f.session, { type: 'deliverables/presented', data: { turn: 1, callId, files: [{ path: '/tmp/report.txt' }] } });
+    await f.drain();
+    expect(f.sendMarkdown).not.toHaveBeenCalled(); expect(f.openStream).not.toHaveBeenCalled(); expect(f.deliver).not.toHaveBeenCalled();
+    f.route(f.session.append('step/end', { turn: 1, step: 1 }));
+    f.route(f.session.append('step/start', { turn: 1, step: 2 }));
+    f.assistant('Only the final body', 2); await f.drain();
+    expect(f.sendMarkdown).not.toHaveBeenCalled();
+    f.finish(2); await f.drain();
+    expect(f.sendMarkdown.mock.calls).toEqual([[{ scope: 'group', targetId: 'g', msgId: 'incoming-1' }, 'Only the final body']]);
+    expect(f.openStream).not.toHaveBeenCalled(); expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.stream.update).not.toHaveBeenCalled(); expect(f.stream.complete).not.toHaveBeenCalled();
+    const end = f.session.snapshotEvents().at(-1);
+    if (!end) throw new Error('No completed turn');
+    f.route(end); await f.drain(); expect(f.sendMarkdown).toHaveBeenCalledTimes(1);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it('keeps a fully completed native Web turn private', async () => {
+    const f = fixture(); await f.begin(false); f.assistant('Web-only answer'); f.finish(); await f.drain();
+    expect(f.sendMarkdown).not.toHaveBeenCalled(); expect(f.openStream).not.toHaveBeenCalled();
+    expect(f.service.store.deliveries(f.record.sessionKey)).toEqual([]);
+    expect(f.logger.warn).not.toHaveBeenCalled();
   });
 
-  it('流式帧路由到会话 buffer：openStream + update', async () => {
-    const { outbound, bot, session } = setup();
-
-    outbound.routeStreamFrame('sess-qq', start('a1'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'hello'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(bot.openStream).toHaveBeenCalledTimes(1);
-    expect(session.update).toHaveBeenCalledWith('hello');
-  });
-
-  it('attempt 切换 reset：同一条流式消息被新内容全量重写', async () => {
-    const { outbound, bot, session } = setup();
-
-    outbound.routeStreamFrame('sess-qq', start('a1'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'partial'));
-    await vi.advanceTimersByTimeAsync(200);
-    expect(session.update).toHaveBeenCalledWith('partial');
-
-    outbound.routeStreamFrame('sess-qq', start('a2'));
-    outbound.routeStreamFrame('sess-qq', delta('a2', 'full'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(bot.openStream).toHaveBeenCalledTimes(1); // 流式会话复用
-    expect(session.update).toHaveBeenNthCalledWith(2, 'full'); // 全量替换
-  });
-
-  it('agent replacement（attemptId 重叠）：start 帧无条件重置', async () => {
-    const { outbound, bot, session } = setup();
-
-    outbound.routeStreamFrame('sess-qq', start('sess-qq:1'));
-    outbound.routeStreamFrame('sess-qq', delta('sess-qq:1', 'stale'));
-    await vi.advanceTimersByTimeAsync(200);
-    expect(session.update).toHaveBeenCalledWith('stale');
-
-    // agent replacement 后 attempt 计数重启，attemptId 与旧 agent 相同
-    outbound.routeStreamFrame('sess-qq', start('sess-qq:1'));
-    outbound.routeStreamFrame('sess-qq', delta('sess-qq:1', 'fresh'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(bot.openStream).toHaveBeenCalledTimes(1);
-    expect(session.update).toHaveBeenNthCalledWith(2, 'fresh'); // 全量替换，无残留
-  });
-
-  it('迟到帧（旧 attemptId）被丢弃', async () => {
-    const { outbound, session } = setup();
-
-    outbound.routeStreamFrame('sess-qq', start('a1'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'x'));
-    outbound.routeStreamFrame('sess-qq', start('a2'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'late')); // a1 的迟到帧
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(session.update).not.toHaveBeenCalledWith(expect.stringContaining('late'));
-  });
-
-  it('非 QQ 会话（无 record）忽略流式帧', async () => {
-    const { outbound, bot } = setup({ record: undefined });
-
-    outbound.routeStreamFrame('sess-web', start('a1'));
-    outbound.routeStreamFrame('sess-web', delta('a1', 'hello'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(bot.openStream).not.toHaveBeenCalled();
-    expect(bot.sendMarkdown).not.toHaveBeenCalled();
-  });
-
-  it('群聊不流式：帧累积后由 assistant/message 静态发送', async () => {
-    const { outbound, bot } = setup({ record: createRecord(groupTarget) });
-
-    outbound.routeStreamFrame('sess-qq', start('a1'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'group reply'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'group reply' }] } },
-    });
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(bot.openStream).not.toHaveBeenCalled();
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(groupTarget, 'group reply');
-  });
-
-  it('assistant/message 到达时收尾流式：complete 且不重复静态发送', async () => {
-    const { outbound, bot, session } = setup();
-
-    outbound.routeStreamFrame('sess-qq', start('a1'));
-    outbound.routeStreamFrame('sess-qq', delta('a1', 'hello'));
-    await vi.advanceTimersByTimeAsync(200);
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'hello' }] } },
-    });
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(session.complete).toHaveBeenCalledTimes(1);
-    expect(bot.sendMarkdown).not.toHaveBeenCalled();
-  });
-
-  it('旧通道回归：durable assistant/chunk 事件仍进 buffer', async () => {
-    const { outbound, bot, session } = setup();
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'assistant/chunk',
-      data: { chunk: { type: 'text-delta', text: 'legacy' } },
-    });
-    await vi.advanceTimersByTimeAsync(200);
-
-    expect(bot.openStream).toHaveBeenCalledTimes(1);
-    expect(session.update).toHaveBeenCalledWith('legacy');
-  });
-});
-
-describe('OutboundRouter: deliverables/presented', () => {
-  beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
-
-  const presentedEvent = (callId: string, files: Array<{ path: string; description?: string }>) => ({
-    type: 'deliverables/presented',
-    data: { turn: 1, callId, files },
-  });
-  const turnEnd = { type: 'turn/end', data: { reason: { kind: 'stop' } } };
-  const record = createRecord(c2cTarget);
-
-  it('轮末投递声明的文件，且在文本之后', async () => {
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { outbound, bot } = setup({ deliverer: { deliver } });
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/report.xlsx' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'final reply' }] } },
-    });
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record, [{ path: '/tmp/report.xlsx' }]);
-    // 文本先于文件：markdown 发送的调用序在 deliver 之前
-    const textOrder = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
-    expect(textOrder).toBeLessThan(deliver.mock.invocationCallOrder[0]);
-  });
-
-  it('同 callId 去重：事件重放不重复投递', async () => {
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { outbound } = setup({ deliverer: { deliver } });
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c2', [{ path: '/tmp/b.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record, [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }]);
-  });
-
-  it('assistant/message 在途文本未送达前不投递文件（等待 pending 发送完成）', async () => {
-    let resolveText: (() => void) | undefined;
-    const textTask = new Promise<void>((resolve) => { resolveText = resolve; });
-    const bot: QQBotSender = {
-      sendMarkdown: vi.fn(() => textTask),
-      openStream: vi.fn(() => createSession()),
-    };
-    const record = createRecord(c2cTarget);
-    const manager = {
-      findBySessionId: vi.fn(() => record),
-    } as unknown as SessionManager;
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger(), undefined, { deliver });
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'reply' }] } },
-    });
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(deliver).not.toHaveBeenCalled(); // 文本仍在途
-
-    resolveText?.();
-    for (let i = 0; i < 10; i++) await Promise.resolve(); // 冲刷 catch 派生 + Promise.all 的微任务链
-    expect(deliver).toHaveBeenCalledTimes(1); // 文本送达后才投递
-  });
-
-  it('配置关闭时不投递', async () => {
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { outbound } = setup({
-      config: createConfig({ sendFile: { restrictPaths: true, extraRoots: [], sendPresentedFiles: false, maxFiles: 4 } as ImQQBotConfig['sendFile'] }),
-      deliverer: { deliver },
-    });
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(deliver).not.toHaveBeenCalled();
-  });
-
-  it('异常结束的轮次仍投递已声明的文件（宿主契约：失败不撤销声明）', async () => {
-    const deliver = vi.fn().mockResolvedValue(undefined);
-    const { outbound, bot } = setup({ deliverer: { deliver } });
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
-      type: 'turn/end',
-      data: { reason: { kind: 'error', error: { code: 'E_BROKEN', message: 'boom' } } },
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('E_BROKEN'));
-    expect(deliver).toHaveBeenCalledTimes(1);
-  });
-
-  it('未提供投递器时静默跳过（老环境降级）', async () => {
-    const { outbound, bot } = setup();
-
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, presentedEvent('c1', [{ path: '/tmp/a.png' }]));
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
-    await vi.advanceTimersByTimeAsync(0);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  it('contains a failed durability checkpoint without delivering final text or files', async () => {
+    const f = fixture(); await f.begin(true); f.assistant('Unconfirmed answer');
+    f.outbound.routeSessionEvent(f.session, { type: 'deliverables/presented', data: { turn: 1, callId: 'present-1', files: [{ path: '/tmp/report.txt' }] } });
+    f.flush.mockResolvedValue(false); f.finish(); await f.drain();
+    expect(f.logger.warn).toHaveBeenCalled();
+    expect(f.sendMarkdown).not.toHaveBeenCalled(); expect(f.deliver).not.toHaveBeenCalled();
+    expect(f.service.store.deliveries(f.record.sessionKey)).toEqual([]);
   });
 });

@@ -6,7 +6,6 @@
  */
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { SessionManager } from '../session/index.ts';
-import { cacheMsgId } from '../transport/msgid-cache.ts';
 
 export function questionAnswer(manager: SessionManager) {
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
@@ -15,10 +14,7 @@ export function questionAnswer(manager: SessionManager) {
       await next();
       return;
     }
-    if (questionChannel.tryAnswer(ctx.replyTarget.scope, ctx.replyTarget.targetId, ctx.message.content.trim())) {
-      // 答案消息被截获（不再走到 bot.on('message')），在此补录其 msgId，
-      // 供被动回复超限时切换到缓存的最近 msgId。
-      cacheMsgId(ctx.replyTarget.scope, ctx.replyTarget.targetId, ctx.replyTarget.msgId);
+    if (questionChannel.tryAnswer(ctx.replyTarget.scope, ctx.replyTarget.targetId, ctx.message.content.trim(), ctx.message.senderId)) {
       ctx.stop('question-answer');
       return;
     }

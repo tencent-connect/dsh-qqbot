@@ -1,10 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
+import { Context } from '@deepseek-ai/cordis';
+import UserQuestionService from '@deepseek-ai/dsh-user-questions';
+import { Session, SessionId } from '@deepseek-ai/dsh-session';
+import { ToolCallId } from '@deepseek-ai/dsh-llm';
+import type { ToolDispatchExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import {
   QuestionChannel,
   type UserQuestion,
   type UserQuestionRequest,
   type UserQuestionResult,
+  type QuestionChannelContext,
   type QuestionSessionRecordLike,
 } from './question-channel.ts';
 import { buildKeyboard, formatQuestion } from './question-renderer.ts';
@@ -18,6 +24,11 @@ function createLogger(): Logger {
 interface SentMessage {
   text: string;
   opts?: { keyboard?: unknown };
+}
+
+function questionId(sent: SentMessage[], index = 0): string {
+  const keyboard = sent[index]?.opts?.keyboard as { content: { rows: Array<{ buttons: Array<{ action: { data: string } }> }> } };
+  return JSON.parse(keyboard.content.rows[0]!.buttons[0]!.action.data).q;
 }
 
 function createSender(sent: SentMessage[], opts?: { failKeyboard?: boolean }) {
@@ -36,11 +47,15 @@ function makeRecord(sessionKeyStr: string, scope: ChatScope = 'c2c'): QuestionSe
 }
 
 function createManager(opts?: {
+  canAnswer?: (scope: ChatScope, peerId: string, actor?: string) => boolean;
+  canRelayInteraction?: (id: string) => boolean;
   findBySessionId?: (id: string) => QuestionSessionRecordLike | undefined;
   getSessionRecord?: (scope: ChatScope, peerId: string) => QuestionSessionRecordLike | undefined;
 }) {
   return {
-    findBySessionId: opts?.findBySessionId ?? (() => undefined),
+    canAnswer: opts?.canAnswer,
+    interactionRecord: (id: string) => (opts?.canRelayInteraction?.(id) ?? true) ? (opts?.findBySessionId ? opts.findBySessionId(id) : makeRecord(id, id.includes(':group:') ? 'group' : 'c2c')) : undefined,
+    recordHumanReply: vi.fn(async () => {}),
     // 默认按 scope+peerId 派生 sessionKey 反查，与 startAsk 的 key 生成保持一致
     getSessionRecord: opts?.getSessionRecord ?? ((scope: ChatScope, peerId: string) => makeRecord(sessionKey(scope, peerId), scope)),
   };
@@ -55,7 +70,7 @@ function startAsk(
 ): Promise<UserQuestionResult> {
   const key = sessionKey(scope, peerId);
   const request: UserQuestionRequest = { questions, ...(signal ? { signal } : {}) };
-  return ch.askViaQQ(makeRecord(key, scope), request);
+  return ch['askViaQQ'](makeRecord(key, scope), request, { sessionId: key, turn: 1, callId: 'call-q' });
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -152,7 +167,7 @@ describe('QuestionChannel.tryAnswer', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.tryAnswer('c2c', 'U1', '2')).toBe(true);
+    expect(ch.tryAnswer('c2c', 'U1', '2', 'actor')).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
   });
 
@@ -166,24 +181,24 @@ describe('QuestionChannel.tryAnswer', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]!.text).toContain('问题1');
 
-    expect(ch.tryAnswer('c2c', 'U1', '1')).toBe(true);
+    expect(ch.tryAnswer('c2c', 'U1', '1', 'actor')).toBe(true);
     await sleep(20);
     expect(sent).toHaveLength(2);
     expect(sent[1]!.text).toContain('问题2');
 
-    expect(ch.tryAnswer('c2c', 'U1', '2')).toBe(true);
+    expect(ch.tryAnswer('c2c', 'U1', '2', 'actor')).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'a', selected: ['A1'] }, { id: 'b', selected: ['B2'] }] });
   });
 
   it('ignores empty text and returns false when no pending question', async () => {
     const sent: SentMessage[] = [];
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    expect(ch.tryAnswer('c2c', 'nobody', '1')).toBe(false);
+    expect(ch.tryAnswer('c2c', 'nobody', '1', 'actor')).toBe(false);
 
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.tryAnswer('c2c', 'U1', '')).toBe(false);
-    ch.tryAnswer('c2c', 'U1', '1');
+    expect(ch.tryAnswer('c2c', 'U1', '', 'actor')).toBe(false);
+    ch.tryAnswer('c2c', 'U1', '1', 'actor');
     await p;
   });
 });
@@ -196,7 +211,7 @@ describe('QuestionChannel.askViaQQ', () => {
     await sleep(20);
     expect(sent[0]?.opts?.keyboard).toBeDefined();
     expect(sent[0]?.text).toContain('点击下方按钮选择');
-    ch.tryAnswer('c2c', 'U1', '1');
+    ch.tryAnswer('c2c', 'U1', '1', 'actor');
     await p;
   });
 
@@ -208,7 +223,7 @@ describe('QuestionChannel.askViaQQ', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]?.opts).toBeUndefined();
     expect(sent[0]?.text).toContain('回复编号选择');
-    ch.tryAnswer('c2c', 'U1', '1');
+    ch.tryAnswer('c2c', 'U1', '1', 'actor');
     await p;
   });
 
@@ -219,7 +234,7 @@ describe('QuestionChannel.askViaQQ', () => {
       { requireMention: false, askTimeoutMs: 60_000 },
       createLogger(),
     );
-    await expect(ch.askViaQQ(makeRecord('sx'), { questions: [q2()] }))
+    await expect(ch['askViaQQ'](makeRecord('sx'), { questions: [q2()] }, { sessionId: 'sx', turn: 1, callId: 'call-q' }))
       .rejects.toThrow('failed to deliver question to QQ');
   });
 
@@ -242,7 +257,7 @@ describe('QuestionChannel.askViaQQ', () => {
     const p2 = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
     await expect(p1).rejects.toThrow('superseded');
-    ch.tryAnswer('c2c', 'U1', '1');
+    ch.tryAnswer('c2c', 'U1', '1', 'actor');
     await p2;
   });
 
@@ -274,7 +289,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: questionId(sent), i: 1 }), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
   });
 
@@ -283,7 +298,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'group', 'G1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: questionId(sent), i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
   });
 
@@ -293,7 +308,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const long = '这是一个非常非常长的选项标签超过十八个字符的限制了吧';
     const p = startAsk(ch, 'c2c', 'U7', [{ id: 'q', question: 't', options: [{ label: long }] }]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'U7' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: questionId(sent), i: 0 }), { user: 'U7' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: [long] }] });
   });
 
@@ -308,7 +323,7 @@ describe('QuestionChannel.handleInteraction', () => {
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'other', i: 0 }), { user: 'U2' }))).toBe(false);
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'nobody' }))).toBe(false);
     expect(ch.handleInteraction(makeEvent(undefined, { user: 'U2' }))).toBe(false);
-    ch.tryAnswer('c2c', 'U2', '1');
+    ch.tryAnswer('c2c', 'U2', '1', 'actor');
     await p;
   });
 
@@ -320,13 +335,13 @@ describe('QuestionChannel.handleInteraction', () => {
     const p = startAsk(ch, 'c2c', 'U1', [q1, q2b]);
     await sleep(20);
     // 答第一题（按钮点击），推进到第二题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 0 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: questionId(sent, 0), i: 0 }), { user: 'U1' }))).toBe(true);
     await sleep(20);
     expect(sent).toHaveLength(2); // 第二题已发出
     // 旧题（q=a）按钮在新题发出后被点击 → 忽略，不消费当前题
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 1 }), { user: 'U1' }))).toBe(false);
     // 当前题（q=b）仍可正常作答
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'b', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: questionId(sent, 1), i: 1 }), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'a', selected: ['A1'] }, { id: 'b', selected: ['B2'] }] });
   });
 });
@@ -342,44 +357,213 @@ describe('QuestionChannel.cancelPending', () => {
   });
 });
 
-describe('QuestionChannel.install routing', () => {
-  it('routes QQ sessions to QQ channel and delegates others', async () => {
+function waterfall(ch: QuestionChannel) {
+  type QuestionHandler = (request: UserQuestionRequest, next: () => Promise<UserQuestionResult>) => Promise<UserQuestionResult>;
+  type ToolHandler = (exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>) => Promise<ToolExecutionResult>;
+  let question: QuestionHandler | undefined;
+  let tool: ToolHandler | undefined;
+  const remove = vi.fn(() => true);
+  const on = vi.fn((name: string, handler: unknown) => {
+    if (name === 'user-questions/request') question = handler as QuestionHandler;
+    else if (name === 'tools/execute') tool = handler as ToolHandler;
+    return () => {
+      if (name === 'user-questions/request') question = undefined;
+      else tool = undefined;
+      return remove();
+    };
+  });
+  const ctx = { on, get: () => undefined } as unknown as QuestionChannelContext;
+  ch.install(ctx);
+  return {
+    on, remove,
+    ask: (request: UserQuestionRequest, next: () => Promise<UserQuestionResult>) => question ? question(request, next) : next(),
+    execute: (exec: ToolDispatchExecution, next: () => Promise<ToolExecutionResult>) => tool ? tool(exec, next) : next(),
+  };
+}
+
+function toolExecution(request: UserQuestionRequest, callId: string, signal = new AbortController().signal): ToolDispatchExecution {
+  return { agent: request.agent, name: 'ask_user_question', callId: ToolCallId(callId), rootCallId: ToolCallId(callId),
+    arguments: {}, signal, token: Symbol(callId) } as ToolDispatchExecution;
+}
+
+function toolSuccess(): ToolExecutionResult { return { isError: false, value: null, content: [] }; }
+
+function identifiedRequest(sessionId: string): UserQuestionRequest {
+  return {
+    questions: [q2()], wait: { callId: 'call-q' },
+    agent: { id: sessionId, session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 1 } }] } },
+  } as unknown as UserQuestionRequest;
+}
+
+describe('QuestionChannel public waterfall routing', () => {
+  it('delegates a native or mixed turn without modifying userQuestions.ask', async () => {
+    const sent: SentMessage[] = [];
+    const manager = createManager({ canRelayInteraction: () => false });
+    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60 }, createLogger());
+    const hooks = waterfall(ch);
+    const answer = { answers: [] };
+    const next = vi.fn(async () => answer);
+    expect(await hooks.ask(identifiedRequest('sess-web'), next)).toBe(answer);
+    expect(next).toHaveBeenCalledOnce();
+    expect(sent).toEqual([]);
+    expect(hooks.on).toHaveBeenCalledWith('user-questions/request', expect.any(Function), { global: true, prepend: true });
+  });
+
+  it('routes a proven QQ turn and persists its actor, call and nonce before returning the answer', async () => {
     const sent: SentMessage[] = [];
     const record = makeRecord(sessionKey('c2c', 'u9'));
-    (record as { sessionId?: string }).sessionId = 'sess-qq';
-    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const manager = createManager({ findBySessionId: id => id === 'sess-qq' ? record : undefined });
+    let persist!: () => void;
+    manager.recordHumanReply.mockImplementationOnce(() => new Promise<void>(resolve => { persist = resolve; }));
     const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    let origCalled = 0;
-    const uq = { ask: vi.fn(async () => { origCalled += 1; return { answers: [] }; }) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-
-    await uq.ask({ questions: [q2('x')], agent: { id: 'sess-web' } });
-    expect(origCalled).toBe(1);
-
-    const p = uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
-    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
-    expect(origCalled).toBe(1); // QQ 路径未触碰原实现
+    const hooks = waterfall(ch);
+    const next = vi.fn(async () => ({ answers: [] }));
+    const pending = hooks.ask(identifiedRequest('sess-qq'), next);
+    await Promise.resolve();
+    expect(ch.tryAnswer('c2c', 'u9', '1', 'actual-user')).toBe(true);
+    let settled = false;
+    void pending.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(manager.recordHumanReply).toHaveBeenCalledWith({ sessionId: 'sess-qq', turn: 1, callId: 'call-q',
+      nonce: expect.any(String), actor: 'actual-user', answer: { answers: [{ id: 'q', selected: ['A'] }] } });
+    persist();
+    expect(await pending).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+    expect(next).not.toHaveBeenCalled();
   });
 
-  it('uninstall restores the original ask', async () => {
+  it.each(['call', 'turn'])('delegates when public request lacks a verified %s identity', async missing => {
     const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
-      ask: async () => ({ answers: [] }),
-    };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.__qqQuestionPatched).toBe(true);
+    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60 }, createLogger());
+    const hooks = waterfall(ch);
+    const request = identifiedRequest('sess-qq');
+    if (missing === 'call') delete request.wait;
+    else request.agent = undefined;
+    const next = vi.fn(async () => ({ answers: [] }));
+    await hooks.ask(request, next);
+    expect(next).toHaveBeenCalledOnce(); expect(sent).toEqual([]);
+  });
+
+  it('rejects the waterfall if the durable reply cannot be saved', async () => {
+    const manager = createManager(); manager.recordHumanReply.mockRejectedValueOnce(new Error('disk full'));
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const pending = startAsk(ch, 'c2c', 'u9', [q2()]);
+    expect(ch.tryAnswer('c2c', 'u9', '1', 'actual-user')).toBe(true);
+    await expect(pending).rejects.toThrow('disk full');
+  });
+
+  it('uninstall removes its listeners and cancels its pending question', async () => {
+    const ch = new QuestionChannel(createManager(), createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const hooks = waterfall(ch);
+    const pending = startAsk(ch, 'c2c', 'u9', [q2()]);
     ch.uninstall();
-    expect(uq.__qqQuestionPatched).toBeUndefined();
+    expect(hooks.remove).toHaveBeenCalledTimes(2);
+    await expect(pending).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+  });
+  it('rejects missing and unauthorized human identities without recording an answer', async () => {
+    const manager = createManager({ canAnswer: (_scope, _peer, actor) => actor === 'authorized' });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const pending = startAsk(ch, 'c2c', 'u9', [q2()]);
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(false);
+    expect(ch.tryAnswer('c2c', 'u9', '1', 'outsider')).toBe(false);
+    expect(manager.recordHumanReply).not.toHaveBeenCalled();
+    expect(ch.tryAnswer('c2c', 'u9', '1', 'authorized')).toBe(true);
+    await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
   });
 
-  it('disables gracefully when the userQuestions service is missing', () => {
-    const sent: SentMessage[] = [];
-    const logger = createLogger();
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, logger);
-    ch.install({ get: () => undefined });
-    expect(logger.warn).not.toHaveBeenCalled();
+  it('cancels an answer whose durable receipt is still being saved when the channel unloads', async () => {
+    const manager = createManager(); let persist!: () => void;
+    manager.recordHumanReply.mockImplementationOnce(() => new Promise<void>(resolve => { persist = resolve; }));
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const pending = startAsk(ch, 'c2c', 'u9', [q2()]);
+    ch.tryAnswer('c2c', 'u9', '1', 'authorized'); ch.uninstall();
+    await expect(pending).rejects.toMatchObject({ code: 'ASK_ABORTED' }); persist();
   });
+
+  it('uses the public tool execution callId for default legacy questions without changing ask', async () => {
+    const sent: SentMessage[] = []; const record = makeRecord(sessionKey('c2c', 'legacy'));
+    const manager = createManager({ findBySessionId: id => id === 'session-legacy' ? record : undefined });
+    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const hooks = waterfall(ch); const request = identifiedRequest('session-legacy'); delete request.wait;
+    const next = vi.fn(async () => ({ answers: [] }));
+    const pending = hooks.execute(toolExecution(request, 'legacy-call'), async () => {
+      const answer = await hooks.ask(request, next);
+      expect(answer).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
+      return toolSuccess();
+    });
+    expect(ch.tryAnswer('c2c', 'legacy', '2', 'human')).toBe(true);
+    await pending; expect(next).not.toHaveBeenCalled();
+    expect(manager.recordHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-legacy', callId: 'legacy-call', turn: 1, actor: 'human' }));
+  });
+
+  it('keeps two concurrent Agents in distinct legacy tool-call contexts', async () => {
+    const manager = createManager({ findBySessionId: id => id === 'session-a' ? makeRecord(sessionKey('c2c', 'a')) : id === 'session-b' ? makeRecord(sessionKey('c2c', 'b')) : undefined });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const hooks = waterfall(ch); const requests = ['a', 'b'].map(id => { const request = identifiedRequest(`session-${id}`); delete request.wait; return request; });
+    const next = vi.fn(async () => ({ answers: [] }));
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const running = requests.map((request, index) => hooks.execute(toolExecution(request, `call-${index}`), async () => {
+      await Promise.resolve(); const answer = hooks.ask(request, next); entered[index]!.resolve(); await answer; return toolSuccess();
+    }));
+    await Promise.all(entered.map(value => value.promise));
+    expect(ch.tryAnswer('c2c', 'b', '2', 'human-b')).toBe(true);
+    expect(ch.tryAnswer('c2c', 'a', '1', 'human-a')).toBe(true);
+    await Promise.all(running);
+    expect(manager.recordHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-a', callId: 'call-0', actor: 'human-a' }));
+    expect(manager.recordHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-b', callId: 'call-1', actor: 'human-b' }));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('delegates a legacy question with another Agent and after the enclosing execution has ended', async () => {
+    const manager = createManager(); const sent: SentMessage[] = [];
+    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const hooks = waterfall(ch); const own = identifiedRequest('session-a'); delete own.wait;
+    const other = identifiedRequest('session-b'); delete other.wait;
+    const impostor = identifiedRequest('session-a'); delete impostor.wait;
+    const next = vi.fn(async () => ({ answers: [] }));
+    const gate = Promise.withResolvers<void>(); let delayed!: Promise<UserQuestionResult>;
+    await hooks.execute(toolExecution(own, 'call-a'), async () => {
+      await hooks.ask(other, next);
+      await hooks.ask(impostor, next);
+      delayed = gate.promise.then(() => hooks.ask(own, next));
+      return toolSuccess();
+    });
+    gate.resolve(); await delayed;
+    expect(next).toHaveBeenCalledTimes(3); expect(sent).toEqual([]); expect(manager.recordHumanReply).not.toHaveBeenCalled();
+  });
+
+  it('propagates the enclosing legacy tool cancellation even when its request omits a signal', async () => {
+    const manager = createManager(); const record = makeRecord(sessionKey('c2c', 'cancel'));
+    manager.interactionRecord = () => record;
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const hooks = waterfall(ch); const request = identifiedRequest('session-cancel'); delete request.wait;
+    const lifetime = new AbortController();
+    const pending = hooks.execute(toolExecution(request, 'cancel-call', lifetime.signal), async () => {
+      await hooks.ask(request, async () => ({ answers: [] })); return toolSuccess();
+    });
+    lifetime.abort(); await expect(pending).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    expect(ch.tryAnswer('c2c', 'cancel', '1', 'human')).toBe(false);
+    expect(manager.recordHumanReply).not.toHaveBeenCalled();
+  });
+
+  it('claims a real native timed wait until the QQ answer arrives and releases the claim', async () => {
+    vi.useFakeTimers(); const ctx = new Context();
+    const session = Session.create(SessionId('session-timed-qq')); session.append('turn/start', { turn: 1 });
+    const agent = { id: session.id, session, ctx } as unknown as NonNullable<UserQuestionRequest['agent']>;
+    ctx.provide('agents', { get: () => agent, roots: () => [agent] } as unknown as Context['agents']);
+    await ctx.plugin(UserQuestionService);
+    const manager = createManager({ findBySessionId: id => id === session.id ? makeRecord(sessionKey('c2c', 'timed')) : undefined });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 10_000 }, createLogger()); ch.install(ctx);
+    try {
+      const pending = ctx.userQuestions.askTimed({ agent, questions: [q2()] }, ToolCallId('timed-call'), 100);
+      let settled = false; void pending.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(settled).toBe(false);
+      expect(ch.tryAnswer('c2c', 'timed', '1', 'human')).toBe(true);
+      await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(manager.recordHumanReply).toHaveBeenCalledWith(expect.objectContaining({ callId: 'timed-call', actor: 'human' }));
+    } finally { ch.uninstall(); await ctx.fiber.dispose(); vi.useRealTimers(); }
+  });
+
 });

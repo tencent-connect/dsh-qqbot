@@ -106,23 +106,22 @@ export function registerSendFileTool(
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
       }
 
-      // 1. 解析发送目标：显式 target > 当前会话（exec.agent → SessionRecord）
-      let replyTarget: ReplyTarget | undefined;
+      // Outbound authority belongs to the admitted channel turn, never to a tool-supplied peer.
+      const record = exec.agent ? manager.findByAgent(exec.agent as DshAgent) : undefined;
+      const authorized = record && manager.conversations ? manager.conversations.interactionRecord(record.sessionId) : undefined;
+      if (!record || !authorized) throw new Error('当前任务没有向 QQ 外发的资格');
+      let replyTarget: ReplyTarget = authorized.replyTarget;
       if (target !== undefined && target !== '') {
-        replyTarget = parseTarget(target);
-        if (replyTarget === undefined) {
-          throw new Error(`qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid，收到: ${target}`);
-        }
-      } else if (exec.agent !== undefined) {
-        replyTarget = manager.findByAgent(exec.agent as DshAgent)?.replyTarget;
+        const selected = parseTarget(target);
+        if (!selected || selected.scope !== replyTarget.scope || selected.targetId !== replyTarget.targetId) throw new Error('QQ 文件只能发送到当前获准对话');
       }
-      if (replyTarget === undefined) {
-        throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
-      }
+      exec.signal?.throwIfAborted();
 
       // 2. 校验文件 + 路径白名单
       const absPath = resolve(file_path);
-      if (!isPathAllowed(absPath, config.sendFile, cwd)) {
+      const channelRecord = exec.agent ? manager.findByAgent(exec.agent as DshAgent) : undefined;
+      const groupRoots = channelRecord && manager.conversations ? manager.conversations.entry(channelRecord.scope, channelRecord.peerId).policy.resources.sendRoots : [];
+      if (!isPathAllowed(absPath, { ...config.sendFile, extraRoots: [...config.sendFile.extraRoots, ...groupRoots] }, cwd)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);
       }
       if (!existsSync(absPath)) {
@@ -131,6 +130,8 @@ export function registerSendFileTool(
 
       // 3. 按扩展名分类发送（与交付物投递共用 send-media 的分发实现）
       const fileName = basename(absPath);
+      exec.signal?.throwIfAborted();
+      if (!manager.conversations?.interactionRecord(record.sessionId)) throw new Error('QQ 外发资格已撤销');
       const result = await sendMediaFile(bot, replyTarget, absPath);
       if (result.outcome === 'missing') {
         throw new Error(`qqbot_send_file: 文件不存在或不可读: ${absPath}`);
