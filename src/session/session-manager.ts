@@ -26,7 +26,6 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
-import { attachSessionToWorkspace } from './workspace-attach.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -594,10 +593,10 @@ export class SessionManager {
 
     // 挂载到对应工作区（侧边栏可见性）；fail-soft、异步执行，不阻塞消息处理。
     // 宿主只在客户端 session.create RPC 时挂载会话，插件会话不走那条路径，
-    // 闲置回收后会从侧边栏消失（详见 workspace-attach.ts 注释）。
+    // 闲置回收后会从侧边栏消失（详见 host/adapter.ts 的 attachSessionToWorkspace）。
     // cwd 必须与 meta.cwd 同源（workspaceDir()），否则 attachSession 的
     // header.cwd 校验（realpath 后须等于工作区 path）会失败。
-    void attachSessionToWorkspace(this.ctx, this.workspaceDir(), sessionId, this.logger);
+    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir());
 
     return record;
   }
