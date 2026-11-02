@@ -612,8 +612,8 @@ export class SessionManager {
     return undefined;
   }
 
-  /** Create a fresh native Session at a queue boundary; never mutate an existing header.cwd. */
-  async replaceSession(scope: ChatScope, peerId: string, workspaceId?: string, selection?: { presetId: string; assertCurrent: () => void }): Promise<SessionRecord> {
+  /** Create a fresh native Session; null clears its workspace binding, undefined inherits it. */
+  async replaceSession(scope: ChatScope, peerId: string, workspaceId?: string | null, selection?: { presetId: string; assertCurrent: () => void }): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
     return this.withPeerOperation(key, async () => {
       selection?.assertCurrent();
@@ -632,7 +632,7 @@ export class SessionManager {
   private async replaceSessionRecord(
     scope: ChatScope,
     peerId: string,
-    workspaceId?: string,
+    workspaceId?: string | null,
     composition?: PresetComposition,
     previous?: SessionRecord,
     assertCurrent?: () => void,
@@ -646,15 +646,19 @@ export class SessionManager {
       }
     };
     assertBoundary();
-    const bound = workspaceId ?? this.conversations?.store.get(key)?.workspaceId;
+    const currentWorkspaceId = this.conversations?.store.get(key)?.workspaceId;
+    const bound = workspaceId === null ? undefined : workspaceId ?? currentWorkspaceId;
     const workspace = bound ? this.conversations?.resolveWorkspace(bound) : undefined;
     if (bound && !workspace) throw new Error('工作区服务不可用');
     const composed = composition ?? await this.composePreset(this.getEffectivePresetByKey(key));
     const route = previous?.agent.model?.current() ?? previous?.modelRoute ?? this.getEffectiveModelByKey(key);
     this.conversations?.assertCommandAuthority(scope, peerId);
     const id = SessionId(mintSessionId());
+    const selectedCwd = workspaceId && workspaceId !== currentWorkspaceId ? workspace?.path : undefined;
+    const cwd = workspaceId === null ? this.workspaceDir()
+      : selectedCwd ?? this.conversations?.cwd(scope, peerId) ?? workspace?.path ?? previous?.agent.session.header?.cwd ?? this.workspaceDir();
     const handle = await this.agents.create({ sessionId: id,
-      meta: { cwd: workspaceId && workspaceId !== this.conversations?.store.get(key)?.workspaceId ? workspace!.path : this.conversations?.cwd(scope, peerId) ?? workspace?.path ?? previous?.agent.session.header?.cwd ?? this.workspaceDir(), ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}) },
+      meta: { cwd, ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}) },
       ...(route ? { agentOptions: route } : {}), ...(composed.setup ? { setup: composed.setup } : {}) });
     const record: SessionRecord = { sessionKey: key, sessionId: id, agent: handle.agent, handle,
       replyTarget: previous?.replyTarget ?? { scope, targetId: peerId }, scope, peerId,
@@ -663,7 +667,7 @@ export class SessionManager {
     try {
       await workspace?.attachSession(id);
       assertBoundary();
-      this.conversations?.attach(record, bound, composition?.agentPreset);
+      this.conversations?.attach(record, workspaceId === null ? null : bound, composition?.agentPreset);
     } catch (error) {
       this.conversations?.release(id);
       await workspace?.detachSession(id).catch(() => {});

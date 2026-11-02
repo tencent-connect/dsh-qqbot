@@ -59,7 +59,7 @@ export function registerConversationRoutes(ctx: Context, service: ConversationSe
           } else if (action === 'create-session') {
             if (body.expectedCurrentSessionId !== null && typeof body.expectedCurrentSessionId !== 'string') throw new Error('当前会话标识无效');
             if (!Number.isSafeInteger(body.expectedPolicyVersion)) throw new Error('配置版本无效');
-            result.sessionId = await service.createSession(key, { operationId: field(body, 'operationId'), expectedCurrentSessionId: body.expectedCurrentSessionId, expectedPolicyVersion: Number(body.expectedPolicyVersion), workspaceId: field(body, 'workspaceId'), presetId: field(body, 'presetId') });
+            result.sessionId = await service.createSession(key, { operationId: field(body, 'operationId'), expectedCurrentSessionId: body.expectedCurrentSessionId, expectedPolicyVersion: Number(body.expectedPolicyVersion), workspaceId: field(body, 'workspaceId', true), presetId: field(body, 'presetId') });
           } else if (action === 'unarchive') {
             await service.unarchive(key, field(body, 'sessionId'));
           } else if (action === 'messages') {

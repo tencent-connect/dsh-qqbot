@@ -12,6 +12,7 @@ import type { SessionManager } from '../session/session-manager.ts';
 import type { DshAgent, SessionRecord } from '../session/types.ts';
 import type { ReplyTarget } from '../types.ts';
 import { wasBotMentioned } from '../gateway/conversation-gate.ts';
+import { UNEXECUTED_TOOL_REQUEST_NOTICE } from '../transport/model-reply.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -29,7 +30,8 @@ function fixture() {
   const flush = vi.fn(async (_session: Session) => true);
   const sessions = { get: (id: string) => id === session.id ? session : undefined, flush };
   const agents = { get: (id: string) => live.get(id) };
-  const ctx = { on: () => () => {}, effect: () => {}, get: (name: string) => name === 'sessions' ? sessions : name === 'agents' ? agents : undefined } as unknown as Context;
+  const services: Record<string, unknown> = {};
+  const ctx = { on: () => () => {}, effect: () => {}, get: (name: string) => name === 'sessions' ? sessions : name === 'agents' ? agents : services[name] } as unknown as Context;
   const agent: DshAgent = {
     id: session.id, session, ctx, status: 'idle', inbox: { nextTurn, nextStep },
     model: { current: () => ({ provider: 'p', model: 'm' }) },
@@ -65,7 +67,7 @@ function fixture() {
     restored.setSender({ sendMarkdown, openStream }); manager.conversations = restored;
     return restored;
   };
-  return { service, session, record, manager, config, logger, sendMarkdown, openStream, nextTurn, nextStep, flush, restart };
+  return { service, session, record, manager, config, logger, sendMarkdown, openStream, nextTurn, nextStep, flush, services, restart };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -383,6 +385,16 @@ describe('revocation classification', () => {
 });
 
 describe('manual QQ reply sources and visible failures', () => {
+  it('guards forwarded model answers while preserving explicitly entered manual text', async () => {
+    const f = fixture();
+    const text = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="web_fetch">https://example.com</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>';
+    const message = answer(f, text);
+    f.services.sessionController = { resolveAgent: async () => f.record.agent };
+    await f.service.send(f.record.sessionKey, 'forwarded-protocol', text, { sessionId: f.session.id, messageId: message.id });
+    expect(f.sendMarkdown.mock.calls[0]?.[1]).toBe(UNEXECUTED_TOOL_REQUEST_NOTICE);
+    await f.service.send(f.record.sessionKey, 'manual-protocol-example', text);
+    expect(f.sendMarkdown.mock.calls[1]?.[1]).toBe(text);
+  });
   it('redacts bare configured credentials from explicit-send errors and logger output while retaining platform evidence', async () => {
     const { ApiError } = await import('@tencent-connect/qqbot-nodejs');
     const f = fixture(); f.config.appSecret = 'bare-configured-secret';

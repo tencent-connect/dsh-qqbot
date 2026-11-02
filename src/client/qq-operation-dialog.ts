@@ -66,12 +66,12 @@ export function QQOperationDialog({ target, store, workspaces, selectorSource, d
     h('form', { className: 'imqq-editForm', onSubmit: submit },
       h('p', { className: 'imqq-dialogHint' }, target.name),
       h('p', { className: 'imqq-dialogHint' }, '工作区和 Agent 预设默认使用当前值。确认后 QQ 新消息进入新会话，旧历史保留；此操作不提交提问。'),
-      !currentWorkspaceId ? h('p', { role: 'status', className: 'imqq-dialogHint' }, '当前会话尚未绑定可用的 DSH 工作区，请为新会话选择工作区。') : null,
+      !currentWorkspaceId ? h('p', { role: 'status', className: 'imqq-dialogHint' }, '当前会话未绑定 DSH 工作区，可使用 QQ 临时目录或选择工作区。') : null,
       h(WorkspaceCwdSelect, { value: cwdPath, workspaces, defaultCwd: store.getSnapshot().directory?.defaultCwd, defaultWorkspaceName, disabled: busy || wsBusy, label: '工作区', onAddWorkspace: addWorkspace, onChange: setCwdPath }),
       h('label', { className: 'imqc-field' }, h('span', null, 'Agent 预设'), h(QQSelect, { label: '新 QQ 会话的 Agent 预设', value: presetId, onChange: setPresetId, disabled: busy || loading, placeholder: loading ? '读取预设…' : '选择 Agent 预设', options: presets.map(preset => ({ value: preset.id, label: preset.name, description: preset.broken ?? (!unrestricted && !allowedPresets.includes(preset.id) ? '此对话未授权' : preset.description), disabled: Boolean(preset.broken) || (!unrestricted && !allowedPresets.includes(preset.id)) })) })),
       authorityMissing ? h('p', { role: 'status', className: 'imqq-dialogHint' }, '未取得此对话继承的预设授权，请刷新 QQ 目录后重试。') : null,
       changed ? h('p', { role: 'alert', className: 'imqq-dialogHint' }, '当前 QQ 会话或策略已变化，请关闭后重新打开操作。') : entry?.running ? h('p', { className: 'imqq-dialogHint' }, '当前会话正在回复，结束后可新建会话。') : !entry?.admitted ? h('p', { className: 'imqq-dialogHint' }, '请先授权此 QQ 对话。') : null,
-      workspaces.length === 0 ? h('p', { role: 'status', className: 'imqq-dialogHint' }, '还没有可用工作区，请先在 DSH 工作区导航中添加工作区。') : null,
+      workspaces.length === 0 ? h('p', { role: 'status', className: 'imqq-dialogHint' }, '还没有可用工作区，可使用 QQ 临时目录，也可添加 DSH 工作区。') : null,
       error ? h('p', { role: 'alert', className: 'imqq-error' }, error) : null,
       h('div', { className: 'imqq-dialogActions' }, h(Button, { variant: 'ghost', size: 'sm', onClick: close }, '取消'), h(Button, { type: 'submit', variant: 'primary', size: 'sm', disabled }, busy ? '新建中…' : '确认新建会话'))) });
 }

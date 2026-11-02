@@ -11,6 +11,7 @@
  */
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
+import { modelReplyText } from './model-reply.ts';
 
 export interface StreamingWriterDeps {
   bot: QQBotSender;
@@ -43,7 +44,7 @@ export class StreamingWriter {
 
   /** 累积全文（降级静态发送时使用） */
   public get text(): string {
-    return this.fullText;
+    return modelReplyText(this.fullText, this.finished);
   }
 
   /**
@@ -131,12 +132,13 @@ export class StreamingWriter {
 
   /** 推送当前累积文本（首次 openStream + update 全量） */
   private async pushUpdate(): Promise<void> {
-    if (this.aborted || this.failed || !this.fullText) return;
+    const text = modelReplyText(this.fullText, this.finished);
+    if (this.aborted || this.failed || !text) return;
 
     if (!this.session) {
       try {
         this.session = this.deps.bot.openStream(this.deps.target);
-        this.deps.logger.debug(`im-qqbot: stream opened (chars=${this.fullText.length})`);
+        this.deps.logger.debug(`im-qqbot: stream opened (chars=${text.length})`);
       } catch (err) {
         // openStream 失败：标记 failed 避免重复尝试，后续走降级静态
         this.failed = true;
@@ -148,7 +150,7 @@ export class StreamingWriter {
     }
 
     try {
-      await this.session.update(this.fullText);
+      await this.session.update(text);
       this.sentChunkCount++;
     } catch (err) {
       // update 失败：不标记 failed（session 已打开，finish 会 complete 关闭）

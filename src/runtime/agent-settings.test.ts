@@ -3,12 +3,14 @@ import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { Session, SessionId } from '@deepseek-ai/dsh-session';
 import { setSandboxMode, type SandboxMode } from '@deepseek-ai/dsh-sandbox-policy';
 import { setApprovalPolicy, type ApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
 import { ConfigSchema } from '../config.ts';
 import type { SessionManager } from '../session/session-manager.ts';
 import type { SessionRecord } from '../session/types.ts';
+import type { ModelRoute } from '../model/types.ts';
 import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 import { ConversationService } from './conversation-service.ts';
 
@@ -17,7 +19,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'qq-live-settings-')); roots.push(root);
   const session = Session.create(SessionId('current'));
-  let route = { provider: 'p', model: 'old' };
+  let route: ModelRoute = { provider: 'p', model: 'old' };
   let current: SessionRecord | undefined;
   const services: Record<string, unknown> = {};
   const tools = { definitions: () => [{ name: 'read' }], restrict: () => () => {}, guard: () => () => {} };
@@ -41,10 +43,45 @@ function fixture() {
     renameSync(path, `${path}.original`);
     mkdirSync(path);
   };
-  return { service, key: entry.key, agent, select, session, config, services, failCatalogSave };
+  return { service, key: entry.key, agent, select, session, manager, config, services, failCatalogSave };
 }
 
 describe('idle per-peer Agent settings', () => {
+  it('applies inherited-model effort changes and resets the live Session to the host default effort', async () => {
+    const f = fixture();
+    const hostDefault = { provider: 'p', model: 'old', reasoningEffort: ReasoningEffortId('medium') };
+    vi.spyOn(f.manager, 'getDefaultModel').mockReturnValue(hostDefault);
+    for (const effort of [ReasoningEffortId('high'), ReasoningEffortId('low'), undefined]) {
+      const before = f.service.requireEntry(f.key);
+      const { reasoningEffort: _previousEffort, ...base } = before.settings!;
+      const settings = { ...base, ...(effort ? { reasoningEffort: effort } : {}) };
+      await f.service.saveSettings(f.key, before.policy.version, settings, before.alias, true);
+      expect(f.select).toHaveBeenLastCalledWith({ ...hostDefault, reasoningEffort: effort ?? hostDefault.reasoningEffort });
+      expect(f.agent.model.current()).toEqual({ ...hostDefault, reasoningEffort: effort ?? hostDefault.reasoningEffort });
+      expect(f.service.requireEntry(f.key).settings).toEqual(settings);
+      expect(f.service.requireEntry(f.key).currentSessionId).toBe(f.session.id);
+    }
+    expect(f.select).toHaveBeenCalledTimes(3);
+  });
+  it('ignores the inherited effort when an explicit model supplies its own effort', async () => {
+    const f = fixture(); const before = f.service.requireEntry(f.key);
+    const model = { provider: 'p', model: 'new', reasoningEffort: ReasoningEffortId('low') };
+    await f.service.saveSettings(f.key, before.policy.version, { ...before.settings!, model }, '', true);
+    const current = f.service.requireEntry(f.key);
+    await f.service.saveSettings(f.key, current.policy.version, { ...current.settings!, reasoningEffort: ReasoningEffortId('high') }, '', true);
+    expect(f.select).toHaveBeenCalledExactlyOnceWith(model);
+    expect(f.agent.model.current()).toEqual(model);
+  });
+  it('restores the live inherited model when persisting an effort change fails', async () => {
+    const f = fixture(); const before = f.service.requireEntry(f.key);
+    setSandboxMode(f.session, 'read-only');
+    f.session.append('permission/preset', { preset: 'read-only' });
+    f.failCatalogSave();
+    await expect(f.service.saveSettings(f.key, before.policy.version, { ...before.settings!, reasoningEffort: ReasoningEffortId('high') }, '', true)).rejects.toThrow(/EISDIR|rename/);
+    expect(f.select.mock.calls).toEqual([[{ provider: 'p', model: 'old', reasoningEffort: ReasoningEffortId('high') }], [{ provider: 'p', model: 'old' }]]);
+    expect(f.agent.model.current()).toEqual({ provider: 'p', model: 'old' });
+    expect(f.service.requireEntry(f.key)).toEqual(before);
+  });
   it('applies model and native setters; extra prompt applies immediately while cwd/preset defer to the next Session', async () => {
     const f = fixture(); const before = f.service.requireEntry(f.key);
     const tail = 'LAST_GROUP_INSTRUCTION';

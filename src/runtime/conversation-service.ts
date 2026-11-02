@@ -5,8 +5,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ToolCallId, UserMessage } from '@deepseek-ai/dsh-llm';
 import type { HumanReply, QQOperation } from './qq-operations.ts';
-import { QQOperations, payloadHash } from './qq-operations.ts';
-import { classifyTurn, classifyTurnInputs } from './qq-turn.ts';
+import { QQOperations } from './qq-operations.ts';
+import { classifyTurn, classifyTurnInputs, qqInboxLifecycle } from './qq-turn.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { WorkspaceId, type Workspace } from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-permission-presets';
@@ -16,7 +16,7 @@ import { ConversationStore } from '../conversations/index.ts';
 import { defaultPolicy, validatePolicy, validatePolicyTools, catalogTools, installPolicy, toolCatalogEntry } from '../policy/index.ts';
 import type { ConversationEntry, ConversationPolicy, ConversationSnapshot, SlashCommandDescriptor, ToolCatalogEntry, DeliveryRecord, GroupMessageRecord } from '../shared/conversation-protocol.ts';
 import { describeCommands } from '../commands/index.ts';
-import { installQQPrompt, type QQPromptHandle, type QQPromptEntry } from '../prompt/index.ts';
+import { installQQPrompt, type QQPromptHandle, type QQPromptEntry, type QQTurnContext } from '../prompt/index.ts';
 import { PLUGIN_HOME, resolveAgentCwd } from '../shared/dirs.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { updateProfileConfig } from '../setup/persist.ts';
@@ -28,6 +28,7 @@ import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { ConversationIngressQueue, ConversationQueue } from './conversation-queue.ts';
 import { nativeSession } from './native-channel.ts';
 import { chunkMarkdownText } from '../transport/chunker.ts';
+import { modelReplyText } from '../transport/model-reply.ts';
 import { getCachedReplySources } from '../transport/msgid-cache.ts';
 import { OperationRetention } from './operation-retention.ts';
 import { SessionOperations } from './session-operations.ts';
@@ -69,8 +70,6 @@ export class ConversationService {
   private readonly attached = new WeakSet<object>();
   private readonly policyDisposers = new Map<string, () => void>();
   private readonly promptHandles = new Map<string, QQPromptHandle>();
-  /** 入站消息的 turn-meta，按 messageId 暂存；在该消息所属轮次 turn/start 时写入 prompt 槽。 */
-  private readonly pendingTurnMeta = new Map<string, import('../prompt/index.ts').TurnMeta>();
   private readonly catalogs = new Map<string, ToolCatalogEntry>();
   /** 配对码运行期状态（Web 生成 / QQ 核销）。 */
   readonly pairing = new PairingService();
@@ -357,7 +356,20 @@ export class ConversationService {
       ? { ...access, groupAllow: access.groupAllow.filter((id) => id !== openid) }
       : { ...access, c2cAllow: access.c2cAllow.filter((id) => id !== openid) };
     const persisted = updateProfileConfig({ access: nextAccess }, getProfileDir() ?? undefined, this.logger);
-    if (persisted) this.config.access = nextAccess;
+    if (persisted) {
+      this.config.access = nextAccess;
+      const scope = purpose === 'allow-group' ? 'group' : 'c2c';
+      if (!this.admitted(scope, openid)) {
+        const key = this.store.key(scope, openid);
+        this.manager.questionChannel?.cancelPending(key);
+        this.manager.approvalChannel?.cancelPending(key);
+        const current = this.manager.getSessionRecord(scope, openid)?.agent;
+        current?.cancel({ kind: 'user' });
+        for (const agent of this.ctx.get('agents')?.list() ?? []) {
+          if (agent !== current && this.conversationForSession(agent.id)?.key === key) agent.cancel({ kind: 'user' });
+        }
+      }
+    }
     return { ok: persisted, message: persisted ? '已从白名单移除' : '写入失败，请手动移除' };
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }
@@ -393,7 +405,7 @@ export class ConversationService {
     const policy = this.entry(scope, peerId).policy;
     return (kind === 'model' ? policy.allowedModels : policy.allowedPresets).length === 0;
   }
-  attach(record: SessionRecord, workspaceId?: string, presetId?: string): void {
+  attach(record: SessionRecord, workspaceId?: string | null, presetId?: string): void {
     const entry = this.ensure(record.scope, record.peerId, record.senderId);
     if (this.attached.has(record.agent)) { this.store.bindSession(entry.key, record.sessionId, workspaceId, record.agent.session.header?.cwd, presetId); return; }
     if (!this.activationFloor.has(record.sessionId)) this.activationFloor.set(record.sessionId, nativeSession(record).snapshotEvents().length - 1);
@@ -563,11 +575,11 @@ export class ConversationService {
           const live = entry.currentSessionId ? this.ctx.get('agents')?.get(SessionId(entry.currentSessionId)) : undefined;
           if (live?.status === 'running' || live?.inbox.nextTurn.length || live?.inbox.nextStep.length || (this.reservations.get(key) ?? 0) > 0) throw new Error('会话正在生成或排队，请停止后重试');
           this.validateSelection(entry.scope, entry.peerId, 'preset', input.presetId);
-          this.resolveWorkspace(input.workspaceId);
+          if (input.workspaceId !== '') this.resolveWorkspace(input.workspaceId);
         };
         assertCurrent();
         const entry = this.requireEntry(key);
-        const record = await this.manager.replaceSession(entry.scope, entry.peerId, input.workspaceId, { presetId: input.presetId, assertCurrent });
+        const record = await this.manager.replaceSession(entry.scope, entry.peerId, input.workspaceId || null, { presetId: input.presetId, assertCurrent });
         committed = record.sessionId;
         this.sessionOperations.complete(input.operationId, record.sessionId);
         return record.sessionId;
@@ -647,8 +659,11 @@ export class ConversationService {
     const preview = this.store.previewSettings(key, expectedVersion, settings, alias, receiveEnabled);
     const executionChanged = JSON.stringify(before.settings?.execution) !== JSON.stringify(settings.execution);
     await this.validateAgentSettings(settings);
-    const changedModel = JSON.stringify(before.settings?.model) !== JSON.stringify(settings.model);
-    const route = changedModel ? await this.manager.validateModelSetting(settings.model ?? this.manager.getDefaultModel()) : undefined;
+    const changedModel = JSON.stringify(before.settings?.model) !== JSON.stringify(settings.model)
+      || (settings.model === null && before.settings?.reasoningEffort !== settings.reasoningEffort);
+    const route = changedModel ? await this.manager.validateModelSetting(settings.model ?? {
+      ...this.manager.getDefaultModel(), ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
+    }) : undefined;
     const record = before.currentSessionId ? await this.manager.restoreExisting(before.scope, before.peerId) : undefined;
     if (record?.agent.status === 'running' || record?.agent.inbox?.nextTurn.length || record?.agent.inbox?.nextStep.length) throw new Error('会话正在生成或排队，请停止后再保存');
     if (route && record && !record.agent.model?.select) throw new Error('当前宿主不支持原生模型选择，设置保持不变。');
@@ -701,7 +716,7 @@ export class ConversationService {
     if (!entry) throw new Error('QQ 对话不存在');
     return entry;
   }
-  async enqueueQQ(record: SessionRecord, message: UserMessage, originalReceived: { messageId: string; senderId: string; [key: string]: unknown }, cutoff: number, backgroundRefs: readonly string[]): Promise<void> {
+  async enqueueQQ(record: SessionRecord, message: UserMessage, originalReceived: { messageId: string; senderId: string; [key: string]: unknown }, cutoff: number, backgroundRefs: readonly string[], promptContext?: QQTurnContext): Promise<void> {
     const entry = this.requireEntry(record.sessionKey);
     this.assertNotArchived(entry);
     if (!this.admitted(record.scope, record.peerId) || entry.policy.replyEnabled === false) throw new Error('该对话已停止回复');
@@ -713,11 +728,23 @@ export class ConversationService {
     if (this.operations.has(operationId)) return;
     const prepared = this.operations.prepare({ operationId, conversationKey: entry.key, sessionId: SessionId(record.sessionId),
       generation: this.generation(entry, record.sessionId), policyVersion: String(entry.policy.version), message,
-      target: { ...record.replyTarget }, cutoff, backgroundRefs, originalReceived });
+      target: { ...record.replyTarget }, cutoff, backgroundRefs, originalReceived, ...(promptContext === undefined ? {} : { promptContext }) });
     if (!prepared.created) return;
     const entered = new Promise<void>((resolve, reject) => { this.inputWaiters.set(message.id, { resolve, reject }); });
     try { record.agent.followup(message); }
-    catch (error) { this.inputWaiters.delete(message.id); throw error; }
+    catch (error) {
+      this.inputWaiters.delete(message.id);
+      try {
+        const inbox = record.agent.inbox;
+        const queued = [...inbox?.nextTurn ?? [], ...inbox?.nextStep ?? []]
+          .some(item => !!item && typeof item === 'object' && 'id' in item && item.id === message.id);
+        const submitted = nativeSession(record).snapshotEvents().some(event =>
+          (event.type === 'agent/inbox/spliced' && event.data.inserted.some(item => item.id === message.id))
+          || (event.type === 'user/message' && event.data.id === message.id));
+        if (!queued && !submitted) this.operations.markTerminal(operationId);
+      } catch { /* Unreadable submission evidence remains unknown and must not be replayed. */ }
+      throw error;
+    }
     // Backpressure ends at proven admission, not at driver idleness or final output.
     await entered;
   }
@@ -791,45 +818,39 @@ export class ConversationService {
     if (!record) return;
     if (type === 'user/message') await this.reconcileBackground(record);
     if (type === 'agent/inbox/spliced' && data.outcome === 'canceled') {
-      const live = this.ctx.get('agents')?.get(SessionId(sessionId));
       const events = nativeSession(record).snapshotEvents();
+      const canceled = eventSeq === undefined ? undefined : qqInboxLifecycle(events.filter(event => event.seq <= eventSeq))?.canceledBySeq.get(eventSeq);
       for (const operation of this.operations.forSession(sessionId)) {
-        if (!this.inputWaiters.has(operation.message.id) || events.some(event => event.type === 'user/message' && event.data.id === operation.message.id)) continue;
-        const queued = live?.inbox.nextTurn.find(item => item.id === operation.message.id);
-        const edited = Array.isArray(data.inserted) && data.inserted.some(item => item && typeof item === 'object' && 'id' in item && item.id === operation.message.id);
-        if (!queued || payloadHash(queued) !== operation.payloadHash || edited) {
-          this.inputWaiters.get(operation.message.id)?.reject(new Error('QQ 排队请求已取消或修改')); this.inputWaiters.delete(operation.message.id);
-        }
+        if (!canceled?.has(operation.message.id)
+          || events.some(event => event.type === 'user/message' && event.data.id === operation.message.id)) continue;
+        this.inputWaiters.get(operation.message.id)?.reject(new Error('QQ 排队请求已取消或修改')); this.inputWaiters.delete(operation.message.id);
+        this.operations.markTerminal(operation.operationId);
       }
     }
-    if (type === 'turn/start' && typeof data.turn === 'number') {
-      // 该轮次开始时才把元信息写入 prompt 槽：轮次串行保证此刻写入不会被后一条入站消息覆盖，
-      // 同轮多次 prompt 组装读到同一值。取"该轮输入消息"= 事件流中该轮范围内最后一条 user/message。
-      try {
-        const events = nativeSession(record).snapshotEvents();
-        const inputId = [...events].reverse().find(event => event.type === 'user/message')?.data?.id;
-        const meta = typeof inputId === 'string' ? this.pendingTurnMeta.get(inputId) : undefined;
-        if (meta) { this.promptHandles.get(sessionId)?.setTurnMeta(meta); this.pendingTurnMeta.delete(inputId as string); }
-      } catch { /* 元信息缺失只影响提示文案，不阻断轮次 */ }
-    }
     if (type === 'turn/end' && typeof data.turn === 'number') {
-      const live = this.ctx.get('agents')?.get(SessionId(sessionId));
-      const events = nativeSession(record).snapshotEvents();
-      for (const operation of this.operations.forSession(sessionId)) {
+      const events = nativeSession(record).snapshotEvents().filter(event => eventSeq === undefined || event.seq <= eventSeq);
+      const lifecycle = qqInboxLifecycle(events);
+      const claimed = lifecycle?.endedTurns.has(data.turn) ? lifecycle.claimedByTurn.get(data.turn) : undefined;
+      const endingOperations = this.operations.forSession(sessionId).filter(operation => claimed?.has(operation.message.id));
+      for (const operation of endingOperations) {
         if (!this.inputWaiters.has(operation.message.id)) continue;
-        const queued = live?.inbox.nextTurn.some(item => item.id === operation.message.id) || live?.inbox.nextStep.some(item => item.id === operation.message.id);
-        if (!queued && !events.some(event => event.type === 'user/message' && event.data.id === operation.message.id)) {
+        if (!events.some(event => event.type === 'user/message' && event.data.id === operation.message.id)) {
           this.inputWaiters.get(operation.message.id)?.reject(new Error('QQ 请求未确认进入模型，未自动重投')); this.inputWaiters.delete(operation.message.id);
         }
       }
       if (eventSeq === undefined || eventSeq <= (this.activationFloor.get(sessionId) ?? -1)) return;
       const key = `${sessionId}:${data.turn}`;
       if (this.settling.has(key)) return this.settling.get(key);
+      // Event routing does not block the native driver. Freeze this completed
+      // turn's claims before flush/delivery lets a later turn proceed. Claims
+      // also cover restored requests rejected before user/message admission.
+      const terminalIds = endingOperations.map(operation => ({ operationId: operation.operationId, messageId: operation.message.id }));
       const settled = this.settleTurn(record, data.turn).finally(() => {
         this.settling.delete(key);
-        for (const operation of this.operations.forSession(sessionId)) {
-          const queued = live?.inbox.nextTurn.some(item => item.id === operation.message.id) || live?.inbox.nextStep.some(item => item.id === operation.message.id);
-          if (!queued && !this.inputWaiters.has(operation.message.id)) this.operations.markTerminal(operation.operationId);
+        const live = this.ctx.get('agents')?.get(SessionId(sessionId));
+        for (const operation of terminalIds) {
+          const queued = live?.inbox.nextTurn.some(item => item.id === operation.messageId) || live?.inbox.nextStep.some(item => item.id === operation.messageId);
+          if (!queued) this.operations.markTerminal(operation.operationId);
         }
       });
       this.settling.set(key, settled); return settled;
@@ -898,11 +919,12 @@ export class ConversationService {
   }
 
   /** 从对话条目派生 prompt 数据（惰性：persona/extra 均每步现读 entry）。 */
-  private promptEntryData(key: string): QQPromptEntry {
+  private promptEntryData(key: string, sessionId: string): QQPromptEntry {
     return {
       scope: this.requireEntry(key).scope,
       personaCard: () => this.personaCardOf(this.requireEntry(key)),
       extraPrompts: () => this.extraPromptsOf(this.requireEntry(key)),
+      turnContext: () => this.promptTurnContext(key, sessionId),
     };
   }
   /** 人设卡：优先 role.card（role-card markdown），否则由 role 各字段生成 markdown。 */
@@ -922,15 +944,17 @@ export class ConversationService {
     if (!settings) return {};
     return { group: settings.promptGroup, direct: settings.promptDirect };
   }
-  /** 入站时暂存该消息的 turn-meta；其轮次 turn/start 时才写入 prompt 槽（防背靠背覆盖）。 */
-  stashTurnMeta(messageId: string, meta: import('../prompt/index.ts').TurnMeta): void {
-    this.pendingTurnMeta.set(messageId, meta);
+  /** Resolve only immutable source facts whose native inbox claim is verified. */
+  private promptTurnContext(key: string, sessionId: string): QQTurnContext | undefined {
+    const operation = this.activeQQ(sessionId);
+    if (!operation || operation.conversationKey !== key) return undefined;
+    return operation.promptContext;
   }
   /** 安装（或重装）某 agent 的 QQ prompt sections/contexts。 */
   private installAgentPrompt(agent: { ctx: Context }, sessionId: string, key: string): void {
     this.promptHandles.get(sessionId)?.dispose();
     try {
-      this.promptHandles.set(sessionId, installQQPrompt(agent.ctx, this.promptEntryData(key)));
+      this.promptHandles.set(sessionId, installQQPrompt(agent.ctx, this.promptEntryData(key, sessionId)));
     } catch (error) {
       this.logger.warn(`QQ prompt 注入失败：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -946,7 +970,7 @@ export class ConversationService {
       const exists = session?.snapshotEvents().some(event => event.type === 'assistant/message' && event.data.message.id === source.messageId);
       if (!exists) throw new Error('原生回答不存在，请重新选择');
     }
-    return this.deliver(key, operationId, text, { scope: entry.scope, targetId: entry.peerId }, () => this.admitted(entry.scope, entry.peerId), 'manual', { provenance: 'web', ...(source ? { sourceSessionId: source.sessionId, sourceMessageId: source.messageId, answerId: source.messageId } : {}) });
+    return this.deliver(key, operationId, source ? modelReplyText(text) : text, { scope: entry.scope, targetId: entry.peerId }, () => this.admitted(entry.scope, entry.peerId), 'manual', { provenance: 'web', ...(source ? { sourceSessionId: source.sessionId, sourceMessageId: source.messageId, answerId: source.messageId } : {}) });
   }
   private async deliver(key: string, operationId: string, text: string, target: ReplyTarget, allowed: () => boolean, origin: 'qq' | 'manual' = 'qq', provenance: import('../shared/conversation-protocol.ts').DeliveryProvenance = {}): Promise<DeliveryRecord> {
     if (!allowed()) throw new Error('该对话或本轮发送资格已撤销');

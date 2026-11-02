@@ -2,6 +2,7 @@ import type {} from '@deepseek-ai/dsh-agent/types';
 import type { MessageId, UserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session';
 import { payloadHash, type HumanReceipt, type QQOperation } from './qq-operations.ts';
+import { modelReplyText } from '../transport/model-reply.ts';
 
 export type QQInputVerdict =
   | { kind: 'qq'; operationId: string; inputSeq: SessionSeq }
@@ -21,6 +22,53 @@ interface Evidence {
   final: SessionEvent<'assistant/message'> | undefined;
   finalStepEnded: boolean;
 }
+
+interface QQInboxLifecycle {
+  readonly claimedByTurn: ReadonlyMap<number, ReadonlySet<MessageId>>;
+  readonly canceledBySeq: ReadonlyMap<number, ReadonlySet<MessageId>>;
+  readonly endedTurns: ReadonlySet<number>;
+}
+
+/** Native queue ownership for cleanup only; it never authorizes model input or delivery. */
+export function qqInboxLifecycle(events: readonly SessionEvent[]): QQInboxLifecycle | undefined {
+  const inbox: Record<InboxTarget, UserMessage[]> = { 'next-turn': [], 'next-step': [] };
+  const claimedByTurn = new Map<number, Set<MessageId>>();
+  const canceledBySeq = new Map<number, Set<MessageId>>();
+  const endedTurns = new Set<number>();
+  let openTurn: number | undefined;
+  let previousTurn = 0;
+  let expectedSeq = 0;
+  for (const event of events) {
+    if (event.seq !== expectedSeq++) return undefined;
+    if (event.type === 'turn/start') {
+      if (openTurn !== undefined || event.data.turn <= previousTurn) return undefined;
+      openTurn = previousTurn = event.data.turn;
+    } else if (event.type === 'turn/end') {
+      if (openTurn !== event.data.turn) return undefined;
+      endedTurns.add(openTurn); openTurn = undefined;
+    } else if (event.type === 'agent/inbox/spliced') {
+      const { target, start, inserted, outcome } = event.data;
+      const count = event.data.removedCount ?? 0;
+      const pending = inbox[target];
+      if (!Number.isSafeInteger(start) || start < 0 || start > pending.length
+        || !Number.isSafeInteger(count) || count < 0 || start + count > pending.length) return undefined;
+      const removed = pending.splice(start, count, ...inserted);
+      const pendingIds = [...inbox['next-turn'], ...inbox['next-step']].map(message => message.id);
+      if (new Set(pendingIds).size !== pendingIds.length) return undefined;
+      if (!count) continue;
+      if (outcome === 'canceled') {
+        canceledBySeq.set(event.seq, new Set(removed.map(message => message.id)));
+      } else {
+        if (openTurn === undefined || start !== 0 || inserted.length > 0 || (target === 'next-turn' && count !== 1)) return undefined;
+        const claimed = claimedByTurn.get(openTurn) ?? new Set<MessageId>();
+        for (const message of removed) claimed.add(message.id);
+        claimedByTurn.set(openTurn, claimed);
+      }
+    }
+  }
+  return { claimedByTurn, canceledBySeq, endedTurns };
+}
+
 type Fold = { kind: 'evidence'; evidence: Evidence } | { kind: 'suppressed'; reason: string };
 
 function suppressed(reason: string): { kind: 'suppressed'; reason: string } { return { kind: 'suppressed', reason }; }
@@ -221,7 +269,7 @@ export function classifyTurn(events: readonly SessionEvent[], turn: number, oper
   if (!end || end.data.reason.kind !== 'completed') return suppressed('turn-not-completed');
   if (!admitted || !final || !finalStepEnded || final.data.interrupted
     || final.data.message.content.some(block => block.type === 'tool-call')) return suppressed('missing-final-answer');
-  const text = final.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('');
+  const text = modelReplyText(final.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''));
   if (!text.trim()) return suppressed('empty-final-answer');
   return { kind: 'qq', operationId: operation.operationId, finalMessageId: final.data.message.id, text, inputSeq };
 }

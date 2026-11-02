@@ -46,7 +46,7 @@ describe('QQ preset operation authorization', () => {
     const perform = vi.spyOn(store, 'perform');
     const target = { kind: 'newSession', key: entry.key, name: entry.name, sessionId: 'current', workspaceId: null, presetId: null, policyVersion: 1 };
     await act(async () => root.render(h(QQOperationDialog, { target, store, workspaces: [], selectorSource: { listAgentPresets: async () => ({ ok: true, value: { presets: [] } }) }, defaultWorkspaceName: '默认工作区' })));
-    expect(document.body.textContent).toContain('请先在 DSH 工作区导航中添加工作区');
+    expect(document.body.textContent).toContain('可使用 QQ 临时目录，也可添加 DSH 工作区');
     // 空工作区时仍提供「添加工作区（选择文件夹…）」入口，对齐原生 picker。
     await act(async () => document.querySelector('[aria-haspopup="menu"]').click());
     expect(option('＋ 添加工作区（选择文件夹…）').disabled).toBe(false);
@@ -83,6 +83,16 @@ describe('QQ preset operation authorization', () => {
 describe('unified new-session operation', () => {
   const selectorSource = { listAgentPresets: async () => ({ ok: true, value: { presets: [{ id: 'standard', name: '标准模式' }] } }) };
   const workspaces = [{ workspaceId: 'workspace', title: '项目', path: '/project', sessionIds: ['current'] }];
+  it('submits the QQ default directory when no DSH workspace exists', async () => {
+    const entry = conversation(['standard'], ['standard']); delete entry.workspaceId;
+    const store = new QQSessionStore({ openSession: vi.fn() });
+    store.accept({ conversations: [entry], tools: [], ownerIds: [] }); store.openOperation(entry);
+    const perform = vi.spyOn(store, 'perform').mockResolvedValue({ sessionId: 'new' });
+    await act(async () => root.render(h(QQOperationDialog, { target: store.getSnapshot().overlay.target, store, workspaces: [], selectorSource, defaultWorkspaceName: '默认工作区' })));
+    expect(submit().disabled).toBe(false);
+    await act(async () => submit().click());
+    expect(perform.mock.calls[0][0]).toMatchObject({ workspaceId: '', presetId: 'standard' });
+  });
   it('uses public workspace membership for a legacy conversation without a stored workspace id', async () => {
     const entry = conversation(['standard'], ['standard']); delete entry.workspaceId;
     const store = new QQSessionStore({ openSession: vi.fn() });
@@ -101,6 +111,13 @@ describe('unified new-session operation', () => {
     await act(async () => root.render(h(QQOperationDialog, { target, store, workspaces, selectorSource, defaultWorkspaceName: '默认工作区' })));
     return { entry, store, perform };
   }
+  it('submits an empty workspace id when the user switches from a workspace to the QQ default directory', async () => {
+    const { perform } = await currentForm();
+    await act(async () => document.querySelector('[aria-label^="工作区"]').click());
+    await act(async () => option('不指定工作区（QQ 临时目录）').click());
+    await act(async () => submit().click());
+    expect(perform.mock.calls[0][0]).toMatchObject({ workspaceId: '', presetId: 'standard' });
+  });
   it('defaults both selectors to the current values and collapses duplicate clicks', async () => {
     let resolve;
     const { perform } = await currentForm(() => new Promise(done => { resolve = done; }));

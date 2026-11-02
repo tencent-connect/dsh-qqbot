@@ -1,10 +1,12 @@
 /** Native workbench policy behavior against the linked Host's actual registry and Agents. */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Context } from '@deepseek-ai/cordis';
-import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm';
+import LlmRuntime, { createUserMessage, LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm';
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session';
 import SessionProjections from '@deepseek-ai/dsh-session-projection';
 import Agents from '@deepseek-ai/dsh-agent';
@@ -16,9 +18,13 @@ import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope';
 import { executeModelToolFixture } from '@deepseek-ai/dsh-tool-testkit';
 import { ConfigSchema } from '../config.ts';
 import { SessionManager } from '../session/session-manager.ts';
-import type { DshAgentRegistry } from '../session/types.ts';
+import type { DshAgentRegistry, SessionRecord } from '../session/types.ts';
 import { ConversationService } from '../runtime/conversation-service.ts';
+import { ConversationStore } from '../conversations/index.ts';
 import { catalogTools, defaultPolicy, installPolicy } from './index.ts';
+
+const profile = vi.hoisted(() => ({ dir: null as string | null }));
+vi.mock('../shared/index.ts', async original => ({ ...await original<typeof import('../shared/index.ts')>(), getProfileDir: () => profile.dir }));
 
 vi.mock('../model/model-resolver.ts', () => ({
   ModelResolver: class {
@@ -37,6 +43,7 @@ vi.mock('../host/adapter.ts', () => ({ createHostAdapter: (ctx: Context) => ({ c
 const contexts: Context[] = [];
 const roots: string[] = [];
 afterEach(async () => {
+  profile.dir = null;
   for (const ctx of contexts.splice(0)) await ctx.fiber.dispose();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -52,7 +59,7 @@ async function runtime() {
   await ctx.plugin(Agents);
   await ctx.plugin(AgentLoop, { agents: [] });
   let owner: Context | undefined;
-  await ctx.plugin({ inject: ['agents', 'tools', 'systemPrompt'], apply(child: Context) { owner = child; } });
+  await ctx.plugin({ inject: ['agents', 'tools', 'systemPrompt', 'llm'], apply(child: Context) { owner = child; } });
   if (!owner) throw new Error('test dependency context unavailable');
   const first = createScope(owner, {});
   const second = createScope(owner, {});
@@ -68,6 +75,91 @@ async function runtime() {
 }
 
 describe('native workbench tool ownership', () => {
+  it.each([
+    { scope: 'group', mapped: true }, { scope: 'c2c', mapped: true },
+    { scope: 'group', mapped: false }, { scope: 'c2c', mapped: false },
+  ] as const)('aborts a real $scope tool before its delayed write with QQ mapping $mapped', async ({ scope, mapped }) => {
+    const h = await runtime();
+    const root = await mkdtemp(join(tmpdir(), 'qq-live-revocation-')); roots.push(root);
+    profile.dir = root;
+    await writeFile(join(root, 'cordis.patch.yml'), '- id: im-qqbot\n  config:\n    appId: live-revocation\n');
+    const marker = join(root, 'late-side-effect.txt');
+    const entered = Promise.withResolvers<void>();
+    let aborted = false;
+    h.second.ctx.tools.register(defineTool({ name: 'delayed_fixture', description: 'local cancellation fixture', parameters: {},
+      output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+      execute: async (_args, exec) => {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => { writeFileSync(marker, 'completed'); resolve(); }, 80);
+          exec.signal.addEventListener('abort', () => { aborted = true; clearTimeout(timer); reject(new Error('cancelled')); }, { once: true });
+          entered.resolve();
+        });
+        return 'written';
+      },
+    }));
+    h.ctx.llm.registerAdapter(['revocation-fixture'], new class extends LlmAdapter {
+      async *stream(): AsyncIterable<StreamChunk> {
+        const callId = ToolCallId('delayed-tool-call');
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+        yield { type: 'tool-call-delta', index: 0, id: callId, name: 'delayed_fixture', argumentsDelta: '{}' };
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'delayed_fixture', arguments: '{}' } };
+        yield { type: 'finish', reason: { kind: 'tool-calls' } };
+      }
+    }());
+    const config = ConfigSchema({ appId: 'live-revocation', cwd: root,
+      access: { groupMode: 'allowlist', groupAllow: ['peer'], c2cMode: 'allowlist', c2cAllow: ['peer'] } });
+    let record: SessionRecord | undefined;
+    const manager = { getDefaultModel: () => ({ provider: 'revocation-fixture', model: 'local' }), getDefaultPreset: () => '',
+      getSessionRecord: () => mapped ? record : undefined, findBySessionId: () => mapped ? record : undefined,
+    } as unknown as SessionManager;
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const service = new ConversationService(h.ctx, manager, config, logger, root); manager.conversations = service;
+    const entry = service.entry(scope, 'peer');
+    const handle = await h.ctx.agents.create({ sessionId: SessionId(`running-${scope}-${mapped}`), agentOptions: { provider: 'revocation-fixture', model: 'local' } });
+    const agentScope = scopeOf(handle.agent.ctx); const parent = scopeOf(h.second.ctx);
+    if (!agentScope || !parent) throw new Error('test scope unavailable');
+    bindScopeParent(agentScope, parent);
+    record = { sessionKey: entry.key, sessionId: handle.agent.id, scope, peerId: 'peer', senderId: 'actor', agent: handle.agent, handle, replyTarget: { scope, targetId: 'peer' }, lastActivity: Date.now() };
+    service.attach(record);
+    try {
+      handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'run local delayed tool' }] }));
+      await entered.promise;
+      expect(handle.agent.status).toBe('running');
+      handle.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'queued local task' }] }));
+      expect(handle.agent.inbox.nextTurn).toHaveLength(1);
+      expect(service.revokePair('peer', scope === 'group' ? 'allow-group' : 'allow-c2c').ok).toBe(true);
+      await handle.agent.whenIdle();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(aborted).toBe(true);
+      expect(existsSync(marker)).toBe(false);
+      expect(handle.agent.inbox.nextTurn).toHaveLength(0);
+      expect(handle.agent.session.snapshotEvents().filter(event => event.type === 'turn/end').map(event => event.data.reason)).toEqual([{ kind: 'aborted', reason: { kind: 'user' } }]);
+    } finally { await handle.dispose(); }
+  });
+  it('enforces the repaired custom tool ceiling against real tool execution after reload', async () => {
+    const h = await runtime();
+    const root = await mkdtemp(join(tmpdir(), 'qq-reloaded-policy-')); roots.push(root);
+    const store = new ConversationStore(root, 'reloaded-policy');
+    const entry = store.ensure('c2c', 'peer');
+    store.updateSettings(entry.key, entry.policy.version, { ...entry.settings!, execution: { kind: 'custom', permission: 'read-only', tools: ['after'] } }, '', true);
+    const path = join(root, `conversations-${createHash('sha256').update('reloaded-policy').digest('hex')}.json`);
+    const catalog = JSON.parse(await readFile(path, 'utf8'));
+    catalog.entries[0].policy.nativeTools = true;
+    await writeFile(path, JSON.stringify(catalog));
+    const reloaded = new ConversationStore(root, 'reloaded-policy');
+    const handle = await h.ctx.agents.create({ sessionId: SessionId('reloaded-custom-policy') });
+    const scope = scopeOf(handle.agent.ctx); const parent = scopeOf(h.second.ctx);
+    if (!scope || !parent) throw new Error('test scope unavailable');
+    bindScopeParent(scope, parent);
+    const dispose = installPolicy(handle.agent.ctx, { agentId: handle.agent.id, getPolicy: () => reloaded.get(entry.key)?.policy, getCatalog: () => catalogTools(h.ctx.tools, handle.agent) });
+    try {
+      expect((await h.ctx.systemPrompt.assemble({ scope: handle.agent })).tools.map(tool => tool.name)).toEqual(['after']);
+      const execute = (name: string) => executeModelToolFixture(h.ctx, { agent: handle.agent, name, callId: ToolCallId(`reloaded-${name}`), arguments: {}, signal: new AbortController().signal });
+      expect((await execute('after')).isError).toBe(false);
+      expect((await execute('ungranted')).isError).toBe(true);
+      expect(h.count()).toBe(1);
+    } finally { dispose(); await handle.dispose(); }
+  });
   it.each(['restricted', 'native'] as const)('blocks retired tools from declarations and real execution in %s mode', async toolMode => {
     const h = await runtime();
     const handle = await h.ctx.agents.create({ sessionId: SessionId(`retired-policy-${toolMode}`) });

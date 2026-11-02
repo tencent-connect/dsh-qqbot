@@ -14,4 +14,4 @@ export * from './persona.ts';
 export * from './extra.ts';
 export * from './turn-meta.ts';
 export { assembleUserBlocks } from './user-blocks.ts';
-export { installQQPrompt, type QQPromptEntry, type QQPromptHandle } from './install.ts';
+export { installQQPrompt, type QQPromptEntry, type QQPromptHandle, type QQTurnContext } from './install.ts';

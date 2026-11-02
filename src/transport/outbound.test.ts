@@ -12,6 +12,7 @@ import type { SessionManager } from '../session/session-manager.ts';
 import type { DshAgent, SessionRecord } from '../session/types.ts';
 import type { ReplyTarget } from '../types.ts';
 import { createOutboundHandler } from './outbound.ts';
+import { UNEXECUTED_TOOL_REQUEST_NOTICE } from './model-reply.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -80,10 +81,33 @@ function fixture() {
     route(session.append('step/end', { turn: 1, step }));
     route(session.append('turn/end', { turn: 1, reason: { kind: 'completed' } }));
   }
-  return { session, service, record, outbound, sendMarkdown, openStream, stream, deliver, flush, logger, route, drain, begin, assistant, finish };
+  return { session, service, record, config, outbound, sendMarkdown, openStream, stream, deliver, flush, logger, route, drain, begin, assistant, finish };
 }
 
 describe('native outbound delivery', () => {
+  it('reports unexecuted DSML from an empty tool selection before any stream or QQ message splitting', async () => {
+    const f = fixture(); const entry = f.service.requireEntry(f.record.sessionKey);
+    f.service.store.updateSettings(entry.key, entry.policy.version, { ...entry.settings!, execution: { kind: 'custom', permission: 'read-only', tools: [] } }, '', true);
+    f.config.textChunkLimit = 20;
+    await f.begin(true);
+    const text = '准备查询。\n<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="web_fetch">https://example.com</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>';
+    f.outbound.routeStreamFrame(f.session.id, { kind: 'attempt-start', attemptId: 'protocol' });
+    for (const character of text) {
+      f.outbound.routeStreamFrame(f.session.id, { kind: 'text-delta', attemptId: 'protocol', text: character });
+      f.outbound.routeSessionEvent(f.session, { type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', text: character } } });
+    }
+    const message = createAssistantMessage({ source: { provider: 'fixture', model: 'fixture' }, content: [
+      { type: 'text', text: text.slice(0, 19) }, { type: 'text', text: text.slice(19) },
+    ] });
+    f.route(f.session.append('assistant/message', { turn: 1, step: 1, message, stream: [] }, { surfaceOp: 'append' }));
+    await f.drain(); expect(f.sendMarkdown).not.toHaveBeenCalled();
+    f.finish(); await f.drain();
+    expect(f.sendMarkdown).toHaveBeenCalledExactlyOnceWith(f.record.replyTarget, UNEXECUTED_TOOL_REQUEST_NOTICE);
+    expect(f.openStream).not.toHaveBeenCalled();
+    expect(f.session.snapshotEvents().some(event => event.type === 'tool/call')).toBe(false);
+    expect(f.service.store.deliveries(entry.key)[0]?.text).toBe(UNEXECUTED_TOOL_REQUEST_NOTICE);
+    expect(f.session.snapshotEvents().some(event => event.type === 'assistant/message' && event.data.message.id === message.id)).toBe(true);
+  });
   it('ignores stream frames, chunks, tool output and presented files until a verified QQ turn completes', async () => {
     const f = fixture(); await f.begin(true);
     f.outbound.routeStreamFrame(f.session.id, { kind: 'attempt-start', attemptId: 'attempt-1' });

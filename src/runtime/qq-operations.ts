@@ -5,6 +5,7 @@ import { MessageId, ToolCallId, type ContentBlock, type UserMessage } from '@dee
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../conversations/files.ts';
+import type { QQTurnContext } from '../prompt/index.ts';
 
 export interface QQOperation {
   readonly preparedAt?: number;
@@ -20,9 +21,13 @@ export interface QQOperation {
   readonly cutoff: number;
   readonly backgroundRefs: readonly string[];
   readonly originalReceived: unknown;
+  /** Queue-only facts; the native inbox carries references, never these bodies. */
+  readonly promptContext?: QQTurnContext;
+  /** Retained after terminal cleanup to preserve immutable snapshot identity. */
+  readonly promptContextHash?: string;
 }
 
-export type PrepareQQOperation = Omit<QQOperation, 'payloadHash'>;
+export type PrepareQQOperation = Omit<QQOperation, 'payloadHash' | 'promptContextHash'>;
 
 export interface HumanReceipt {
   readonly sessionId: SessionId;
@@ -110,15 +115,29 @@ function parseOperation(value: unknown): QQOperation {
   const data = record(value);
   const message = userMessage(data.message);
   if (data.payloadHash !== payloadHash(message) || data.originalReceived === undefined) throw new TypeError('Corrupt QQ operation payload');
+  const terminalAt = data.terminalAt === undefined ? undefined : natural(data.terminalAt);
+  const promptContext = contextSnapshot(data.promptContext, data.promptContextHash, terminalAt !== undefined);
   return {
     ...(data.preparedAt === undefined ? {} : { preparedAt: natural(data.preparedAt) }),
-    ...(data.terminalAt === undefined ? {} : { terminalAt: natural(data.terminalAt) }),
+    ...(terminalAt === undefined ? {} : { terminalAt }),
     operationId: text(data.operationId), conversationKey: text(data.conversationKey),
     sessionId: SessionId(text(data.sessionId)), generation: natural(data.generation),
     policyVersion: text(data.policyVersion), message, payloadHash: data.payloadHash,
     target: replyTarget(data.target), cutoff: natural(data.cutoff),
     backgroundRefs: strings(data.backgroundRefs), originalReceived: data.originalReceived,
+    ...promptContext,
   };
+}
+
+function contextSnapshot(value: unknown, digest: unknown, terminal: boolean): Pick<QQOperation, 'promptContext' | 'promptContextHash'> {
+  if (value === undefined && digest === undefined) return {}; // Older operations have no snapshot.
+  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) throw new TypeError('Corrupt QQ prompt context hash');
+  if (value === undefined && terminal) return { promptContextHash: digest };
+  const data = record(value);
+  if (typeof data.turnMetaText !== 'string' || typeof data.backgroundText !== 'string') throw new TypeError('Invalid QQ prompt context');
+  const promptContext = { turnMetaText: data.turnMetaText, backgroundText: data.backgroundText };
+  if (digest !== payloadHash(promptContext)) throw new TypeError('Corrupt QQ prompt context snapshot');
+  return { promptContext, promptContextHash: digest };
 }
 
 function parseReceipt(value: unknown): HumanReceipt {
@@ -173,7 +192,10 @@ export class QQOperations {
   public prepare(input: PrepareQQOperation): { created: boolean; operation: QQOperation } {
     if (this.state.retired.some(item => item.operationId === input.operationId || item.messageId === input.message.id)) throw new Error('QQ operation body has expired; it cannot be replayed');
     const prior = this.state.operations.find(item => item.operationId === input.operationId);
-    const operation = snapshot(parseOperation({ ...input, preparedAt: prior?.preparedAt ?? input.preparedAt ?? Date.now(), ...(prior?.terminalAt === undefined ? {} : { terminalAt: prior.terminalAt }), payloadHash: payloadHash(input.message) }));
+    const operation = snapshot(parseOperation({ ...input,
+      ...(input.promptContext === undefined ? {} : { promptContextHash: payloadHash(input.promptContext) }),
+      ...(prior?.terminalAt === undefined ? {} : { terminalAt: prior.terminalAt, promptContext: undefined }),
+      preparedAt: prior?.preparedAt ?? input.preparedAt ?? Date.now(), payloadHash: payloadHash(input.message) }));
     canonical(operation);
     if (prior) {
       if (payloadHash(prior) !== payloadHash(operation)) throw new Error('QQ operation identity reused with different input');
@@ -189,7 +211,12 @@ export class QQOperations {
   public markTerminal(operationId: string): void {
     const operation = this.state.operations.find(item => item.operationId === operationId);
     if (!operation || operation.terminalAt !== undefined) return;
-    this.commit({ ...this.state, operations: this.state.operations.map(item => item === operation ? snapshot({ ...item, terminalAt: Date.now() }) : item) });
+    this.commit({ ...this.state, operations: this.state.operations.map(item => {
+      if (item !== operation) return item;
+      const terminal = { ...item, terminalAt: Date.now() };
+      delete terminal.promptContext;
+      return snapshot(terminal);
+    }) });
   }
   public retireExpired(cutoff: (key: string) => number, protectedOperation: (operation: QQOperation) => boolean, bodyExpired: (operation: QQOperation) => boolean = () => false): number {
     const retired = this.state.operations.filter(item => item.terminalAt !== undefined && ((item.preparedAt ?? Infinity) < cutoff(item.conversationKey) || bodyExpired(item)) && !protectedOperation(item));

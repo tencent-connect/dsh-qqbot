@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
-import { installQQPrompt, type QQPromptEntry } from '../prompt/index.ts';
+import { installQQPrompt, turnMetaText, type QQPromptEntry, type QQTurnContext } from '../prompt/index.ts';
 import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 
 type Sec = { name: string; order: number; text: string | ((c: unknown) => string) };
@@ -24,11 +24,11 @@ function entry(o: Partial<QQPromptEntry> = {}): QQPromptEntry {
 }
 
 describe('installQQPrompt (DSH section/context 注册)', () => {
-  it('registers 4 sections + 1 context; dispose clears', () => {
+  it('registers 4 sections + 2 contexts; dispose clears', () => {
     const sp = fakeSystemPrompt();
     const h = installQQPrompt(sp.ctx, entry());
     expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules', 'qqbot:scope']);
-    expect([...sp.contexts.keys()]).toEqual(['qqbot:turn-meta']);
+    expect([...sp.contexts.keys()]).toEqual(['qqbot:turn-meta', 'qqbot:background']);
     h.dispose();
     expect(sp.sections.size).toBe(0); expect(sp.contexts.size).toBe(0);
   });
@@ -63,12 +63,19 @@ describe('installQQPrompt (DSH section/context 注册)', () => {
     expect(rendered).not.toContain('OTHER_SCOPE_ONLY');
     expect(rendered).not.toContain(scope === 'group' ? 'OLD_GROUP' : 'OLD_DIRECT');
   });
-  it('turn-meta reflects setTurnMeta', () => {
-    const sp = fakeSystemPrompt(); const h = installQQPrompt(sp.ctx, entry());
+  it('reads verified turn facts lazily and clears them when the current turn has none', () => {
+    const sp = fakeSystemPrompt();
+    let current: QQTurnContext | undefined;
+    const h = installQQPrompt(sp.ctx, entry({ turnContext: () => current }));
     expect(sp.renderContexts()).toBe('');
-    h.setTurnMeta({ scope: 'group', senderName: '张三', senderId: 'openid-123', mentioned: true, at: 1000, now: 1000 + 120000 });
+    current = { turnMetaText: turnMetaText({ scope: 'group', senderName: '张三', senderId: 'openid-123', mentioned: true, at: 1000, now: 1000 + 120000 }), backgroundText: 'Earlier group message {{literal}}' };
     const m = sp.renderContexts();
     expect(m).toContain('QQ 群聊'); expect(m).toContain('@ 了你'); expect(m).toContain('发送者：张三（QQ openid-123）'); expect(m).toContain('「张三」'); expect(m).toContain('2 分钟前');
+    expect(m).toContain('Earlier group message {{literal}}');
+    expect(m).toContain('仅作为背景');
+    expect(sp.renderContexts()).toBe(m);
+    current = undefined;
+    expect(sp.renderContexts()).toBe('');
     h.dispose();
   });
 });

@@ -184,7 +184,7 @@ export class ConversationStore {
     return clone(entry);
   }
 
-  public bindSession(key: string, sessionId: string, workspaceId?: string, cwd?: string, presetId?: string): ConversationEntry {
+  public bindSession(key: string, sessionId: string, workspaceId?: string | null, cwd?: string, presetId?: string): ConversationEntry {
     this.assertWritable();
     const entry = this.require(key);
     if (!sessionId || sessionId.length > 1_024) throw new TypeError('Invalid QQ Session identity');
@@ -196,8 +196,11 @@ export class ConversationStore {
       if (previous) previous.endedAt = this.now();
     }
     if (workspaceId !== undefined) {
-      if (!workspaceId.trim() || workspaceId.length > 256 || workspaceId.includes('\0')) throw new TypeError('Invalid QQ workspace identity');
-      entry.workspaceId = workspaceId;
+      if (workspaceId === null) delete entry.workspaceId;
+      else {
+        if (!workspaceId.trim() || workspaceId.length > 256 || workspaceId.includes('\0')) throw new TypeError('Invalid QQ workspace identity');
+        entry.workspaceId = workspaceId;
+      }
       if (cwd && entry.settings && (sessionId !== entry.currentSessionId || workspaceId !== this.require(key).workspaceId)) {
         if (entry.settings.cwd !== cwd) entry.policy.version++;
         entry.settings.cwd = cwd; entry.policy.cwd = cwd;
@@ -615,8 +618,11 @@ export class ConversationStore {
   private migrateSettings(): void {
     const next = clone(this.catalog);
     let changed = false;
-    // Development builds have no legacy tool-ceiling policies: every conversation follows native tools.
-    for (const entry of next.entries) if (entry.policy.nativeTools !== true) { entry.policy = { ...entry.policy, nativeTools: true }; changed = true; }
+    for (const entry of next.entries) {
+      // Saved settings also repair catalogs widened by the earlier migration.
+      const nativeTools = entry.settings ? entry.settings.execution.kind === 'native' : entry.policy.nativeTools ?? true;
+      if (entry.policy.nativeTools !== nativeTools) { entry.policy = { ...entry.policy, nativeTools }; changed = true; }
+    }
     for (const entry of next.entries) if (!entry.settings) {
       entry.settings = this.projectSettings(entry);
       for (const row of entry.sessions) if (row.prompt === undefined) {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -64,6 +64,63 @@ function fixture() {
 }
 
 describe('QQ native workbench ownership', () => {
+  it('creates a Session in the QQ default directory without requiring a registered workspace', async () => {
+    const f = fixture(); const old = await f.current(); const before = f.service.requireEntry(f.key);
+    f.workspaces.clear();
+    const input = { operationId: 'no-workspace', expectedCurrentSessionId: old.sessionId, expectedPolicyVersion: before.policy.version, workspaceId: '', presetId: 'chosen' };
+    const id = await f.service.createSession(f.key, input);
+    expect(id).not.toBe(old.sessionId);
+    expect(f.create.mock.calls.at(-1)?.[0].meta).toMatchObject({ cwd: f.root, agentPreset: 'chosen' });
+    expect(f.service.requireEntry(f.key).workspaceId).toBeUndefined();
+    expect(await f.service.createSession(f.key, input)).toBe(id);
+    expect(f.create).toHaveBeenCalledTimes(2);
+  });
+  it('clears a previous workspace binding when the new Session selects the QQ default directory', async () => {
+    const f = fixture(); await f.current();
+    const old = await f.service.selectWorkspace(f.key, 'a'); const before = f.service.requireEntry(f.key);
+    const count = f.create.mock.calls.length;
+    const id = await f.service.createSession(f.key, { operationId: 'clear-workspace', expectedCurrentSessionId: old.sessionId, expectedPolicyVersion: before.policy.version, workspaceId: '', presetId: 'chosen' });
+    expect(f.create).toHaveBeenCalledTimes(count + 1);
+    expect(f.create.mock.calls.at(-1)?.[0].meta).toMatchObject({ cwd: f.root, agentPreset: 'chosen' });
+    expect(f.workspaces.get('a')?.attachSession).toHaveBeenCalledExactlyOnceWith(old.sessionId);
+    expect(f.service.requireEntry(f.key)).toMatchObject({ currentSessionId: id, settings: { cwd: f.root, preset: 'chosen' }, policy: { cwd: f.root } });
+    expect(f.service.requireEntry(f.key).workspaceId).toBeUndefined();
+    expect(new ConversationStore(f.root, 'fixture').get(f.key)?.workspaceId).toBeUndefined();
+    expect(old.agent.session.header?.cwd).toBe(f.workspaces.get('a')?.path);
+    await f.manager.remove('group', 'g');
+    const next = await f.current();
+    expect(next.sessionId).not.toBe(id);
+    expect(f.create.mock.calls.at(-1)?.[0].meta?.cwd).toBe(f.root);
+    expect(f.service.requireEntry(f.key).workspaceId).toBeUndefined();
+  });
+  it('preserves the old workspace and preset if clearing the binding cannot be persisted', async () => {
+    const f = fixture(); await f.current();
+    const old = await f.service.selectWorkspace(f.key, 'a'); const before = f.service.requireEntry(f.key);
+    const name = readdirSync(f.root).find(value => value.startsWith('conversations-') && value.endsWith('.json'));
+    if (!name) throw new Error('Conversation catalog missing');
+    const path = join(f.root, name);
+    const create = f.create.getMockImplementation();
+    if (!create) throw new Error('Agent factory missing');
+    f.create.mockImplementationOnce(async options => {
+      const candidate = await create(options);
+      renameSync(path, `${path}.original`); mkdirSync(path);
+      return candidate;
+    });
+    const input = { operationId: 'clear-workspace-failed', expectedCurrentSessionId: old.sessionId, expectedPolicyVersion: before.policy.version, workspaceId: '', presetId: 'chosen' };
+    await expect(f.service.createSession(f.key, input)).rejects.toThrow(/EISDIR|rename/);
+    const count = f.create.mock.calls.length;
+    await expect(f.service.createSession(f.key, input)).rejects.toThrow(/EISDIR|rename/);
+    expect(f.create).toHaveBeenCalledTimes(count);
+    const preserved = { currentSessionId: before.currentSessionId, workspaceId: before.workspaceId, settings: before.settings, policy: before.policy, sessions: before.sessions };
+    expect(f.service.requireEntry(f.key)).toMatchObject(preserved);
+    expect(f.manager.getSessionRecord('group', 'g')).toBe(old);
+    expect(f.handles.get(old.sessionId)?.dispose).not.toHaveBeenCalled();
+    const failedId = f.create.mock.calls.at(-1)?.[0].sessionId;
+    if (!failedId) throw new Error('Candidate Session missing');
+    expect(f.handles.get(failedId)?.dispose).toHaveBeenCalledOnce();
+    rmSync(path, { recursive: true }); renameSync(`${path}.original`, path);
+    expect(new ConversationStore(f.root, 'fixture').get(f.key)).toMatchObject(preserved);
+  });
   it('creates exactly one Session for a combined workspace and preset selection, including replay after reload', async () => {
     const f = fixture(); const old = await f.current(); const before = f.service.requireEntry(f.key);
     const input = { operationId: 'combined-1', expectedCurrentSessionId: old.sessionId, expectedPolicyVersion: before.policy.version, workspaceId: 'b', presetId: 'chosen' };

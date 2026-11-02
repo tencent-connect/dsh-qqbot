@@ -21,6 +21,45 @@ function input(): PrepareQQOperation {
 }
 
 describe('QQOperations', () => {
+  it('freezes queue context independently of native input and restores it with a verified digest', () => {
+    const path = directory(); const operations = new QQOperations(path);
+    const promptContext = { turnMetaText: '发送者：甲', backgroundText: '普通群聊背景' };
+    const request = { ...input(), promptContext };
+    const { operation } = operations.prepare(request);
+    promptContext.backgroundText = 'caller mutation';
+    expect(operation.promptContext).toEqual({ turnMetaText: '发送者：甲', backgroundText: '普通群聊背景' });
+    expect(operation.promptContextHash).toBe(payloadHash(operation.promptContext));
+    expect(JSON.stringify(operation.message)).not.toContain('普通群聊背景');
+    expect(new QQOperations(path).lookup(request.operationId)?.promptContext).toEqual(operation.promptContext);
+  });
+
+  it('removes terminal context bodies while preserving their identity and idempotent prepare', () => {
+    const path = directory(); const operations = new QQOperations(path);
+    const request = { ...input(), promptContext: { turnMetaText: '发送者：甲', backgroundText: '待清除背景正文' } };
+    const prepared = operations.prepare(request);
+    operations.markTerminal(request.operationId);
+    const restored = new QQOperations(path);
+    expect(readFileSync(join(path, 'qq-operations.json'), 'utf8')).not.toContain('待清除背景正文');
+    expect(restored.lookup(request.operationId)?.promptContext).toBeUndefined();
+    expect(restored.lookup(request.operationId)?.promptContextHash).toBe(prepared.operation.promptContextHash);
+    expect(restored.prepare(request).created).toBe(false);
+    expect(() => restored.prepare({ ...request, promptContext: { ...request.promptContext, backgroundText: 'changed' } })).toThrow('different input');
+  });
+
+  it('rejects a modified stored context snapshot while accepting legacy operations without context', () => {
+    const path = directory(); const operations = new QQOperations(path);
+    const request = { ...input(), promptContext: { turnMetaText: '发送者：甲', backgroundText: '完整快照' } };
+    operations.prepare(request);
+    const filename = join(path, 'qq-operations.json');
+    const data = JSON.parse(readFileSync(filename, 'utf8'));
+    data.operations[0].promptContext.backgroundText = '篡改';
+    writeFileSync(filename, JSON.stringify(data));
+    expect(() => new QQOperations(path)).toThrow('Corrupt QQ prompt context snapshot');
+    const legacyPath = directory();
+    new QQOperations(legacyPath).prepare(input());
+    expect(new QQOperations(legacyPath).all()[0]?.promptContext).toBeUndefined();
+  });
+
   it('retires only expired terminal bodies and keeps permanent no-replay identities', () => {
     const path = directory(); const operations = new QQOperations(path);
     const request = { ...input(), preparedAt: 1 };

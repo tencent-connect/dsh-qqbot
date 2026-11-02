@@ -15,6 +15,9 @@ import type { WebRoute } from '../setup/bind-routes.ts';
 import { CONVERSATIONS_PATH } from '../shared/conversation-protocol.ts';
 import { registerConversationRoutes } from './conversation-routes.ts';
 import { ConversationService } from './conversation-service.ts';
+import { ApprovalChannel } from '../features/approval-channel.ts';
+import { QuestionChannel } from '../features/question-channel.ts';
+import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 
 const profile = vi.hoisted(() => ({ dir: null as string | null }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<typeof import('../shared/index.ts')>(), getProfileDir: vi.fn(() => profile.dir) }));
@@ -38,7 +41,7 @@ function fixture(scope: 'group' | 'c2c' = 'group', mode: Mode = 'open') {
     access: { groupMode: scope === 'group' ? mode : 'open', groupAllow: ['other'], c2cMode: scope === 'c2c' ? mode : 'open', c2cAllow: ['other-user'] } });
   const cancelPending = vi.fn();
   const manager = { getDefaultModel: () => ({ provider: 'offline', model: 'dummy' }), getDefaultPreset: () => 'standard', getEffectiveModel: () => ({ provider: 'offline', model: 'dummy' }),
-    getSessionRecord: () => current, getStatus: () => ({ active: !!current }), findBySessionId: () => current,
+    getSessionRecord: (recordScope: string, recordPeer: string) => current?.scope === recordScope && current.peerId === recordPeer ? current : undefined, getStatus: () => ({ active: !!current }), findBySessionId: () => current,
     questionChannel: { cancelPending }, approvalChannel: { cancelPending } } as unknown as SessionManager;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const service = new ConversationService(ctx, manager, config, logger, data); manager.conversations = service;
@@ -59,6 +62,26 @@ function fixture(scope: 'group' | 'c2c' = 'group', mode: Mode = 'open') {
   const request = (enabled: boolean) => post('/action', { action: 'admit', key, enabled });
   return { service, manager, config, agent, cancelPending, logger, root, data, patchPath, original, request, post, key };
 }
+
+describe('new QQ Sessions through the real action route', () => {
+  it('accepts the empty workspace selection and passes an explicit cleared binding', async () => {
+    const f = fixture();
+    const replace = vi.fn(async (...args: Parameters<SessionManager['replaceSession']>) => { args[3]?.assertCurrent(); return { sessionId: 'new-native' }; });
+    Object.assign(f.manager, { replaceSession: replace });
+    const before = f.service.requireEntry(f.key);
+    const result = await f.post('/action', { action: 'create-session', key: f.key, operationId: 'empty-workspace-route', expectedCurrentSessionId: before.currentSessionId, expectedPolicyVersion: before.policy.version, workspaceId: '', presetId: 'standard' });
+    expect(result.status).toBe(200);
+    expect(result.body.sessionId).toBe('new-native');
+    expect(replace).toHaveBeenCalledWith('group', 'peer', null, expect.objectContaining({ presetId: 'standard' }));
+  });
+  it.each([undefined, null, 3, 'unknown-workspace'])('rejects an invalid workspace selection %s', async workspaceId => {
+    const f = fixture(); const replace = vi.fn(); Object.assign(f.manager, { replaceSession: replace });
+    const before = f.service.requireEntry(f.key);
+    const result = await f.post('/action', { action: 'create-session', key: f.key, operationId: 'invalid-workspace-route', expectedCurrentSessionId: before.currentSessionId, expectedPolicyVersion: before.policy.version, workspaceId, presetId: 'standard' });
+    expect(result.status).toBe(400);
+    expect(replace).not.toHaveBeenCalled();
+  });
+});
 
 describe('clearing message records through the real action route', () => {
   it('clears bodies while keeping message ids for dedupe, and persists across reopen', async () => {
@@ -163,5 +186,83 @@ describe('conversation admission through the real action route', () => {
     expect(result.status).toBe(400); expect(result.body.error).toContain('仍停用');
     expect(f.service.admitted('c2c', 'peer')).toBe(false); expect(f.config.access.c2cMode).toBe('disabled');
     expect(readFileSync(f.patchPath, 'utf8')).toBe(f.original);
+  });
+});
+
+describe('paired allowlist revocation', () => {
+  it.each(['group', 'c2c'] as const)('immediately cancels the active %s task and its pending interactions', async scope => {
+    const f = fixture(scope, 'allowlist');
+    const allow = scope === 'group' ? f.config.access.groupAllow : f.config.access.c2cAllow;
+    allow.push('peer');
+    const record = f.manager.getSessionRecord(scope, 'peer');
+    if (!record) throw new Error('Missing active conversation');
+    Object.assign(f.agent, { status: 'running' });
+    const approvalSender = { sendMarkdown: vi.fn(async (_target: unknown, _text: string, _opts?: { keyboard?: unknown }) => {}) };
+    const approvals = new ApprovalChannel({ interactionRecord: () => record, getSessionRecord: () => record, canApprove: () => true }, approvalSender, f.config, f.logger);
+    const questions = new QuestionChannel({ interactionRecord: () => record, getSessionRecord: () => record, recordHumanReply: vi.fn(async () => {}) }, { sendMarkdown: vi.fn(async () => {}) }, f.config, f.logger);
+    f.manager.approvalChannel = approvals;
+    f.manager.questionChannel = questions;
+    const pendingApproval = approvals['park'](record, { agent: record.agent, toolName: 'bash' });
+    const pendingQuestion = questions['askViaQQ'](record, { questions: [{ id: 'q', question: 'Continue?', options: [{ label: 'yes' }] }] }, { sessionId: record.sessionId, turn: 1, callId: 'call-question' });
+    void pendingQuestion.catch(() => {});
+    try {
+      const result = f.service.revokePair('peer', scope === 'group' ? 'allow-group' : 'allow-c2c');
+      expect(result.ok).toBe(true);
+      expect(f.service.admitted(scope, 'peer')).toBe(false);
+      expect(f.agent.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'user' });
+      await expect(pendingApproval).resolves.toBe('cancelled');
+      await expect(pendingQuestion).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+      const saved = parse(readFileSync(f.patchPath, 'utf8'))[1].config.access;
+      expect(scope === 'group' ? saved.groupAllow : saved.c2cAllow).not.toContain('peer');
+      const keyboard = approvalSender.sendMarkdown.mock.calls[0]?.[2]?.keyboard as InlineKeyboard;
+      const data = keyboard.content.rows[0]?.buttons[0]?.action.data;
+      const lateClick = { id: 'late-approval', type: 1, version: 1,
+        ...(scope === 'group' ? { group_openid: 'peer', group_member_openid: 'actor' } : { user_openid: 'peer' }),
+        data: { type: 1, resolved: { button_data: data } },
+      } as InteractionEvent;
+      expect(approvals.handleInteraction(lateClick)).toBe(false);
+      expect(questions.tryAnswer(scope, 'peer', 'yes', 'actor')).toBe(false);
+    } finally {
+      approvals.cancelPending(f.key);
+      questions.cancelPending(f.key);
+      await Promise.allSettled([pendingApproval, pendingQuestion]);
+    }
+  });
+
+  it.each(['group', 'c2c'] as const)('keeps the active %s task when saving the removal fails', scope => {
+    const f = fixture(scope, 'allowlist');
+    const allow = scope === 'group' ? f.config.access.groupAllow : f.config.access.c2cAllow;
+    allow.push('peer');
+    Object.assign(f.agent, { status: 'running' });
+    const before = structuredClone(f.config.access);
+    const broken = '- [invalid YAML'; writeFileSync(f.patchPath, broken);
+    expect(f.service.revokePair('peer', scope === 'group' ? 'allow-group' : 'allow-c2c').ok).toBe(false);
+    expect(f.config.access).toEqual(before);
+    expect(f.service.admitted(scope, 'peer')).toBe(true);
+    expect(readFileSync(f.patchPath, 'utf8')).toBe(broken);
+    expect(f.agent.cancel).not.toHaveBeenCalled();
+    expect(f.cancelPending).not.toHaveBeenCalled();
+  });
+
+  it.each(['group', 'c2c'] as const)('does not stop an admitted %s task when removing an unused open-mode allowlist entry', scope => {
+    const f = fixture(scope, 'open');
+    const allow = scope === 'group' ? f.config.access.groupAllow : f.config.access.c2cAllow;
+    allow.push('peer');
+    Object.assign(f.agent, { status: 'running' });
+    expect(f.service.revokePair('peer', scope === 'group' ? 'allow-group' : 'allow-c2c').ok).toBe(true);
+    expect(f.service.admitted(scope, 'peer')).toBe(true);
+    expect(f.agent.cancel).not.toHaveBeenCalled();
+    expect(f.cancelPending).not.toHaveBeenCalled();
+  });
+
+  it('leaves an unrelated conversation running when another peer is removed', () => {
+    const f = fixture('group', 'allowlist');
+    f.config.access.groupAllow.push('peer');
+    Object.assign(f.agent, { status: 'running' });
+    expect(f.service.revokePair('other', 'allow-group').ok).toBe(true);
+    expect(f.service.admitted('group', 'peer')).toBe(true);
+    expect(f.agent.cancel).not.toHaveBeenCalled();
+    expect(f.cancelPending).not.toHaveBeenCalledWith(f.key);
+    expect(f.cancelPending.mock.calls).toEqual([[f.service.store.key('group', 'other')], [f.service.store.key('group', 'other')]]);
   });
 });

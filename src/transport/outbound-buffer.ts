@@ -9,6 +9,7 @@ import type { SessionRecord } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { StreamingWriter } from './streaming-writer.ts';
+import { modelReplyText } from './model-reply.ts';
 
 /** 流式输出节流间隔(ms)：连续 chunk 累积后停顿该间隔才推送 */
 const STREAM_THROTTLE_MS = 200;
@@ -80,7 +81,7 @@ export class OutboundBuffer {
       }
 
       // 降级：静态发送（writer 不存在 or 流式失败）
-      const chunks = chunkMarkdownText(this.buffer, this.limit);
+      const chunks = chunkMarkdownText(modelReplyText(this.buffer), this.limit);
       for (const chunk of chunks) {
         await this.bot.sendMarkdown(this.record.replyTarget, chunk);
       }

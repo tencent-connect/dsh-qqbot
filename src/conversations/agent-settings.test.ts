@@ -100,4 +100,40 @@ describe('QQ account defaults and per-peer settings', () => {
     expect(after).toMatchObject({ alias: 'alias', settings, policy: { nativeTools: false, tools: { read: 'allow' } } });
     expect(after.settings?.promptDirect).toBe('next Session only');
   });
+  it.each(['group', 'c2c'] as const)('keeps an explicit custom tool ceiling when reopening a %s conversation', scope => {
+    const { root, store } = fixture();
+    const entry = store.ensure(scope, 'custom-tools');
+    const settings = { ...entry.settings!, execution: { kind: 'custom' as const, permission: 'read-only' as const, tools: ['read'] } };
+    const saved = store.updateSettings(entry.key, entry.policy.version, settings, 'restricted peer', true);
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.get(entry.key)).toMatchObject(saved);
+    expect(reloaded.get(entry.key)?.policy).toMatchObject({ nativeTools: false, tools: { read: 'allow' } });
+    expect(new ConversationStore(root, 'account').get(entry.key)).toMatchObject(saved);
+  });
+  it('preserves an explicit legacy restricted policy while deriving missing settings', () => {
+    const { root, store } = fixture();
+    const entry = store.ensure('group', 'legacy-custom');
+    const saved = store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, nativeTools: false, tools: { read: 'ask', bash: 'deny' } });
+    const path = join(root, `conversations-${createHash('sha256').update('account').digest('hex')}.json`);
+    const catalog = JSON.parse(readFileSync(path, 'utf8'));
+    delete catalog.entries[0].settings;
+    writeFileSync(path, JSON.stringify(catalog));
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.get(entry.key)?.policy).toEqual(saved.policy);
+    expect(reloaded.get(entry.key)?.settings?.execution).toEqual({ kind: 'custom', permission: 'read-only', tools: ['read'] });
+  });
+  it('repairs a custom tool ceiling overwritten by the earlier native-tools migration', () => {
+    const { root, store } = fixture();
+    const entry = store.ensure('group', 'previously-widened');
+    const saved = store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, nativeTools: false, tools: { read: 'ask', bash: 'deny' } });
+    const path = join(root, `conversations-${createHash('sha256').update('account').digest('hex')}.json`);
+    const catalog = JSON.parse(readFileSync(path, 'utf8'));
+    expect(catalog.entries[0].settings.execution.kind).toBe('custom');
+    catalog.entries[0].policy.nativeTools = true;
+    writeFileSync(path, JSON.stringify(catalog));
+    const reloaded = new ConversationStore(root, 'account');
+    expect(reloaded.get(entry.key)).toMatchObject(saved);
+    expect(JSON.parse(readFileSync(path, 'utf8')).entries[0].policy.nativeTools).toBe(false);
+    expect(new ConversationStore(root, 'account').get(entry.key)).toMatchObject(saved);
+  });
 });
