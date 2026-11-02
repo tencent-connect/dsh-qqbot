@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis';
 export interface AdapterLogger {
   info(msg: string): void;
   warn(msg: string): void;
+  debug?(msg: string): void;
 }
 
 export interface HostAdapter {
@@ -32,6 +33,14 @@ export interface HostAdapter {
    * id 的根因。后端真故障时照常抛出。
    */
   sessionExists(sessionId: string): Promise<boolean | undefined>;
+  /**
+   * 将会话挂载到其 cwd 对应的工作区（侧边栏可见性）。
+   *
+   * 全部 fail-soft：workspaceRegistry 未挂载（如 headless profile）→ debug；
+   * create/attach 失败或宿主接口演进（无 attachSession）→ warn，绝不抛出。
+   * `attachSession` 幂等，创建与恢复路径都可安全调用；升级后老会话自动补挂。
+   */
+  attachSessionToWorkspace(sessionId: string, cwd: string): Promise<void>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
@@ -40,6 +49,21 @@ export interface HostAdapter {
 export interface SessionHeaderLike {
   agentPreset?: string;
 }
+
+/** 工作区实体最小契约（对齐 dsh-workspace Workspace） */
+export interface WorkspaceLike {
+  readonly path?: string;
+  attachSession(sessionId: string): Promise<void>;
+}
+
+/** workspaceRegistry 服务最小契约（对齐 dsh-workspace WorkspaceRegistry） */
+export interface WorkspaceRegistryLike {
+  /** 获取目录对应的现有工作区；不存在时创建（幂等；路径须已存在且为目录） */
+  create(path: string, title?: string): Promise<WorkspaceLike>;
+}
+
+/** 插件创建的工作区显示名；仅在该 cwd 尚无工作区时生效（幂等 create 不改既有 title） */
+const WORKSPACE_TITLE = 'QQBot';
 
 /**
  * 持久化服务的最小只读契约。
@@ -61,6 +85,12 @@ interface SessionPersistenceLike {
 function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
   return typeof persistence?.stat === 'function' ? persistence : undefined;
+}
+
+/** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
+function workspaceRegistry(ctx: Context): WorkspaceRegistryLike | undefined {
+  const registry = safeGet(ctx, 'workspaceRegistry') as WorkspaceRegistryLike | undefined;
+  return typeof registry?.create === 'function' ? registry : undefined;
 }
 
 /** 模块级函数的动态 import 结果缓存（spec 变量路径绕开本地依赖类型检查） */
@@ -89,6 +119,9 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
   capabilities.push(statCapablePersistence(ctx)
     ? 'sessionPersistence.stat(可用)'
     : 'sessionPersistence.stat(不可用，会话存在性判定降级)');
+  capabilities.push(workspaceRegistry(ctx)
+    ? 'workspaceRegistry.create(可用)'
+    : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
 
   let resolveFn: ((agent: { ctx: unknown }, name: string) => unknown | undefined) | undefined;
   const presets = safeGet(ctx, 'agentPresets') as
@@ -147,6 +180,28 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
       const persistence = statCapablePersistence(ctx);
       if (!persistence) return undefined;
       return (await persistence.stat(sessionId)) !== undefined;
+    },
+
+    async attachSessionToWorkspace(sessionId, cwd) {
+      const registry = workspaceRegistry(ctx);
+      if (!registry) {
+        // 未挂载 dsh-workspace（如 headless profile）→ 无侧边栏，属预期降级
+        logger?.debug?.(`host adapter: workspaceRegistry 未挂载，跳过会话 ${sessionId} 的工作区归属`);
+        return;
+      }
+      try {
+        const workspace = await registry.create(cwd, WORKSPACE_TITLE);
+        if (!workspace || typeof workspace.attachSession !== 'function') {
+          // 宿主接口演进：返回对象不含 attachSession → warn 避免静默失效
+          logger?.warn?.(`host adapter: workspaceRegistry.create 返回了无 attachSession 的对象，跳过会话 ${sessionId}`);
+          return;
+        }
+        await workspace.attachSession(sessionId);
+        logger?.debug?.(`host adapter: attached session ${sessionId} to workspace ${workspace.path ?? cwd}`);
+      } catch (err) {
+        // 仅影响侧边栏展示，绝不打断消息处理；但属异常（cwd 不匹配/目录缺失等），warn 留痕
+        logger?.warn?.(`host adapter: workspace attach failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     },
 
     async buildForkSeed(events, boundary) {

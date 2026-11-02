@@ -113,3 +113,68 @@ describe('host adapter', () => {
     expect(await adapter.sessionHeader('s1')).toBeUndefined();
   });
 });
+
+describe('attachSessionToWorkspace', () => {
+  function makeLogger() {
+    return { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+  }
+
+  it('把会话挂载到 cwd 对应的工作区（title=qqbot）', async () => {
+    const ws = { path: '/proj', attachSession: vi.fn().mockResolvedValue(undefined) };
+    const registry = { create: vi.fn().mockResolvedValue(ws) };
+    const logger = makeLogger();
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+
+    await adapter.attachSessionToWorkspace('sess-1', '/proj');
+
+    expect(registry.create).toHaveBeenCalledWith('/proj', 'QQBot');
+    expect(ws.attachSession).toHaveBeenCalledWith('sess-1');
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('workspaceRegistry 未挂载时静默降级（debug，不 warn）', async () => {
+    const logger = makeLogger();
+    const adapter = createHostAdapter(makeCtx({}), logger);
+
+    await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
+    expect(logger.debug).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('registry 无可用 create() 时静默降级', async () => {
+    const logger = makeLogger();
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: {} }), logger);
+
+    await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
+    expect(logger.debug).toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('create() 失败时吞掉异常并 warn', async () => {
+    const logger = makeLogger();
+    const registry = { create: vi.fn().mockRejectedValue(new Error('not a directory')) };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+
+    await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('attachSession() 失败时吞掉异常并 warn', async () => {
+    const logger = makeLogger();
+    const ws = { path: '/proj', attachSession: vi.fn().mockRejectedValue(new Error('cwd mismatch')) };
+    const registry = { create: vi.fn().mockResolvedValue(ws) };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+
+    await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it('create() 返回不含 attachSession 的对象时 warn（接口演进防护）', async () => {
+    const logger = makeLogger();
+    const registry = { create: vi.fn().mockResolvedValue({ path: '/proj' }) };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+
+    await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+});
