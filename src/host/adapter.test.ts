@@ -64,6 +64,7 @@ describe('host adapter', () => {
   });
 
   it('buildForkSeed：模块不可解析时返回 undefined（不抛）', async () => {
+    vi.doMock('@deepseek-ai/dsh-session/fork', () => { throw new Error('module unavailable'); });
     const adapter = createHostAdapter(makeCtx({}));
     expect(await adapter.buildForkSeed([{ seq: 0 }], 0)).toBeUndefined();
   });
