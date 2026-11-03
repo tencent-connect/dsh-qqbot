@@ -1,3 +1,4 @@
+import type { SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
 /**
  * 斜杠命令注册中心
  *
@@ -36,5 +37,23 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   // help 需要访问完整列表（含自身），通过闭包惰性引用
   commands.push(helpCommand(deps, () => commands));
 
+  for (const command of commands) {
+    delete command.authorized;
+    const original = command.handler;
+    command.handler = ctx => deps.manager.conversations?.isOwner(ctx.message.senderId) ? original(ctx) : Promise.resolve('斜杠命令仅机器人超管可用。');
+  }
   return commands;
+}
+export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
+  return buildCommandList(deps).map((command): SlashCommandDescriptor => {
+    const names = Array.isArray(command.name) ? command.name : [command.name];
+    return {
+      name: names[0] ?? '',
+      aliases: names.slice(1),
+      description: command.description ?? '',
+      category: command.category,
+      scope: 'owner',
+      ...(command.hidden === true ? { hidden: true } : {}),
+    };
+  }).filter((descriptor) => descriptor.name !== '');
 }

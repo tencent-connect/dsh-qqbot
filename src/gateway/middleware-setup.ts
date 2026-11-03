@@ -82,6 +82,15 @@ export function setupMiddlewares(
   // 7. 三层限流（sender / group / global）
   bot.use(rateLimiter());
 
+  bot.use(async (ctx, next) => {
+    const service = manager.conversations;
+    if (ctx.message.content.trim().startsWith('/') && !service?.isOwner(ctx.message.senderId)) {
+      await ctx.bot.sendText(ctx.replyTarget, '斜杠命令仅机器人超管可用。');
+      ctx.stop('slash-command-owner-required'); return;
+    }
+    await next();
+  });
+
   // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
   const slash = slashCommand({
     // 关闭 autoHelp：help 命令由 qqbot 注册为 /bot-help，
@@ -90,6 +99,32 @@ export function setupMiddlewares(
     commands: buildCommandList({ manager, config, logger }),
   });
   bot.use(slash.middleware);
+  bot.use(async (ctx, next) => {
+    if (ctx.message.content.trim().startsWith('/')) {
+      await ctx.bot.sendText(ctx.replyTarget, '未知命令，请发送 /bot-help 查看可用命令。');
+      ctx.stop('unknown-command'); return;
+    }
+    await next();
+  });
+  // 裸 token 认领：仅当消息文本恰好是"当前正在生成、未过期的配对码"时才拦截；否则原样放行给 agent。
+  bot.use(async (ctx, next) => {
+    const service = manager.conversations;
+    const content = ctx.message.content.trim();
+    if (service && content.length > 0 && content.length <= 32 && service.isActivePairCode(content)) {
+      // 认领处理失败绝不能冒泡中断中间件链（否则 SDK 重连、消息丢失）。
+      try {
+        const result = service.beginClaimFromMessage(ctx.replyTarget.scope, ctx.replyTarget.targetId, content, ctx.message.senderId, ctx.message.senderName);
+        await ctx.bot.sendText(ctx.replyTarget, result.message);
+      } catch (err) {
+        logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
+        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
+      }
+      ctx.stop('claim-result'); return;
+    }
+    await next();
+  });
+
+
 
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
   bot.use(questionAnswer(manager));

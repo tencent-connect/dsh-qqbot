@@ -21,6 +21,9 @@ import { decodeButtonData } from '../features/button-utils.ts';
 import { buildUserAgent } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
+import { ConversationService } from '../runtime/conversation-service.ts';
+import { registerConversationRoutes } from '../runtime/conversation-routes.ts';
+import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
@@ -50,6 +53,8 @@ export async function bootstrapGateway(
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
 
+  manager.conversations = new ConversationService(config, logger);
+  registerConversationRoutes(ctx, manager.conversations, () => describeCommands({manager, config, logger}));
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
   const bot = new QQBot({

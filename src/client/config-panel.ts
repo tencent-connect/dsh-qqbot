@@ -1,60 +1,50 @@
 /**
  * QQ 机器人配置面板 — 必要配置的 UI 编辑
  *
- * UI 复刻 DSW 通用设置（settings-form 原语）的视觉风格：
- * 左对齐设置列、0.5px 行分隔、label 13px/500、控件右置；
- * Switch 为 36×20 aria-checked 结构（thumb translateX 动画）；
- * 三值选择用分段控件（滑动指示器按段数/索引的 CSS 变量定位）；
- * 保存按钮为 DSW 反色主按钮（label-primary 底 + bg-layer-3 字）。
+ * 使用宿主公共 Switch、SegmentedControl、Button 与目录菜单；多行草稿保留普通 textarea。
  *
  * 数据流：GET /qqbot/im-qqbot/config 回显当前生效配置（appSecret
  * 已由宿主剔除）→ 表单编辑 → dirty diff → POST 仅提交变更键 →
  * 宿主白名单 + Schema 校验 → 最小写入 profile patch → HMR 重载生效。
  *
- * 字段策略：只开放用户必要的配置；cwd 只读展示；超时与性能调优
- * 类字段走 profile patch / 环境变量。
+ * 这里只维护账号访问范围；Agent 默认设置通过独立的版本化接口保存。
  */
-import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { Button, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
-/** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
-interface AccessControlWire {
-  c2cMode: 'open' | 'allowlist' | 'disabled';
-  c2cAllow: string[];
-  groupMode: 'open' | 'allowlist' | 'disabled';
-  groupAllow: string[];
-}
-
-/** GET 回显的生效配置（appSecret 已剔除） */
-type ConfigWire = {
-  requireMention?: boolean;
-  streaming?: boolean;
-  showToolResults?: boolean;
-  debug?: boolean;
-  provider?: string;
-  model?: string;
-  preset?: string;
-  groupPrompt?: string;
-  directPrompt?: string;
-  access?: AccessControlWire;
-  cwd?: string;
-};
+import { fetchJson } from './http.ts';
+import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
+import type { SelectorSource } from './host-selectors.ts';
+import { PairClaimPanel } from './qq-pairing.ts';
+import type { QQBotKey } from './qq-locale.ts';
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots';
 
 /** 样式注入标记（幂等） */
 const STYLE_ID = 'im-qqbot-config-panel-styles';
 
-/** DSW 通用设置风格（settings-form / Switch / SegmentedControl 原语复刻） */
+/** QQ settings layout; control appearance belongs to the public host primitives. */
 function useConfigPanelStyles(): void {
   useEffect(() => {
     if (typeof document === 'undefined') return;
-    if (document.getElementById(STYLE_ID) !== null) return;
+    const existing = document.getElementById(STYLE_ID);
+    const retain = (element: HTMLElement): (() => void) => {
+      element.dataset.users = String(Number(element.dataset.users ?? 0) + 1);
+      return () => {
+        const users = Number(element.dataset.users ?? 1) - 1;
+        if (users === 0) element.remove();
+        else element.dataset.users = String(users);
+      };
+    };
+    if (existing !== null) return retain(existing);
     const style = document.createElement('style');
     style.id = STYLE_ID;
     style.textContent = `
-.imqb2-form { display: flex; flex-direction: column; width: 100%; }
+.imqb2-form { display: flex; flex-direction: column; width: 100%; min-width: 0; color: var(--dsw-alias-label-primary); }
+.imqb2-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 .imqb2-group-title {
   padding: 14px 0 2px; font-size: 12px; font-weight: 600; line-height: 18px;
-  color: var(--dsw-alias-label-tertiary); text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dsw-alias-label-secondary);
 }
 .imqb2-field { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; }
 .imqb2-field + .imqb2-field { border-top: 0.5px solid var(--dsw-alias-border-l2); }
@@ -65,169 +55,48 @@ function useConfigPanelStyles(): void {
 }
 .imqb2-help { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .imqb2-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-/* Switch（aria-checked 驱动，视觉态与无障碍态同源） */
-.imqb2-switch {
-  box-sizing: border-box; position: relative; flex: 0 0 auto;
-  width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 999px;
-  background: var(--dsw-alias-border-l3); cursor: pointer; font: inherit;
+.imqb2-textarea { box-sizing: border-box; width: 100%; min-height: 68px; padding: 8px 12px; resize: vertical; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; }
+.imqb2-textarea:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 2px; }
+/* Preserve the QQ settings draft and readback feedback in the sticky footer. */
+.imqb2-footer {
+  position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center;
+  flex-wrap: wrap; gap: 8px; margin-top: 16px; padding: 12px 0;
+  border-top: 0.5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1);
 }
-.imqb2-switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary); }
-.imqb2-switch:disabled { cursor: default; opacity: 0.5; }
-.imqb2-switch:focus-visible {
-  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 2px;
+.imqb2-footer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.imqb2-feedback { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.imqb2-feedback p { flex: 1; min-width: 0; }
+.imqb2-details { margin-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
+.imqb2-summary { padding: 16px 0; font-size: 13px; font-weight: 500; cursor: pointer; }
+.imqb2-summary::marker { color: var(--dsw-alias-label-tertiary); }
+.imqb2-summary:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color); outline-offset: 2px; border-radius: var(--dsw-radius-sm); }
+.imqb2-directory-feedback { display: flex; align-items: flex-start; gap: 8px; }
+.imqb2-directory-feedback p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .imqb2-head:has([role=tablist]) { align-items: stretch; flex-direction: column; }
+  .imqb2-selector-head { align-items: stretch; flex-direction: column; }
+  .imqb2-note { flex-basis: 100%; }
 }
-.imqb2-switch-thumb {
-  display: block; width: 16px; height: 16px; border-radius: 50%;
-  background: var(--dsw-alias-switch-thumb, #ffffff);
-  transition: transform 120ms ease;
-}
-.imqb2-switch[aria-checked='true'] .imqb2-switch-thumb {
-  background: var(--dsw-alias-label-primary-foreground, #ffffff);
-  transform: translateX(16px);
-}
-/* 输入（官方 fields.input 复刻） */
-.imqb2-input {
-  box-sizing: border-box; width: 100%; height: 34px; padding: 0 12px;
-  border: 0.5px solid var(--dsw-alias-border-l4); border-radius: var(--dsw-radius-md, 8px);
-  background: var(--dsw-alias-bg-layer-3); font: inherit; font-size: 13px; line-height: 1.5;
-  color: var(--dsw-alias-label-primary); outline: none;
-}
-.imqb2-input:focus { outline: none; border-color: var(--dsw-alias-state-business-primary); }
-.imqb2-input:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
-.imqb2-textarea { height: auto; min-height: 68px; padding: 8px 12px; resize: vertical; line-height: 1.5; }
-/* 分段控件（官方 SegmentedControl 复刻：指示器按段数/索引定位） */
-.imqb2-seg {
-  position: relative; display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr;
-  gap: 2px; padding: 4px; border-radius: var(--dsw-radius-md, 8px);
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.imqb2-seg-indicator {
-  position: absolute; top: 4px; left: 4px;
-  width: calc((100% - 8px - 2px * (var(--imqb2-seg-count) - 1)) / var(--imqb2-seg-count));
-  height: calc(100% - 8px);
-  border: 0; border-radius: var(--dsw-radius-sm, 6px);
-  background: var(--dsw-alias-bg-layer-1);
-  box-shadow: var(--dsw-elevation-soft, 0 1px 3px rgba(0,0,0,.08));
-  transform: translateX(calc(var(--imqb2-seg-index) * (100% + 2px)));
-  transition: transform 160ms ease;
-  pointer-events: none;
-}
-.imqb2-seg-tab {
-  box-sizing: border-box; position: relative; z-index: 1; height: 28px; padding: 0 16px;
-  border: 0; border-radius: var(--dsw-radius-sm, 6px); background: transparent;
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px;
-  font-weight: 500; white-space: nowrap; cursor: pointer; transition: color 120ms ease;
-}
-.imqb2-seg-tab:hover, .imqb2-seg-tab[aria-selected='true'] { color: var(--dsw-alias-label-primary); }
-.imqb2-seg-tab:focus-visible {
-  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: -2px;
-}
-/* 底栏（官方 SettingsForm.footer 复刻） */
-.imqb2-footer { display: flex; align-items: center; gap: 8px; padding-top: 16px; }
 .imqb2-note { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-.imqb2-note--error { color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-error)); }
+.imqb2-note--error { color: var(--dsw-alias-state-error-primary); }
 .imqb2-note--ok { color: var(--dsw-alias-label-secondary); }
-.imqb2-save {
-  appearance: none; flex: none; border: 1px solid transparent;
-  border-radius: var(--dsw-radius-md, 8px); padding: 5px 14px;
-  font: inherit; font-size: 13px; line-height: 1.5; cursor: pointer;
-  background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-layer-3);
-}
-.imqb2-save:disabled { opacity: 0.4; cursor: default; }
-.imqb2-save:focus-visible {
-  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 1px;
-}
 /* cwd 只读行 */
 .imqb2-readonly { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; margin: 0; }
     `;
     document.head.appendChild(style);
-    return () => { style.remove(); };
+    return retain(style);
   }, []);
 }
 
-/** 开关（官方 Switch 原语结构：aria-checked 驱动视觉态） */
-function Switch({ checked, label, onChange }: {
-  checked: boolean; label: string; onChange: (next: boolean) => void;
-}): ReactNode {
-  return createElement('button', {
-    type: 'button', role: 'switch', 'aria-checked': checked, 'aria-label': label,
-    className: 'imqb2-switch',
-    onClick: () => { onChange(!checked); },
-  }, createElement('span', { className: 'imqb2-switch-thumb' }));
-}
-
-/** 访问模式分段选择（官方 SegmentedControl 结构：CSS 变量定位滑动指示器） */
-function Segmented({ value, options, onChange, label }: {
-  value: AccessMode; options: ReadonlyArray<{ value: AccessMode; label: string }>;
-  onChange: (next: AccessMode) => void; label: string;
-}): ReactNode {
-  const index = Math.max(0, options.findIndex((o) => o.value === value));
-  const trackStyle = {
-    '--imqb2-seg-count': options.length,
-    '--imqb2-seg-index': index,
-  } as CSSProperties;
-  return createElement('div', { className: 'imqb2-seg', role: 'tablist', 'aria-label': label, style: trackStyle },
-    createElement('span', { className: 'imqb2-seg-indicator' }),
-    options.map((o) => createElement('button', {
-      key: o.value, type: 'button', role: 'tab', 'aria-selected': o.value === value,
-      className: 'imqb2-seg-tab', onClick: () => { onChange(o.value); },
-    }, o.label)),
-  );
-}
-
-/** 开关行（label 左 + Switch 右 + 可选 help） */
-function SwitchRow({ label, help, checked, onChange }: {
-  label: string; help?: string; checked: boolean; onChange: (next: boolean) => void;
-}): ReactNode {
-  return createElement('div', { className: 'imqb2-field' },
-    createElement('div', { className: 'imqb2-head' },
-      createElement('span', { className: 'imqb2-label' }, label),
-      createElement(Switch, { checked, label, onChange }),
-    ),
-    help === undefined ? null : createElement('p', { className: 'imqb2-help' }, help),
-  );
-}
-
-/** 文本行（label 上 + 输入下，与官方 fields 布局一致） */
-function FieldRow({ label, help, value, placeholder, onChange }: {
-  label: string; help?: string; value: string; placeholder?: string; onChange: (next: string) => void;
-}): ReactNode {
-  return createElement('div', { className: 'imqb2-field' },
-    createElement('span', { className: 'imqb2-label' }, label),
-    createElement('input', {
-      className: 'imqb2-input', value, placeholder, spellCheck: false,
-      onChange: (event: ChangeEvent<HTMLInputElement>) => { onChange(event.currentTarget.value); },
-    }),
-    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
-  );
-}
-
-/** 多行文本行 */
-function AreaRow({ label, help, value, rows, onChange }: {
-  label: string; help?: string; value: string; rows?: number; onChange: (next: string) => void;
-}): ReactNode {
-  return createElement('div', { className: 'imqb2-field' },
-    createElement('span', { className: 'imqb2-label' }, label),
-    createElement('textarea', {
-      className: 'imqb2-input imqb2-textarea', value, rows: rows ?? 3,
-      onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { onChange(event.currentTarget.value); },
-    }),
-    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
-  );
-}
-
 /** 访问模式分段选择行 */
-function SegmentedRow({ label, help, value, options, onChange }: {
+function SegmentedRow({ label, help, value, options, onChange, disabled = false }: {
   label: string; help?: string; value: AccessMode;
-  options: ReadonlyArray<{ value: AccessMode; label: string }>; onChange: (next: AccessMode) => void;
+  options: ReadonlyArray<{ value: AccessMode; label: string }>; onChange: (next: AccessMode) => void; disabled?: boolean;
 }): ReactNode {
   return createElement('div', { className: 'imqb2-field' },
     createElement('div', { className: 'imqb2-head' },
       createElement('span', { className: 'imqb2-label' }, label),
-      createElement(Segmented, { value, options, onChange, label }),
+      createElement(SegmentedControl<AccessMode>, { id: `imqq-access-${label}`, value, options, onChange, label, disabled }),
     ),
     help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
   );
@@ -241,186 +110,231 @@ const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'disabled', label: '禁用' },
 ];
 
-/** 深比较（表单值与初始回显值的 dirty 判断） */
-function shallowEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
+
+function storedDraft(): ConfigDraft | undefined {
+  try {
+    const text = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+    return text === null ? undefined : parseConfigDraft(JSON.parse(text));
+  } catch (_error) {
+    // Storage may be unavailable or contain an interrupted older draft.
+    return undefined;
+  }
 }
 
-/**
- * 配置面板主体。
- *
- * 保存仅提交变更键（服务端按白名单合并），保存成功后提示
- * HMR 重载语义（进行中的机器人会话将重置）。
- */
-export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
+/** Keep an edited form through a client reload without storing credential fields. */
+function storeDraft(draft: ConfigDraft): void {
+  try {
+    if (isConfigDirty(draft.baseline, draft.form)) {
+      sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(configDraft(draft.baseline, draft.form)));
+    } else {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    }
+  } catch (_error) {
+    // In-memory draft protection still works when tab storage is disabled.
+  }
+}
+
+interface PendingConfirmation {
+  appId: ConfigWire['appId'];
+  changed: Partial<ConfigWire>;
+}
+
+type SaveResult = { kind: 'confirmed' | 'unconfirmed' | 'failed'; message: string };
+
+function matchesSavedConfig(config: ConfigWire, expected: PendingConfirmation): boolean {
+  return config.appId === expected.appId && !isConfigDirty(config, { ...config, ...expected.changed });
+}
+
+function waitForReadback(signal: AbortSignal, delay: number): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delay);
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) finish();
+  });
+}
+
+/** HMR can briefly serve the old plugin fiber after its profile patch was written. */
+async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSignal): Promise<ConfigWire | undefined> {
+  const deadline = Date.now() + 5000;
+  for (let attempt = 0; attempt < 6 && !signal.aborted; attempt += 1) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      const { config } = await fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH,
+        { cache: 'no-store', signal }, Math.min(1000, remaining));
+      if (matchesSavedConfig(config, expected)) return config;
+    } catch (_error) {
+      // The route may disappear while the saved plugin is reloading.
+    }
+    if (!signal.aborted) await waitForReadback(signal, Math.min(400, Math.max(0, deadline - Date.now())));
+  }
+  return undefined;
+}
+
+export interface ConfigPanelProps { bindPhase?: string; selectorSource?: SelectorSource; t?: Translate<QQBotKey> }
+
+/** Settings editor with recoverable requests and a draft protected from binding refreshes. */
+export function ConfigPanel({ bindPhase }: ConfigPanelProps): ReactNode {
   useConfigPanelStyles();
-  const [initial, setInitial] = useState<ConfigWire | null>(null);
-  const [form, setForm] = useState<ConfigWire | null>(null);
+  const [draft, setDraft] = useState<ConfigDraft | null>(null);
+  const draftRef = useRef<ConfigDraft | null>(null);
+  const mounted = useRef(true);
+  const saveController = useRef<AbortController | null>(null);
+  const pendingConfirmation = useRef<PendingConfirmation | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [reload, setReload] = useState(0);
+  const [result, setResult] = useState<SaveResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // 绑定相位变化时重拉配置（扫码落库的白名单等新值）
-  const bindPhase = props?.bindPhase;
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
+
+  const replaceDraft = useCallback((next: ConfigDraft): void => {
+    draftRef.current = next;
+    storeDraft(next);
+    setDraft(next);
+  }, []);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; saveController.current?.abort(); };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
     let stopped = false;
-    void fetch(BIND_CONFIG_PATH, { cache: 'no-store' })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const body = (await res.json()) as { config: ConfigWire };
-        if (stopped) return;
-        setInitial(body.config);
-        setForm(body.config);
+    setLoading(true);
+    setLoadError(null);
+    void fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH, { cache: 'no-store', signal: controller.signal })
+      .then(({ config }) => {
+        if (stopped || saveController.current !== null) return;
+        const expected = pendingConfirmation.current;
+        if (expected !== null && config.appId === expected.appId && !matchesSavedConfig(config, expected)) {
+          setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
+          return;
+        }
+        pendingConfirmation.current = null;
+        const current = draftRef.current ?? storedDraft();
+        const sameAccount = current?.baseline.appId === config.appId;
+        const hadDraft = current !== undefined && current !== null && sameAccount && isConfigDirty(current.baseline, current.form);
+        const form = hadDraft ? rebaseConfig(current.baseline, current.form, config) : config;
+        replaceDraft({ baseline: config, form });
+        setDraftNotice(hadDraft && isConfigDirty(config, form) ? '已保留未保存的修改，其余配置已更新。' : null);
+        setLoadError(null);
+        if (expected !== null) setResult(matchesSavedConfig(config, expected) && !isConfigDirty(config, form)
+          ? { kind: 'confirmed', message: '配置已保存并生效。' } : null);
       })
-      .catch((err: unknown) => {
-        if (!stopped) setLoadError(err instanceof Error ? err.message : String(err));
-      });
-    return () => { stopped = true; };
-  }, [bindPhase]);
+      .catch((error: unknown) => {
+        if (!stopped) setLoadError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => { if (!stopped) setLoading(false); });
+    return () => { stopped = true; controller.abort(); };
+  }, [bindPhase, reload, replaceDraft]);
 
   const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
-    setForm((current) => current === null ? current : { ...current, [key]: value });
+    const current = draftRef.current;
+    if (current === null) return;
+    replaceDraft({ ...current, form: { ...current.form, [key]: value } });
     setResult(null);
-  }, []);
+  }, [replaceDraft]);
 
   const submit = useCallback((event: FormEvent): void => {
     event.preventDefault();
-    if (busy || initial === null || form === null) return;
-    const changed: Record<string, unknown> = {};
-    for (const key of Object.keys(form) as Array<keyof ConfigWire>) {
-      if (!shallowEqual(form[key], initial[key])) {
-        changed[key] = form[key];
-      }
+    const current = draftRef.current;
+    if (busy || current === null) return;
+    const submitted = normalizeConfig(current.form);
+    const changed = configPatch(current.baseline, submitted);
+    if (Object.keys(changed).length === 0) {
+      replaceDraft({ baseline: current.baseline, form: submitted });
+      return;
     }
-    if (Object.keys(changed).length === 0) return;
-
-    // 白名单编辑期间保留原始换行/空行（textarea 可正常回车），提交时才规范化
-    if (changed.access !== undefined) {
-      const a = changed.access as AccessControlWire;
-      changed.access = {
-        ...a,
-        c2cAllow: a.c2cAllow.map((s) => s.trim()).filter(Boolean),
-        groupAllow: a.groupAllow.map((s) => s.trim()).filter(Boolean),
-      };
-    }
-
+    replaceDraft({ baseline: current.baseline, form: submitted });
+    const controller = new AbortController();
+    saveController.current = controller;
     setBusy(true);
-    void fetch(BIND_CONFIG_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(changed),
+    setResult(null);
+    void fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(changed), signal: controller.signal,
     })
-      .then(async (res) => {
-        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
-        if (res.ok && body.ok === true) {
-          setResult({ ok: true, message: body.message ?? '配置已保存，插件将自动重载' });
-          setInitial(form);
-          return;
+      .then(async (body) => {
+        if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
+        // The write is confirmed. A read from the old fiber during HMR must not undo it.
+        if (!mounted.current || controller.signal.aborted) return;
+        const expected = { appId: submitted.appId, changed };
+        pendingConfirmation.current = expected;
+        replaceDraft({ baseline: submitted, form: submitted });
+        setDraftNotice(null);
+        const config = await confirmSavedConfig(expected, controller.signal);
+        if (!mounted.current || controller.signal.aborted) return;
+        if (config !== undefined) {
+          pendingConfirmation.current = null;
+          replaceDraft({ baseline: config, form: config });
+          setResult({ kind: 'confirmed', message: '配置已保存并生效。' });
+        } else {
+          setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
         }
-        setResult({ ok: false, message: body.error ?? `保存失败（HTTP ${res.status}）` });
       })
-      .catch((err: unknown) => {
-        setResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
+      .catch((error: unknown) => {
+        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。` });
       })
-      .finally(() => { setBusy(false); });
-  }, [busy, form, initial]);
+      .finally(() => {
+        if (saveController.current === controller) {
+          saveController.current = null;
+          if (mounted.current) setBusy(false);
+        }
+      });
+  }, [busy, replaceDraft]);
 
-  if (loadError !== null) {
-    return createElement('p', { className: 'imqb2-hint', style: { padding: '12px 0' } },
-      `配置加载失败：${loadError}`);
+  const retry = (): void => { setReload((value) => value + 1); };
+  const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb2-feedback', role: 'alert' },
+    createElement('p', { className: 'imqb2-note imqb2-note--error' }, `配置加载失败：${loadError}`),
+    createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? '重试中…' : '重试'),
+  );
+  if (draft === null) {
+    return createElement('div', { 'aria-busy': loading }, loadFeedback,
+      loading ? createElement('p', { className: 'imqb2-hint', role: 'status', style: { padding: '12px 0' } }, '正在加载配置…') : null,
+    );
   }
-  if (initial === null || form === null) {
-    return createElement('p', { className: 'imqb2-hint', style: { padding: '12px 0' } }, '正在加载配置…');
-  }
 
-  const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
-  const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
+  const { baseline, form } = draft;
+  const dirty = isConfigDirty(baseline, form);
+  const access = form.access ?? DEFAULT_ACCESS;
+  const message = busy ? '正在保存配置…' : result?.message ?? (dirty
+    ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
+    : '没有未保存的修改。');
 
-  return createElement('form', { className: 'imqb2-form', onSubmit: submit },
-    createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
-    createElement(SegmentedRow, {
-      label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
-      onChange: (v) => { patch('access', { ...access, c2cMode: v }); },
-    }),
-    access.c2cMode === 'allowlist'
-      ? createElement(AreaRow, {
-          label: '私聊白名单', help: '请输入用户 openid，多个请换行输入', rows: 3,
-          value: access.c2cAllow.join('\n'),
-          onChange: (v) => { patch('access', { ...access, c2cAllow: v.split('\n').map((s) => s.trim()) }); },
-        })
-      : null,
-    createElement(SegmentedRow, {
-      label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
-      onChange: (v) => { patch('access', { ...access, groupMode: v }); },
-    }),
-    access.groupMode === 'allowlist'
-      ? createElement(AreaRow, {
-          label: '群聊白名单', help: '请输入群 openid，多个请换行输入', rows: 3,
-          value: access.groupAllow.join('\n'),
-          onChange: (v) => { patch('access', { ...access, groupAllow: v.split('\n').map((s) => s.trim()) }); },
-        })
-      : null,
+  return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
+    loadFeedback,
+    createElement('p', { className: 'imqb2-hint', role: 'note' }, '本版 QQ 仅发送最终正文。旧配置中的流式回复、工具过程与文件发送不生效；需要这些能力时请暂用旧版，升级限制见插件说明。'),
+    createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
+      createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
+      createElement(SegmentedRow, { disabled: busy,
+        label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
+        onChange: (value) => { patch('access', { ...access, c2cMode: value }); },
+      }),
+      access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-c2c', title: '私聊白名单', enabled: bindPhase === 'bound', hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。' }) : null,
+      createElement(SegmentedRow, { disabled: busy,
+        label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
+        onChange: (value) => { patch('access', { ...access, groupMode: value }); },
+      }),
+      access.groupMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-group', title: '群白名单', enabled: bindPhase === 'bound', hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。' }) : null,
 
-    createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
-    createElement(SwitchRow, {
-      label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
-      help: '开启后，机器人仅可回复 @机器人的群聊消息',
-      onChange: (v) => { patch('requireMention', v); },
-    }),
-    createElement(SwitchRow, {
-      label: '流式输出', checked: form.streaming ?? true,
-      help: '回复内容分段实时推送到聊天',
-      onChange: (v) => { patch('streaming', v); },
-    }),
-    createElement(SwitchRow, {
-      label: '显示工具调用结果', checked: form.showToolResults ?? false,
-      help: '在聊天中展示 agent 工具调用的结构化结果',
-      onChange: (v) => { patch('showToolResults', v); },
-    }),
 
-    createElement('div', { className: 'imqb2-group-title' }, '模型'),
-    createElement(FieldRow, {
-      label: 'Provider', value: form.provider ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('provider', v); },
-    }),
-    createElement(FieldRow, {
-      label: 'Model', value: form.model ?? '', placeholder: '留空继承宿主默认',
-      onChange: (v) => { patch('model', v); },
-    }),
-    createElement(FieldRow, {
-      label: 'Preset', value: form.preset ?? '', placeholder: 'Agent preset id',
-      onChange: (v) => { patch('preset', v); },
-    }),
-
-    createElement('div', { className: 'imqb2-group-title' }, '个性化提示词'),
-    createElement(AreaRow, {
-      label: '群聊额外 system prompt', value: form.groupPrompt ?? '',
-      onChange: (v) => { patch('groupPrompt', v); },
-    }),
-    createElement(AreaRow, {
-      label: '私聊额外 system prompt', value: form.directPrompt ?? '',
-      onChange: (v) => { patch('directPrompt', v); },
-    }),
-
-    form.cwd !== undefined
-      ? createElement('div', { className: 'imqb2-field' },
-          createElement('div', { className: 'imqb2-head' },
-            createElement('span', { className: 'imqb2-label' }, 'Agent 工作目录'),
-            createElement('span', { className: 'imqb2-hint' }, '只读'),
-          ),
-          createElement('p', { className: 'imqb2-readonly' }, form.cwd),
-        )
-      : null,
-
+    ),
     createElement('div', { className: 'imqb2-footer' },
-      result !== null
-        ? createElement('p', { className: `imqb2-note${result.ok ? ' imqb2-note--ok' : ' imqb2-note--error'}` },
-            (result.ok ? '' : '⚠️ ') + result.message)
-        : dirty
-          ? createElement('p', { className: 'imqb2-note' }, '保存后插件将重载，进行中的机器人会话将重置')
-          : createElement('p', { className: 'imqb2-note' }),
-      createElement('button', { className: 'imqb2-save', type: 'submit', disabled: busy || !dirty },
-        busy ? '正在保存…' : '保存'),
+      createElement('p', { className: `imqb2-note${result === null ? '' : result.kind === 'failed' ? ' imqb2-note--error' : ' imqb2-note--ok'}`, role: result?.kind === 'failed' ? 'alert' : 'status', 'aria-live': 'polite' }, message),
+      createElement('div', { className: 'imqb2-footer-actions' },
+        pendingConfirmation.current !== null || result?.kind === 'failed' ? createElement(Button, {
+          variant: 'ghost', size: 'sm', disabled: busy || loading, onClick: retry,
+        }, loading ? '刷新中…' : '刷新配置') : null,
+        createElement(Button, { variant: 'ghost', size: 'sm', disabled: busy || !dirty, onClick: () => { replaceDraft({ baseline, form: baseline }); setResult(null); setDraftNotice(null); } }, '撤销修改'),
+        createElement(Button, { variant: 'primary', size: 'sm', type: 'submit', disabled: busy || !dirty }, busy ? '保存中…' : '保存'),
+      ),
     ),
   );
 }

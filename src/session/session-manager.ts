@@ -92,6 +92,7 @@ export function latestCompletedPrefixBoundary(events: readonly unknown[]): numbe
 }
 
 export class SessionManager {
+  conversations?: import('../runtime/conversation-service.ts').ConversationService;
   private sessions = new Map<string, SessionRecord>();
   /**
    * 同 key 正在进行的 getOrCreate（singleflight）。

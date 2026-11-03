@@ -22,6 +22,8 @@ import {
   BIND_UNBIND_PATH,
   type BindStateWire,
 } from '../shared/bind-protocol.ts';
+import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
+import { fetchJson } from './http.ts';
 
 /** 轮询间隔（毫秒）：活跃轮询 / 失败退避 */
 const ACTIVE_POLL_MS = 2000;
@@ -44,78 +46,31 @@ export function installPanelStyles(): void {
   style.textContent = `
 .imqb-panel {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 14px; padding: 24px; min-height: 320px; text-align: center; font-size: 14px;
+  gap: 12px; padding: 24px 16px; text-align: center; font-size: 13px;
+  color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family);
 }
 .imqb-title { margin: 0; font-size: 16px; font-weight: 600; }
-.imqb-hint { margin: 0; opacity: 0.75; line-height: 1.6; }
+.imqb-hint { margin: 0; color: var(--dsw-alias-label-secondary); line-height: 1.6; }
 .imqb-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
-.imqb-link { font-size: 13px; opacity: 0.85; color: var(--dsw-alias-brand, #4d6bfe); text-decoration: none; }
+.imqb-link { font-size: 12px; color: var(--dsw-alias-label-secondary); text-decoration: underline; text-underline-offset: 3px; }
 .imqb-link:hover { text-decoration: underline; }
 .imqb-icon { font-size: 32px; line-height: 1; }
-.imqb-qr { border-radius: 10px; background: #fff; padding: 10px; max-width: 100%; }
+.imqb-qr { box-sizing: content-box; border-radius: var(--dsw-radius-md); padding: 8px; max-width: calc(100% - 16px); height: auto; }
 .imqb-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-.imqb-btn, .imqb-pill {
-  font: inherit; cursor: pointer; color: inherit;
-  transition: background-color .15s ease, border-color .15s ease, color .15s ease, opacity .15s ease;
-}
-.imqb-btn:disabled, .imqb-pill:disabled { opacity: 0.5; cursor: default; }
-.imqb-btn {
-  padding: 7px 18px; border-radius: 8px; font-size: 13px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4));
-  background: transparent;
-}
-.imqb-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.12)); }
-.imqb-btn--primary {
-  border-color: transparent;
-  background: var(--dsw-alias-brand, #4d6bfe); color: #fff; font-weight: 500;
-}
-.imqb-btn--primary:hover:not(:disabled) { background: var(--dsw-alias-brand-strong, #3b5cf0); }
-.imqb-btn--danger { color: var(--dsw-alias-danger, #f26d6d); border-color: var(--dsw-alias-danger, rgba(242, 109, 109, 0.5)); }
-.imqb-btn--danger:hover:not(:disabled) { background: var(--dsw-alias-danger, rgba(242, 109, 109, 0.12)); }
-.imqb-ghost {
-  border: none; background: transparent; opacity: 0.65; padding: 4px 8px;
-  font: inherit; font-size: 13px; cursor: pointer; color: inherit;
-}
-.imqb-ghost:hover { opacity: 1; text-decoration: underline; }
-/* 插件详情「设置」按钮：30px，略高于旁边的 sm 次要按钮 */
-.imqb-pluginOpen {
-  display: inline-flex; align-items: center; justify-content: center;
-  box-sizing: border-box; height: 30px; padding: 0 14px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4));
-  border-radius: 8px; background: var(--dsw-alias-bg-layer-1, transparent);
-  color: var(--dsw-alias-label-primary, inherit); font: inherit;
-  font-size: 13px; line-height: 20px; cursor: pointer;
-}
-.imqb-pluginOpen:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.12)); }
-.imqb-pluginOpen:focus-visible { outline: 2px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 3px; }
-@media (pointer: coarse) { .imqb-pluginOpen { height: 44px; } }
 /* 主面板页面容器（layout.selectPanel 目标）：滚动 + 留白 */
 .imqb-pluginPage {
   height: 100%; min-height: 0; overflow: auto; box-sizing: border-box;
   padding: 24px clamp(16px, 4vw, 48px) 32px;
-  color: var(--dsw-alias-label-primary, #1f2329);
+  color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family);
 }
-.imqb-pluginPageContent { max-width: 1080px; margin: 0 auto; }
-.imqb-pill {
-  padding: 5px 16px; border-radius: 999px; font-size: 13px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4)); background: transparent;
-}
-.imqb-pill:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.12)); }
-.imqb-btn:focus-visible, .imqb-pill:focus-visible, .imqb-input:focus-visible, .imqb-ghost:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 1px;
-}
+.imqb-pluginPageContent { max-width: 680px; margin: 0 auto; }
+.imqb-pageTitle { margin: 0 0 12px; font-size: 20px; line-height: 1.5; font-weight: 600; }
+.imqb-pageDescription { margin: 0 0 16px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .imqb-form { display: flex; flex-direction: column; gap: 12px; width: min(320px, 100%); box-sizing: border-box; }
 .imqb-field { display: flex; flex-direction: column; gap: 5px; text-align: left; font-size: 13px; }
-.imqb-input {
-  padding: 8px 10px; border-radius: 8px; box-sizing: border-box; width: 100%;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.4));
-  background: var(--dsw-alias-bg-input, rgba(128, 128, 128, 0.08));
-  color: inherit; font: inherit; font-size: 13px; outline: none;
-}
-.imqb-input:focus { border-color: var(--dsw-alias-brand, #4d6bfe); }
-.imqb-error { margin: 0; font-size: 12px; color: var(--dsw-alias-danger, #f26d6d); }
+.imqb-error { margin: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; color: var(--dsw-alias-state-error-primary); }
 /* 紧凑状态视图（已绑定 / 过渡态）：设置行风格，无居中大卡留白 */
-.imqb-status { display: flex; flex-direction: column; text-align: left; font-size: 14px; }
+.imqb-status { display: flex; flex-direction: column; text-align: left; font-size: 13px; color: var(--dsw-alias-label-primary); }
 .imqb-status-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .imqb-status-icon { font-size: 24px; line-height: 1; flex: none; }
 .imqb-qqicon {
@@ -123,12 +78,18 @@ export function installPanelStyles(): void {
 }
 .imqb-status-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .imqb-status-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; }
-.imqb-status-sub { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary, inherit); opacity: .85; }
+.imqb-status-sub { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
 .imqb-status-actions { display: flex; align-items: center; gap: 8px; padding: 4px 0 12px; }
+.imqb-account {
+  display: flex; align-items: center; flex-wrap: wrap; column-gap: 24px;
+  border-bottom: .5px solid var(--dsw-alias-border-l2); padding-bottom: 12px;
+}
+.imqb-account > .imqb-status-row { flex: 1 1 240px; min-width: 0; }
+.imqb-account > .imqb-status-actions { padding: 12px 0; flex-wrap: wrap; }
 /* 扫码成功后的连接过渡：二维码模糊变暗 + 覆盖层 */
 .imqb-scanned { position: relative; display: inline-block; }
 .imqb-scanned-qr {
-  display: block; border-radius: 10px; background: #fff; padding: 10px;
+  display: block; border-radius: var(--dsw-radius-md); padding: 8px;
   filter: blur(6px) saturate(0.6); opacity: 0.55;
 }
 .imqb-scanned-veil {
@@ -136,8 +97,14 @@ export function installPanelStyles(): void {
   align-items: center; justify-content: center; gap: 6px; text-align: center;
 }
 .imqb-scanned-title { margin: 0; font-size: 15px; font-weight: 600; }
-.imqb-scanned-sub { margin: 0; font-size: 12px; opacity: 0.75; line-height: 1.6; }
+.imqb-scanned-sub { margin: 0; font-size: 12px; color: var(--dsw-alias-label-secondary); line-height: 1.6; }
     `;
+  style.textContent += `\n.imqb-danger { color: var(--dsw-alias-state-error-primary); }
+.imqb-field > span { width: 100%; }
+.imqb-cards { display: flex; flex-direction: column; gap: 20px; }
+.imqb-card { border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); padding: 4px 16px 16px; background: var(--dsw-alias-bg-layer-1); }
+.imqb-cardTitle { margin: 14px 0 4px; font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.imqb-cardHint { margin: 0 0 8px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }`;
   document.head.appendChild(style);
 }
 
@@ -161,14 +128,16 @@ function usePanelStyles(): void {
  *          gone 表示插件未启用（从未注册过路由），recheck 废弃当前
  *          定时器并立即重新轮询（新轮询链取代旧链，不产生双计时器）。
  */
-export function useBindState(enabled = true): { state: BindStateWire | null; gone: boolean; recheck: () => void } {
+export function useBindState(enabled = true): { state: BindStateWire | null; gone: boolean; error: string | null; recheck: () => void } {
   const [state, setState] = useState<BindStateWire | null>(null);
   const [gone, setGone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const recheckRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (!enabled) return;
     let stopped = false;
+    const controller = new AbortController();
     let sawRoute = false;
     let generation = 0;
     let running = false;
@@ -194,25 +163,20 @@ export function useBindState(enabled = true): { state: BindStateWire | null; gon
       const myGeneration = generation;
       const alive = (): boolean => myGeneration === generation && !stopped;
       try {
-        const res = await fetch(BIND_STATE_PATH, { cache: 'no-store' });
-        if (res.status === 404) {
-          if (!stopped && !sawRoute) setGone(true);
-          // sawRoute：HMR 窗口期，保留当前视图等待路由恢复
-          else if (alive()) schedule(Date.now() < urgentUntil ? 1000 : 3000);
-          return;
-        }
-        if (!res.ok) {
-          if (alive()) schedule(RETRY_POLL_MS);
-          return;
-        }
+        const body = await fetchJson<BindStateWire>(BIND_STATE_PATH, { cache: 'no-store', signal: controller.signal });
         sawRoute = true;
-        const body = (await res.json()) as BindStateWire;
         if (!alive()) return;
+        setGone(false);
+        setError(null);
         setState(body);
         schedule(intervalFor(body.phase));
         return;
-      } catch {
-        // 宿主启动窗口期不可达：退避重试
+      } catch (cause) {
+        if (alive()) {
+          const message = cause instanceof Error ? cause.message : '无法获取绑定状态';
+          setError(message);
+          if (!sawRoute && message.includes('HTTP 404')) setGone(true);
+        }
       } finally {
         running = false;
         // 在飞期间被 recheck 取代：接力启动新轮询链（否则链会断）
@@ -228,6 +192,8 @@ export function useBindState(enabled = true): { state: BindStateWire | null; gon
     // 新链立即发起，并进入快速收敛窗口
     recheckRef.current = (): void => {
       generation += 1;
+      setGone(false);
+      setError(null);
       urgentUntil = Date.now() + 15000;
       if (timer !== undefined) clearTimeout(timer);
       if (running) {
@@ -238,27 +204,25 @@ export function useBindState(enabled = true): { state: BindStateWire | null; gon
     };
 
     void tick();
-    return () => { stopped = true; if (timer !== undefined) clearTimeout(timer); };
-  }, []);
+    return () => { stopped = true; controller.abort(); if (timer !== undefined) clearTimeout(timer); };
+  }, [enabled]);
 
   const recheck = useCallback((): void => { recheckRef.current(); }, []);
 
-  return { state, gone, recheck };
+  return { state, gone, error, recheck };
 }
 
 interface ManualResult { ok: boolean; message?: string; error?: string }
 
 /** 手动提交凭据（填写 / 更换共用） */
-async function submitManualCredentials(appId: string, appSecret: string): Promise<ManualResult> {
+export async function submitManualCredentials(appId: string, appSecret: string): Promise<ManualResult> {
   try {
-    const res = await fetch(BIND_MANUAL_PATH, {
+    const body = await fetchJson<ManualResult>(BIND_MANUAL_PATH, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ appId, appSecret }),
     });
-    const body = (await res.json().catch(() => ({}))) as ManualResult;
-    if (res.ok && body.ok) return { ok: true, message: body.message };
-    return { ok: false, error: body.error ?? `保存失败（HTTP ${res.status}）` };
+    return body.ok ? { ok: true, message: body.message } : { ok: false, error: body.error ?? '保存失败，请重试' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -270,7 +234,7 @@ async function submitManualCredentials(appId: string, appSecret: string): Promis
  * appSecret 永不回显（占位符提示），提交成功后展示保存结果；
  * 宿主写入 profile patch 并经 HMR 重载，状态轮询随后收敛为 bound。
  */
-function ManualForm({ initialAppId }: { initialAppId?: string }): ReactNode {
+function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck: () => void }): ReactNode {
   const [appId, setAppId] = useState(initialAppId ?? '');
   const [appSecret, setAppSecret] = useState('');
   const [busy, setBusy] = useState(false);
@@ -286,11 +250,16 @@ function ManualForm({ initialAppId }: { initialAppId?: string }): ReactNode {
       return;
     }
     setBusy(true);
+    setResult(null);
     void submitManualCredentials(trimmedId, trimmedSecret).then((outcome) => {
       setResult(outcome);
+      if (outcome.ok) {
+        setAppSecret('');
+        recheck();
+      }
       setBusy(false);
     });
-  }, [appId, appSecret, busy]);
+  }, [appId, appSecret, busy, recheck]);
 
   if (result !== null && result.ok) {
     return createElement('div', { className: 'imqb-status' },
@@ -298,8 +267,9 @@ function ManualForm({ initialAppId }: { initialAppId?: string }): ReactNode {
         createElement('div', { className: 'imqb-status-icon' }, '✅'),
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, result.message ?? '凭据已保存'),
-          createElement('p', { className: 'imqb-status-sub' }, '插件将自动重载；稍后即可开始对话'),
+          createElement('p', { className: 'imqb-status-sub' }, '插件将自动重载，连接结果可在左侧 QQ 导航底部查看'),
         ),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: recheck }, '刷新状态'),
       ),
     );
   }
@@ -307,25 +277,27 @@ function ManualForm({ initialAppId }: { initialAppId?: string }): ReactNode {
   return createElement('form', { className: 'imqb-form', onSubmit: submit },
     createElement('label', { className: 'imqb-field' },
       'AppID',
-      createElement('input', {
-        className: 'imqb-input', value: appId, placeholder: 'QQ 机器人 AppID',
+      createElement(Input, {
+        value: appId, placeholder: 'QQ 机器人 AppID',
+        disabled: busy,
         onChange: (event) => { setAppId(event.currentTarget.value); },
         autoComplete: 'off', spellCheck: false,
       }),
     ),
     createElement('label', { className: 'imqb-field' },
       'AppSecret',
-      createElement('input', {
-        className: 'imqb-input', type: 'password', value: appSecret,
+      createElement(Input, {
+        type: 'password', value: appSecret,
+        disabled: busy,
         placeholder: initialAppId === undefined ? 'QQ 机器人 AppSecret' : '输入新的 AppSecret（不回显）',
         onChange: (event) => { setAppSecret(event.currentTarget.value); },
         autoComplete: 'new-password',
       }),
     ),
     result !== null && !result.ok
-      ? createElement('p', { className: 'imqb-error' }, result.error)
+      ? createElement('p', { className: 'imqb-error', role: 'alert' }, result.error)
       : null,
-    createElement('button', { className: 'imqb-btn imqb-btn--primary', type: 'submit', disabled: busy },
+    createElement(Button, { variant: 'primary', size: 'sm', type: 'submit', disabled: busy },
       busy ? '正在保存…' : '保存'),
   );
 }
@@ -340,45 +312,48 @@ function QqBotIcon({ size = 28 }: { size?: number }): ReactNode {
     width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
     'aria-hidden': true, className: 'imqb-qqicon',
   },
-    createElement('path', { d: QQ_BOT_LOGO_PATH, fill: '#0085FF' }),
+    createElement('path', { d: QQ_BOT_LOGO_PATH, fill: 'currentColor' }),
   );
 }
 /** 已绑定视图：回显 appId + 更换凭据 / 解绑入口 */
 function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): ReactNode {
   const [editing, setEditing] = useState(false);
+  const [confirmUnbind, setConfirmUnbind] = useState(false);
   const [unbindResult, setUnbindResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const unbind = useCallback((): void => {
-    if (!window.confirm('确定解绑吗？\n解绑后机器人立即下线，插件将重新进入扫码绑定流程。')) return;
-    void fetch(BIND_UNBIND_PATH, { method: 'POST' })
-      .then(async (res) => {
-        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
-        if (res.ok && body.ok === true) {
+    if (busy) return;
+    setConfirmUnbind(false);
+    setBusy(true);
+    setUnbindResult(null);
+    void fetchJson<{ ok?: boolean; message?: string; error?: string }>(BIND_UNBIND_PATH, { method: 'POST' })
+      .then((body) => {
+        if (body.ok === true) {
           setUnbindResult({ ok: true, message: body.message ?? '已解绑，插件将重载并重新进入绑定流程' });
           // bound 态轮询已降频到 30s：立即重置节拍，让 waiting（二维码）
           // 尽快出现而不是等下一个 30s 周期
           recheck();
           return;
         }
-        setUnbindResult({ ok: false, message: body.error ?? `解绑失败（HTTP ${res.status}）` });
+        setUnbindResult({ ok: false, message: body.error ?? '解绑失败，请重试' });
       })
       .catch((err: unknown) => {
         setUnbindResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
-      });
-  }, [recheck]);
+      })
+      .finally(() => { setBusy(false); });
+  }, [recheck, busy]);
 
-  if (unbindResult !== null) {
+  if (unbindResult?.ok === true) {
     // 非终态视图：解绑成功后正常由轮询收敛到 waiting；若 HMR 未
     // 触发（状态停留 bound），用户仍有「刷新状态」出口而不是死胡同
     return createElement('div', { className: 'imqb-status' },
       createElement('div', { className: 'imqb-status-row' },
-        createElement('div', { className: 'imqb-status-icon' }, unbindResult.ok ? '👋' : '⚠️'),
+        createElement('div', { className: 'imqb-status-icon' }, '👋'),
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, unbindResult.message),
         ),
-        unbindResult.ok
-          ? createElement('button', { className: 'imqb-ghost', onClick: recheck }, '刷新状态')
-          : createElement('button', { className: 'imqb-ghost', onClick: () => { setUnbindResult(null); } }, '返回'),
+        createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: recheck }, '刷新状态'),
       ),
     );
   }
@@ -389,80 +364,105 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, '更换凭据'),
         ),
-        createElement('button', { className: 'imqb-ghost', onClick: () => { setEditing(false); } }, '返回'),
+        createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => { setEditing(false); } }, '返回'),
       ),
-      createElement(ManualForm, { initialAppId: appId }),
+      createElement(ManualForm, { initialAppId: appId, recheck }),
     );
   }
   return createElement('div', { className: 'imqb-status' },
-    createElement('div', { className: 'imqb-status-row' },
-      createElement(QqBotIcon, { size: 28 }),
-      createElement('div', { className: 'imqb-status-meta' },
-        createElement('p', { className: 'imqb-status-title' }, '已绑定'),
-        createElement('p', { className: 'imqb-status-sub imqb-mono' }, `AppID ${appId} · 私聊与群聊已接入`),
+    createElement('div', { className: 'imqb-account' },
+      createElement('div', { className: 'imqb-status-row' },
+        createElement(QqBotIcon, { size: 28 }),
+        createElement('div', { className: 'imqb-status-meta' },
+          createElement('p', { className: 'imqb-status-title' }, '凭据已保存'),
+          createElement('p', { className: 'imqb-status-sub imqb-mono' }, `AppID ${appId}`),
+        ),
+      ),
+      createElement('div', { className: 'imqb-status-actions' },
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: busy, onClick: () => { setEditing(true); } }, '更换凭据'),
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger', disabled: busy, onClick: () => setConfirmUnbind(true) }, busy ? '正在解绑…' : '解绑'),
       ),
     ),
-    createElement('div', { className: 'imqb-status-actions' },
-      createElement('button', { className: 'imqb-btn imqb-btn--primary', onClick: () => { setEditing(true); } }, '更换凭据'),
-      createElement('button', { className: 'imqb-btn imqb-btn--danger', onClick: unbind }, '解绑'),
-    ),
+    unbindResult !== null && !unbindResult.ok
+      ? createElement('p', { className: 'imqb-error', role: 'alert' }, unbindResult.message) : null,
+    createElement(Modal, { open: confirmUnbind, onClose: () => setConfirmUnbind(false), title: '解绑 QQ 机器人', closeLabel: '关闭', description: '清除本机保存的 QQ 凭据并重载连接，随后进入扫码绑定。会话历史保留；此操作不会移出 QQ 群或删除平台侧关系。', footer: createElement('div', { className: 'imqb-row' }, createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => setConfirmUnbind(false) }, '取消'), createElement(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: unbind }, '确认解绑')) }),
   );
 }
 
 /** 未绑定视图：扫码 / 手动填写切换 */
-function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waiting' }> }): ReactNode {
+function UnboundView({ state, recheck }: { state: Extract<BindStateWire, { phase: 'waiting' }>; recheck: () => void }): ReactNode {
   const [mode, setMode] = useState<'qr' | 'manual'>('qr');
-  const refresh = useCallback(() => { void fetch(BIND_REFRESH_PATH, { method: 'POST' }).catch(() => {}); }, []);
-  const [imgFailed, setImgFailed] = useState(false);
-  useEffect(() => { setImgFailed(false); }, [state.qrSvg]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = useCallback(() => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void fetchJson<{ ok?: boolean }>(BIND_REFRESH_PATH, { method: 'POST' })
+      .then(() => { recheck(); })
+      .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : '刷新失败，请重试'); })
+      .finally(() => { setBusy(false); });
+  }, [busy, recheck]);
 
   if (mode === 'manual') {
     return createElement('div', { className: 'imqb-panel' },
       createElement('p', { className: 'imqb-title' }, '手动填写凭据'),
-      createElement(ManualForm, {}),
-      createElement('button', { className: 'imqb-ghost', onClick: () => { setMode('qr'); } }, '改用扫码绑定'),
-    );
-  }
-
-  if (state.qrSvg === undefined || imgFailed) {
-    return createElement('div', { className: 'imqb-panel' },
-      createElement('div', { className: 'imqb-icon' }, '⚠️'),
-      createElement('p', { className: 'imqb-title' }, '二维码暂时无法显示'),
-      createElement('p', { className: 'imqb-hint' }, '可重启应用后重试，或任选下面一种方式继续'),
-      createElement('a', { href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '在浏览器中打开链接扫码'),
-      createElement('div', { className: 'imqb-row' },
-        createElement('button', { className: 'imqb-pill', onClick: () => { setMode('manual'); } }, '手动填写凭据'),
-      ),
+      createElement(ManualForm, { recheck }),
+      createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => { setMode('qr'); } }, '改用扫码绑定'),
     );
   }
 
   return createElement('div', { className: 'imqb-panel' },
-    createElement('img', {
-      src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr',
-      onError: () => { setImgFailed(true); },
-    }),
+    state.qrSvg === undefined
+      ? null
+      : createElement('img', { src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr' }),
     createElement('p', { className: 'imqb-title' }, '扫码绑定 QQ 机器人'),
     createElement('p', { className: 'imqb-hint' }, '使用手机 QQ 扫描二维码完成绑定'),
     createElement('a', { href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '二维码显示异常？在浏览器中打开'),
     createElement('div', { className: 'imqb-row' },
-      createElement('button', { className: 'imqb-pill', onClick: refresh }, '刷新二维码'),
-      createElement('button', { className: 'imqb-pill', onClick: () => { setMode('manual'); } }, '手动填写'),
+      createElement(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: refresh }, busy ? '正在刷新…' : '刷新二维码'),
+      createElement(Button, { variant: 'outline', size: 'sm', onClick: () => { setMode('manual'); } }, '手动填写'),
     ),
+    error ? createElement('p', { className: 'imqb-error', role: 'alert' }, error) : null,
+  );
+}
+
+function FailedView({ reason, recheck }: { reason: string; recheck: () => void }): ReactNode {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const retry = (): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void fetchJson(BIND_REFRESH_PATH, { method: 'POST' })
+      .then(() => { recheck(); })
+      .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : '刷新失败，请重试'); })
+      .finally(() => { setBusy(false); });
+  };
+  return createElement('div', { className: 'imqb-panel' },
+    createElement('p', { className: 'imqb-title' }, '绑定失败'),
+    createElement('p', { className: 'imqb-hint' }, reason),
+    createElement(Button, { type: 'button', variant: 'primary', size: 'sm', disabled: busy, onClick: retry }, busy ? '正在刷新…' : '重新获取二维码'),
+    error ? createElement('p', { className: 'imqb-error', role: 'alert' }, error) : null,
   );
 }
 
 /** 依据宿主相位渲染面板主体（可注入共享轮询结果避免双计时器） */
-export function BindPanelBody(props?: {
+interface BindPanelBodyProps {
   state?: BindStateWire | null;
   gone?: boolean;
   recheck?: () => void;
-}): ReactNode {
+  error?: string | null;
+}
+
+export function BindPanelBody(props: BindPanelBodyProps): ReactNode {
   usePanelStyles();
-  const injected = props?.state !== undefined;
+  const injected = props.state !== undefined;
   const internal = useBindState(!injected);
-  const state = injected ? props.state : internal.state;
+  const state = injected ? (props.state ?? null) : internal.state;
   const gone = injected ? (props.gone ?? false) : internal.gone;
   const recheck = injected ? (props.recheck ?? (() => {})) : internal.recheck;
+  const error = injected ? props.error : internal.error;
   // 扫码成功的连接过渡场景需要保留最后一帧二维码：waiting 相位持续记录，
   // bound 后清空（避免下次解绑重绑时旧码闪现）
   const [lastQr, setLastQr] = useState<string | null>(null);
@@ -479,12 +479,14 @@ export function BindPanelBody(props?: {
     return createElement('div', { className: 'imqb-panel' },
       createElement('div', { className: 'imqb-icon' }, '❔'),
       createElement('p', { className: 'imqb-hint' }, '插件未启用，或当前版本不支持端内配置'),
+      createElement(Button, { variant: 'outline', size: 'sm', onClick: recheck }, '重新读取绑定状态'),
     );
   }
 
   if (state === null || state.phase === 'starting') {
     return createElement('div', { className: 'imqb-panel' },
-      createElement('p', { className: 'imqb-hint' }, '正在获取绑定状态…'),
+      createElement('p', { className: error ? 'imqb-error' : 'imqb-hint', role: 'status' }, error ?? '正在获取绑定状态…'),
+      error ? createElement(Button, { variant: 'outline', size: 'sm', onClick: recheck }, '重试读取绑定状态') : null,
     );
   }
 
@@ -496,7 +498,7 @@ export function BindPanelBody(props?: {
           createElement('img', { src: lastQr, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-scanned-qr' }),
           createElement('div', { className: 'imqb-scanned-veil' },
             createElement('p', { className: 'imqb-scanned-title' }, '✅ 扫码成功'),
-            createElement('p', { className: 'imqb-scanned-sub' }, '正在连接机器人，稍候…'),
+            createElement('p', { className: 'imqb-scanned-sub' }, '正在保存凭据…'),
           ),
         ),
       );
@@ -506,26 +508,19 @@ export function BindPanelBody(props?: {
         createElement('div', { className: 'imqb-status-icon' }, '🎉'),
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, '扫码成功'),
-          createElement('p', { className: 'imqb-status-sub' }, '凭据已保存，插件正在重载，稍后即可开始对话'),
+          createElement('p', { className: 'imqb-status-sub' }, '凭据已保存，正在重新加载连接'),
         ),
       ),
     );
   }
 
   if (state.phase === 'failed') {
-    return createElement('div', { className: 'imqb-panel' },
-      createElement('div', { className: 'imqb-icon' }, '⚠️'),
-      createElement('p', { className: 'imqb-title' }, '绑定失败'),
-      createElement('p', { className: 'imqb-hint' }, state.reason),
-      createElement('div', { className: 'imqb-row' },
-        createElement('button', { className: 'imqb-btn imqb-btn--primary', onClick: () => { window.location.reload(); } }, '重试'),
-      ),
-    );
+    return createElement(FailedView, { reason: state.reason, recheck });
   }
 
   if (state.phase === 'bound') {
-    return createElement(BoundView, { appId: state.appId, recheck });
+    return createElement(BoundView, { key: state.appId, appId: state.appId, recheck });
   }
 
-  return createElement(UnboundView, { state });
+  return createElement(UnboundView, { state, recheck });
 }
