@@ -117,3 +117,24 @@ describe('PrefsStore 并发安全（E3）', () => {
     expect(readdirSync(dir).filter((f) => f.includes('.corrupted.'))).toHaveLength(1);
   });
 });
+
+describe('PrefsStore.findSessionKey 反向索引', () => {
+  it('随 set/clear 同步维护：换新会话后旧 id 不再命中', () => {
+    const s = store();
+    s.setSessionId('k', 'session-1');
+    expect(s.findSessionKey('session-1')).toBe('k');
+
+    s.setSessionId('k', 'session-2');
+    expect(s.findSessionKey('session-1')).toBeUndefined();
+    expect(s.findSessionKey('session-2')).toBe('k');
+
+    s.clearSessionId('k');
+    expect(s.findSessionKey('session-2')).toBeUndefined();
+  });
+
+  it('load 时从磁盘重建索引', () => {
+    store().setSessionId('k', 'session-1');
+
+    expect(store().findSessionKey('session-1')).toBe('k');
+  });
+});

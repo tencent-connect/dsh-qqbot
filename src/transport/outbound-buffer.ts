@@ -5,7 +5,6 @@
  * 独立文件便于单测。
  */
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
-import type { SessionRecord } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { StreamingWriter } from './streaming-writer.ts';
@@ -29,24 +28,25 @@ export class OutboundBuffer {
   private buffer = '';
   private flushing = false;
   private readonly writer: StreamingWriter | null;
-  private readonly record: SessionRecord;
   private readonly bot: QQBotSender;
   private readonly limit: number;
   private readonly logger: Logger;
+  /** 构造时拍下的发送目标，本缓冲生命周期内不跟随会话 replyTarget 变化 */
+  private readonly target: ReplyTarget;
 
   public constructor(
-    record: SessionRecord,
+    target: ReplyTarget,
     bot: QQBotSender,
     limit: number,
     logger: Logger,
     streamingEnabled: boolean,
   ) {
-    this.record = record;
     this.bot = bot;
     this.limit = limit;
     this.logger = logger;
+    this.target = target;
     this.writer = streamingEnabled
-      ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS })
+      ? new StreamingWriter({ bot, target: this.target, logger, throttleMs: STREAM_THROTTLE_MS })
       : null;
   }
 
@@ -82,7 +82,7 @@ export class OutboundBuffer {
       // 降级：静态发送（writer 不存在 or 流式失败）
       const chunks = chunkMarkdownText(this.buffer, this.limit);
       for (const chunk of chunks) {
-        await this.bot.sendMarkdown(this.record.replyTarget, chunk);
+        await this.bot.sendMarkdown(this.target, chunk);
       }
     } catch (err) {
       this.logger.error(`im-qqbot: flush failed: ${err instanceof Error ? err.message : String(err)}`);

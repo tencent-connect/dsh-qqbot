@@ -55,7 +55,8 @@ function startAsk(
 ): Promise<UserQuestionResult> {
   const key = sessionKey(scope, peerId);
   const request: UserQuestionRequest = { questions, ...(signal ? { signal } : {}) };
-  return ch.askViaQQ(makeRecord(key, scope), request);
+  const record = makeRecord(key, scope);
+  return ch.askViaQQ(record, record.replyTarget, request);
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -219,7 +220,8 @@ describe('QuestionChannel.askViaQQ', () => {
       { requireMention: false, askTimeoutMs: 60_000 },
       createLogger(),
     );
-    await expect(ch.askViaQQ(makeRecord('sx'), { questions: [q2()] }))
+    const record = makeRecord('sx');
+    await expect(ch.askViaQQ(record, record.replyTarget, { questions: [q2()] }))
       .rejects.toThrow('failed to deliver question to QQ');
   });
 
@@ -361,6 +363,48 @@ describe('QuestionChannel.install routing', () => {
     expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
     expect(origCalled).toBe(1); // QQ 路径未触碰原实现
+  });
+
+  it('sends the first question to the resolved turn target, follow-ups reply to the answer', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const sender = createSender([]);
+    const pushed: ReplyTarget = { scope: 'c2c', targetId: 'x', forceProactive: true };
+    const ch = new QuestionChannel(
+      manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+      { targetFor: () => pushed },
+    );
+    const uq = { ask: vi.fn(async () => ({ answers: [] })) };
+    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+
+    const p = uq.ask({ questions: [q2('a'), q2('b')], agent: { id: 'sess-qq' } });
+    await sleep(10);
+    expect(sender.sendMarkdown.mock.calls[0]![0]).toEqual(pushed);
+
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
+    await sleep(10);
+    expect(sender.sendMarkdown.mock.calls[1]![0]).toEqual(record.replyTarget);
+
+    expect(ch.tryAnswer('c2c', 'u9', '2')).toBe(true);
+    await p;
+  });
+
+  it('delegates to the host when the turn is not delivered to QQ', async () => {
+    const record = makeRecord(sessionKey('group', 'g1'), 'group');
+    const manager = createManager({ findBySessionId: () => record });
+    const sender = createSender([]);
+    const ch = new QuestionChannel(
+      manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+      { targetFor: () => undefined },
+    );
+    const orig = vi.fn(async () => ({ answers: [] }));
+    const uq = { ask: orig };
+    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+
+    await uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
+
+    expect(orig).toHaveBeenCalledTimes(1);
+    expect(sender.sendMarkdown).not.toHaveBeenCalled();
   });
 
   it('uninstall restores the original ask', async () => {

@@ -14,6 +14,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from './send-media.ts';
+import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -48,6 +49,22 @@ function parseTarget(input: string): ReplyTarget | undefined {
   return { scope, targetId };
 }
 
+/**
+ * 当前会话的发送目标：优先回合投递解析（覆盖桌面恢复、不在会话表里的 agent，
+ * 以及主动推送回合），否则回退到会话表里的 replyTarget。
+ */
+function currentTarget(
+  agent: unknown,
+  manager: SessionManager,
+  targets: DeliveryTargetResolver | undefined,
+): ReplyTarget | undefined {
+  const agentId = (agent as { id?: unknown } | undefined)?.id;
+  if (targets !== undefined && typeof agentId === 'string' && agentId !== '') {
+    return targets.targetFor(agentId);
+  }
+  return manager.findByAgent(agent as DshAgent)?.replyTarget;
+}
+
 /** 注册 qqbot_send_file 工具（tools 服务缺失时优雅降级，不阻断插件启动） */
 export function registerSendFileTool(
   ctx: Context,
@@ -55,6 +72,7 @@ export function registerSendFileTool(
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
+  targets?: DeliveryTargetResolver,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
@@ -114,7 +132,7 @@ export function registerSendFileTool(
           throw new Error(`qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid，收到: ${target}`);
         }
       } else if (exec.agent !== undefined) {
-        replyTarget = manager.findByAgent(exec.agent as DshAgent)?.replyTarget;
+        replyTarget = currentTarget(exec.agent, manager, targets);
       }
       if (replyTarget === undefined) {
         throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');

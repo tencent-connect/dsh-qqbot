@@ -8,7 +8,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
-import { handleInbound, createOutboundHandler } from '../transport/index.ts';
+import { handleInbound, createOutboundHandler, createTurnTracker } from '../transport/index.ts';
+import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
 import { cacheMsgId, cacheEventId } from '../transport/msgid-cache.ts';
@@ -50,6 +51,10 @@ export async function bootstrapGateway(
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
 
+  // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
+  const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs) });
+  const turnTracker = createTurnTracker(manager, config, logger, qqInputs);
+
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
   const bot = new QQBot({
@@ -74,7 +79,7 @@ export async function bootstrapGateway(
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(mCtx, manager, config, logger);
+    await handleInbound(mCtx, manager, config, logger, qqInputs);
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──
@@ -113,9 +118,14 @@ export async function bootstrapGateway(
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
 
-  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, deliverablesDeliverer);
-  (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
-    .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void);
+  const outbound = createOutboundHandler(
+    manager, sender, config, logger, toolsRegistry, deliverablesDeliverer, turnTracker,
+  );
+  // session/event 按会话作用域派发。根作用域监听不带 global 收不到
+  // 桌面恢复出来的 agent，主动回合的 user/message 会直接丢。
+  // 全局监听下非 QQ 会话在 TurnTracker.begin 即被过滤，不进入回合状态表。
+  (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
+    .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void, { global: true });
 
   // ── 出站流式：agent/assistant-stream → 流式帧路由 ──
   // 实时流式走瞬态 agent/assistant-stream（chunk 不进 session log）。
@@ -128,12 +138,12 @@ export async function bootstrapGateway(
     }, { global: true });
 
   // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
-  const questionChannel = new QuestionChannel(manager, sender, config, logger);
+  const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
   questionChannel.install(ctx);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
-  const approvalChannel = new ApprovalChannel(manager, sender, config, logger);
+  const approvalChannel = new ApprovalChannel(manager, sender, config, logger, turnTracker);
   manager.approvalChannel = approvalChannel;
   approvalChannel.install(ctx as unknown as ApprovalChannelContext);
 
@@ -183,7 +193,7 @@ export async function bootstrapGateway(
   registerDescribeImageTool(ctx, config.vision, logger);
 
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger);
+  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })

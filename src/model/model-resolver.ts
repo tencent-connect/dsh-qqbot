@@ -105,6 +105,11 @@ export class ModelResolver {
     return this.prefs.getSessionId(sessionKey);
   }
 
+  /** sessionId → sessionKey（prefs 的反向查找） */
+  findSessionKey(sessionId: string): string | undefined {
+    return this.prefs.findSessionKey(sessionId);
+  }
+
   /**
    * 记录指定 sessionKey 的最新 sessionId（fork 后调用）并持久化
    */

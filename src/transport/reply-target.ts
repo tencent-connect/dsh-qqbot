@@ -28,6 +28,10 @@ export function resolveReplyTarget(
   limiter: ReplyLimiter,
   allowEvent: boolean,
 ): ReplyTarget {
+  // 主动推送不占用、也不复用被动回复额度
+  if (target.forceProactive) {
+    return { scope: target.scope, targetId: target.targetId };
+  }
   const cached = getCachedReplyIds(target.scope, target.targetId);
   const explicitMsgId = target.msgId;
   const candidates: CachedReplyId[] = [];
