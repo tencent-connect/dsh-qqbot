@@ -14,6 +14,7 @@ import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
 import { buildKeyboard, formatQuestion } from './question-renderer.ts';
 import { decodeButtonData } from './button-utils.ts';
+import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -92,6 +93,8 @@ class QuestionChannelError extends Error {
 
 interface PendingEntry {
   record: QuestionSessionRecordLike;
+  /** 提问时本回合的投递目标（首题与超时提示用；用户作答后的后续题被动回复其作答） */
+  target: ReplyTarget;
   request: UserQuestionRequest;
   resolve: (result: UserQuestionResult) => void;
   reject: (err: Error) => void;
@@ -111,17 +114,23 @@ export class QuestionChannel {
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
   private readonly logger: Logger;
+  private readonly targets: DeliveryTargetResolver | undefined;
 
+  /**
+   * @param targets 回合投递目标解析（与出站共享）。缺省时按会话 replyTarget 被动回复。
+   */
   public constructor(
     manager: QuestionChannelManagerLike,
     sender: QuestionChannelSenderLike,
     config: QuestionChannelConfigLike,
     logger: Logger,
+    targets?: DeliveryTargetResolver,
   ) {
     this.manager = manager;
     this.sender = sender;
     this.config = config;
     this.logger = logger;
+    this.targets = targets;
   }
 
   /**
@@ -141,7 +150,9 @@ export class QuestionChannel {
     uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
       const sessionId = request?.agent?.id;
       const record = sessionId ? self.manager.findBySessionId(sessionId) : undefined;
-      if (record) return self.askViaQQ(record, request);
+      // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 交回宿主默认界面
+      const target = record && sessionId ? self.resolveTarget(sessionId, record) : undefined;
+      if (record && target) return self.askViaQQ(record, target, request);
       return self.origAsk!(request);
     };
     Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
@@ -218,7 +229,11 @@ export class QuestionChannel {
   }
 
   /** 走 QQ 通道：发送首题 + 挂起 Promise，等待逐题作答 */
-  private async askViaQQ(record: QuestionSessionRecordLike, request: UserQuestionRequest): Promise<UserQuestionResult> {
+  private async askViaQQ(
+    record: QuestionSessionRecordLike,
+    target: ReplyTarget,
+    request: UserQuestionRequest,
+  ): Promise<UserQuestionResult> {
     const key = record.sessionKey;
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败，避免悬挂
     if (request.signal?.aborted) {
@@ -236,10 +251,10 @@ export class QuestionChannel {
     const first = request.questions[0];
     if (!first) throw new Error('ask_user_question with empty questions');
 
-    await this.sendQuestion(record, first);
+    await this.sendQuestion(record, target, first);
 
     return new Promise<UserQuestionResult>((resolve, reject) => {
-      const entry: PendingEntry = { record, request, resolve, reject, index: 0, collected: [] };
+      const entry: PendingEntry = { record, target, request, resolve, reject, index: 0, collected: [] };
       if (request.signal) {
         const onAbort = (): void => {
           if (this.pending.get(key) !== entry) return;
@@ -264,7 +279,8 @@ export class QuestionChannel {
     if (entry.index < entry.request.questions.length) {
       const next = entry.request.questions[entry.index]!;
       this.resetTimer(entry, key);
-      void this.sendQuestion(entry.record, next).catch((err) => {
+      // 用户刚在 QQ 作答：后续题被动回复其作答（replyTarget 携带最新 msgId 候选）
+      void this.sendQuestion(entry.record, entry.record.replyTarget, next).catch((err) => {
         this.pending.delete(key);
         this.clearTimer(entry);
         this.removeAbort(entry);
@@ -281,19 +297,23 @@ export class QuestionChannel {
   }
 
   /** 发送单个问题：优先带按钮，按钮发送失败降级纯文本 */
-  private async sendQuestion(record: QuestionSessionRecordLike, question: UserQuestion): Promise<void> {
+  private async sendQuestion(
+    record: QuestionSessionRecordLike,
+    target: ReplyTarget,
+    question: UserQuestion,
+  ): Promise<void> {
     const hint = record.scope === 'group' && this.config.requireMention === true;
     const keyboard = buildKeyboard(question);
     try {
       if (keyboard) {
         try {
-          await this.sender.sendMarkdown(record.replyTarget, formatQuestion(question, hint, true), { keyboard });
+          await this.sender.sendMarkdown(target, formatQuestion(question, hint, true), { keyboard });
           return;
         } catch (err) {
           this.logger.warn(`im-qqbot: keyboard send failed, fallback to text: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-      await this.sender.sendMarkdown(record.replyTarget, formatQuestion(question, hint, false));
+      await this.sender.sendMarkdown(target, formatQuestion(question, hint, false));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`im-qqbot: question send failed key=${record.sessionKey}: ${msg}`);
@@ -307,8 +327,13 @@ export class QuestionChannel {
     this.pending.delete(key);
     this.removeAbort(entry);
     entry.timer = undefined;
-    void this.sender.sendMarkdown(entry.record.replyTarget, '⚠️ 提问已超时，未收到回答。').catch(() => {});
+    void this.sender.sendMarkdown(entry.target, '⚠️ 提问已超时，未收到回答。').catch(() => {});
     entry.reject(new QuestionChannelError('ask_user_question timed out before the user answered', ASK_ABORTED));
+  }
+
+  /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */
+  private resolveTarget(sessionId: string, record: QuestionSessionRecordLike): ReplyTarget | undefined {
+    return this.targets ? this.targets.targetFor(sessionId) : record.replyTarget;
   }
 
   private resetTimer(entry: PendingEntry, key: string): void {

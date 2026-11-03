@@ -22,4 +22,19 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
     const cfg = ConfigSchema({ access: { c2cMode: 'allowlist' } });
     expect(cfg.access.c2cMode).toBe('allowlist');
   });
+
+  it('闲置会话默认 30 分钟回收', () => {
+    const cfg = ConfigSchema({});
+    expect(cfg.sessionIdleTimeout).toBe(30 * 60 * 1000);
+  });
+
+  it.each([
+    [{}, 'c2c'],
+    [{ proactiveDelivery: {} }, 'c2c'],
+    [{ proactiveDelivery: null }, 'c2c'],
+    [{ proactiveDelivery: { externalTurns: 'off' } }, 'off'],
+    [{ proactiveDelivery: { externalTurns: 'all' } }, 'all'],
+  ])('proactiveDelivery.externalTurns：%j → %s', (input, expected) => {
+    expect(ConfigSchema(input).proactiveDelivery.externalTurns).toBe(expected);
+  });
 });

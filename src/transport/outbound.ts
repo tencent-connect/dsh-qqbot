@@ -6,15 +6,16 @@
  */
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
+import { QqInputRegistry } from './qq-input-origin.ts';
+import { TurnTracker, type DeliveryPlan } from './turn-tracker.ts';
 import {
   parseEvent,
   extractTurnError,
-  type ChunkEvent,
   type MessageEvent,
   type ToolCallEvent,
   type ToolResultEvent,
@@ -57,12 +58,12 @@ interface ToolCallRecord {
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 
 /**
- * 出站路由器：持有会话级状态，按事件类型分发到处理器
+ * 出站路由器：持有会话级状态，按事件类型分发到处理器。
+ * 回合归属与投递目标委托给 TurnTracker（与提问/审批/发文件共享）。
  */
 class OutboundRouter {
   private readonly buffers = new Map<string, OutboundBuffer>();
   private readonly toolCalls = new Map<string, ToolCallRecord>();
-  /** 每会话当前流式 attemptId：LLM 重试会发布新 attempt，用于 reset 与迟到帧过滤 */
   private readonly streamAttempts = new Map<string, string>();
   /** 每会话本轮已声明的交付文件（deliverables/presented，轮末清空） */
   private readonly presentedFiles = new Map<string, PresentedFileRef[]>();
@@ -79,12 +80,14 @@ class OutboundRouter {
   private readonly logger: Logger;
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
   private readonly deliverer: DeliverablesDelivererLike | undefined;
+  private readonly tracker: TurnTracker;
 
   public constructor(
     manager: SessionManager,
     bot: QQBotSender,
     config: ImQQBotConfig,
     logger: Logger,
+    tracker: TurnTracker,
     toolsRegistry: ToolsRegistryLike | undefined,
     deliverer?: DeliverablesDelivererLike,
   ) {
@@ -92,43 +95,53 @@ class OutboundRouter {
     this.bot = bot;
     this.config = config;
     this.logger = logger;
+    this.tracker = tracker;
     this.toolsRegistry = toolsRegistry;
     this.deliverer = deliverer;
   }
 
   /** 事件分发入口 */
   public route(session: SessionLike, raw: RawSessionEvent): void {
+    const sessionId = session.header.id;
+    if (raw.type === 'turn/start') {
+      if (this.tracker.begin(sessionId, eventTurn(raw.data))) this.resetTurnState(sessionId);
+      return;
+    }
+    if (raw.type === 'user/message') {
+      this.tracker.note(sessionId, raw.data);
+      return;
+    }
+    if (!this.tracker.isCurrent(sessionId, raw.type, eventTurn(raw.data))) return;
+
     const event = parseEvent(raw);
     if (event === undefined) return;
 
-    const record = this.manager.findBySessionId(session.header.id);
-    if (record === undefined) return;
+    const plan = this.tracker.planFor(sessionId);
+    if (event.type === 'turn/end') {
+      this.tracker.end(sessionId);
+      this.finishTurn(sessionId, event, plan);
+      return;
+    }
+    if (plan === undefined) return;
 
+    const record = this.manager.findBySessionId(sessionId);
     switch (event.type) {
       case 'assistant/chunk':
-        this.onChunk(session.header.id, record, event);
+        this.appendChunk(sessionId, plan, event.text);
         break;
       case 'assistant/message':
-        this.onMessage(session.header.id, record, event);
+        this.onMessage(sessionId, plan, event);
         break;
       case 'tool/call':
-        this.onToolCall(event);
+        if (record !== undefined) this.onToolCall(event);
         break;
       case 'tool/result':
-        this.onToolResult(record, event);
+        if (record !== undefined) this.onToolResult(record, plan, event);
         break;
       case 'deliverables/presented':
-        this.onPresented(session.header.id, event);
-        break;
-      case 'turn/end':
-        this.onTurnEnd(session.header.id, record, event);
+        this.onPresented(sessionId, event);
         break;
     }
-  }
-
-  /** durable assistant/chunk 事件的流式增量（历史格式兼容保留，当前宿主不再生产该事件） */
-  private onChunk(sessionId: string, record: SessionRecord, event: ChunkEvent): void {
-    this.appendChunk(sessionId, record, event.text);
   }
 
   /**
@@ -156,30 +169,52 @@ class OutboundRouter {
       return;
     }
 
-    const record = this.manager.findBySessionId(agentId);
-    if (record === undefined) return;
-    this.appendChunk(agentId, record, delta.text);
+    // 已有 buffer：目标在创建时已拍下，直接追加，避免每帧重新解析
+    const existing = this.buffers.get(agentId);
+    if (existing !== undefined) {
+      existing.append(delta.text);
+      return;
+    }
+    const plan = this.tracker.planFor(agentId);
+    if (plan === undefined) return;
+    this.appendChunk(agentId, plan, delta.text);
   }
 
-  /** 获取或创建会话 buffer 并追加增量 */
-  private appendChunk(sessionId: string, record: SessionRecord, text: string): void {
+  /** 获取或创建会话 buffer 并追加增量。目标在创建时拍下，本回合内不再改。 */
+  private appendChunk(sessionId: string, plan: DeliveryPlan, text: string): void {
     let buffer = this.buffers.get(sessionId);
     if (buffer === undefined) {
-      buffer = new OutboundBuffer(record, this.bot, this.config.textChunkLimit, this.logger, this.shouldStream(record));
+      buffer = new OutboundBuffer(
+        plan.target,
+        this.bot,
+        this.config.textChunkLimit,
+        this.logger,
+        this.shouldStream(plan),
+      );
       this.buffers.set(sessionId, buffer);
     }
     buffer.append(text);
   }
 
-  /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式） */
-  private shouldStream(record: SessionRecord): boolean {
-    return this.config.streaming
-      && record.replyTarget.scope === 'c2c'
-      && !!record.replyTarget.msgId;
+  /** 被动回复且 c2c 有 msgId 才流式（群聊、主动推送均不流式） */
+  private shouldStream(plan: DeliveryPlan): boolean {
+    return !plan.proactive
+      && this.config.streaming
+      && plan.target.scope === 'c2c'
+      && !!plan.target.msgId;
+  }
+
+  /** 新回合开始：丢弃上一轮残留的出站状态 */
+  private resetTurnState(sessionId: string): void {
+    this.buffers.get(sessionId)?.cancel();
+    this.buffers.delete(sessionId);
+    this.streamAttempts.delete(sessionId);
+    this.presentedFiles.delete(sessionId);
+    this.presentedCalls.delete(sessionId);
   }
 
   /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
-  private onMessage(sessionId: string, record: SessionRecord, event: MessageEvent): void {
+  private onMessage(sessionId: string, plan: DeliveryPlan, event: MessageEvent): void {
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined && buffer.text.trim()) {
       this.trackText(sessionId, buffer.flush());
@@ -194,7 +229,7 @@ class OutboundRouter {
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
 
-    this.trackText(sessionId, this.send(record, fullText, 'sendMarkdown'));
+    this.trackText(sessionId, this.send(plan.target, fullText, 'sendMarkdown'));
     this.buffers.delete(sessionId);
   }
 
@@ -209,7 +244,7 @@ class OutboundRouter {
   }
 
   /** 工具结果：错误始终发送，成功结果按开关 */
-  private onToolResult(record: SessionRecord, event: ToolResultEvent): void {
+  private onToolResult(record: SessionRecord, plan: DeliveryPlan, event: ToolResultEvent): void {
     const call = this.toolCalls.get(event.callId);
     this.toolCalls.delete(event.callId);
     if (call === undefined) return;
@@ -225,7 +260,7 @@ class OutboundRouter {
     );
     if (!text) return;
 
-    void this.send(record, text, 'sendToolResult');
+    void this.send(plan.target, text, 'sendToolResult');
   }
 
   /** 收集本轮声明的交付文件：事件总是先于 turn/end 到达，轮末统一投递 */
@@ -247,7 +282,7 @@ class OutboundRouter {
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
    * 外层轮次失败不撤销已完成的声明（宿主契约），故失败轮的文件仍投递。
    */
-  private onTurnEnd(sessionId: string, record: SessionRecord, event: TurnEndEvent): void {
+  private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined): void {
     const buffer = this.buffers.get(sessionId);
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
@@ -270,22 +305,22 @@ class OutboundRouter {
     const failure = extractTurnError(event.reason);
     void (async () => {
       await Promise.all([flushTask, pending]);
-      if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
-        await this.send(record, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
+      if (plan !== undefined && failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
+        await this.send(plan.target, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
       }
-      if (files.length > 0 && this.deliverer !== undefined) {
-        await this.deliverer.deliver(record, files);
+      if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
+        await this.deliverer.deliver(plan.target, files);
       }
       this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
     })();
   }
 
   /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
-  private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
+  private async send(target: ReplyTarget, text: string, tag: string): Promise<void> {
     const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
-        await this.bot.sendMarkdown(record.replyTarget, chunk);
+        await this.bot.sendMarkdown(target, chunk);
       } catch (err) {
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -293,12 +328,32 @@ class OutboundRouter {
   }
 }
 
+function eventTurn(data: Record<string, unknown>): number | undefined {
+  return Number.isSafeInteger(data.turn) ? data.turn as number : undefined;
+}
+
+/** 按配置组装回合跟踪器（入站登记表需与 handleInbound 共享同一实例） */
+export function createTurnTracker(
+  manager: SessionManager,
+  config: ImQQBotConfig,
+  logger: Logger,
+  inputs: QqInputRegistry = new QqInputRegistry(),
+): TurnTracker {
+  return new TurnTracker(
+    manager,
+    inputs,
+    { externalTurns: config.proactiveDelivery?.externalTurns ?? 'c2c' },
+    logger,
+  );
+}
+
 /**
  * 创建出站事件处理器
  *
  * 返回 durable 事件与实时流式帧两个入口，分别注册到
  * ctx.on('session/event') 与 ctx.on('agent/assistant-stream', ..., { global: true })。
- * toolsRegistry 用于工具结果的结构化展示；deliverer 用于轮末投递 present 声明的交付文件。
+ * toolsRegistry 用于工具结果的结构化展示；deliverer 用于轮末投递 present 声明的交付文件；
+ * tracker 为回合归属的单一事实源，需与提问/审批/发文件共享时由调用方注入。
  */
 export function createOutboundHandler(
   manager: SessionManager,
@@ -307,8 +362,10 @@ export function createOutboundHandler(
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
   deliverer?: DeliverablesDelivererLike,
+  tracker?: TurnTracker,
 ): OutboundHandlers {
-  const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry, deliverer);
+  const turns = tracker ?? createTurnTracker(manager, config, logger);
+  const router = new OutboundRouter(manager, bot, config, logger, turns, toolsRegistry, deliverer);
   return {
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),

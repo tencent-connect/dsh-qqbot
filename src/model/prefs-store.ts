@@ -41,6 +41,8 @@ export class PrefsStore {
   private overrides = new Map<string, ModelRoute>();
   /** per-peer 最新 sessionId（fork 后更新，内存态） */
   private sessionIds = new Map<string, string>();
+  /** sessionIds 的反向索引（sessionId → sessionKey），与 sessionIds 同步维护 */
+  private sessionKeys = new Map<string, string>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
   /** 本进程显式删除的 key（防止并发合并把删除复活） */
@@ -88,13 +90,24 @@ export class PrefsStore {
     return this.sessionIds.get(sessionKey);
   }
 
+  /**
+   * sessionId → sessionKey（O(1) 反向索引）。出站只拿到会话 id 时，用来找回 QQ 对端。
+   * 只反映本进程内存视角；其他写者后写入的映射在下次 load 前不可见。
+   */
+  findSessionKey(sessionId: string): string | undefined {
+    return this.sessionKeys.get(sessionId);
+  }
+
   setSessionId(sessionKey: string, sessionId: string): void {
+    this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);
+    this.sessionKeys.set(sessionId, sessionKey);
     this.deleted.sessionIds.delete(sessionKey);
     this.write();
   }
 
   clearSessionId(sessionKey: string): boolean {
+    this.unindexSessionId(sessionKey);
     const deleted = this.sessionIds.delete(sessionKey);
     if (deleted) {
       this.deleted.sessionIds.add(sessionKey);
@@ -126,6 +139,14 @@ export class PrefsStore {
 
   // ── 私有方法 ──
 
+  /** 移除 sessionKey 当前指向的反向索引（仅当索引仍归属该 key） */
+  private unindexSessionId(sessionKey: string): void {
+    const previous = this.sessionIds.get(sessionKey);
+    if (previous !== undefined && this.sessionKeys.get(previous) === sessionKey) {
+      this.sessionKeys.delete(previous);
+    }
+  }
+
   private load(): void {
     try {
       if (!existsSync(this.prefsPath)) return;
@@ -142,6 +163,7 @@ export class PrefsStore {
         for (const [key, sessionId] of Object.entries(data.sessionIds)) {
           if (typeof sessionId === 'string' && sessionId) {
             this.sessionIds.set(key, sessionId);
+            this.sessionKeys.set(sessionId, key);
           }
         }
       }

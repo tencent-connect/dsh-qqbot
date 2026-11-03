@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OutboundBuffer } from './outbound-buffer.ts';
 import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
-import type { SessionRecord } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 
 function createLogger(): Logger {
@@ -19,17 +18,6 @@ function createBot(openStreamImpl?: () => StreamSessionLike): QQBotSender {
   };
 }
 
-function createRecord(target: ReplyTarget): SessionRecord {
-  return {
-    sessionId: 's1',
-    key: 'k',
-    replyTarget: target,
-    agent: {},
-    createdAt: 0,
-    lastActiveAt: 0,
-  } as unknown as SessionRecord;
-}
-
 const c2cTarget: ReplyTarget = { scope: 'c2c', targetId: 'user1', msgId: 'msg1' };
 
 describe('OutboundBuffer', () => {
@@ -44,7 +32,7 @@ describe('OutboundBuffer', () => {
   it('流式开启：append + flush → openStream + update + complete', async () => {
     const session = createSession();
     const bot = createBot(() => session);
-    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+    const buffer = new OutboundBuffer(c2cTarget, bot, 4500, createLogger(), true);
 
     buffer.append('hello');
     await buffer.flush();
@@ -57,7 +45,7 @@ describe('OutboundBuffer', () => {
 
   it('流式关闭：append + flush → 静态 sendMarkdown', async () => {
     const bot = createBot();
-    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), false);
+    const buffer = new OutboundBuffer(c2cTarget, bot, 4500, createLogger(), false);
 
     buffer.append('hello');
     await buffer.flush();
@@ -70,7 +58,7 @@ describe('OutboundBuffer', () => {
     const bot = createBot(() => {
       throw new Error('open failed');
     });
-    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+    const buffer = new OutboundBuffer(c2cTarget, bot, 4500, createLogger(), true);
 
     buffer.append('hello');
     await vi.advanceTimersByTimeAsync(200);
@@ -83,7 +71,7 @@ describe('OutboundBuffer', () => {
   it('cancel → abort 关闭会话', async () => {
     const session = createSession();
     const bot = createBot(() => session);
-    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+    const buffer = new OutboundBuffer(c2cTarget, bot, 4500, createLogger(), true);
 
     buffer.append('hello');
     await vi.advanceTimersByTimeAsync(200);
@@ -96,7 +84,7 @@ describe('OutboundBuffer', () => {
   it('reset 清空累积文本并保留流式会话', async () => {
     const session = createSession();
     const bot = createBot(() => session);
-    const buffer = new OutboundBuffer(createRecord(c2cTarget), bot, 4500, createLogger(), true);
+    const buffer = new OutboundBuffer(c2cTarget, bot, 4500, createLogger(), true);
 
     buffer.append('old');
     await vi.advanceTimersByTimeAsync(200);

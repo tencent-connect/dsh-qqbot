@@ -194,6 +194,43 @@ describe('ApprovalChannel.install', () => {
     await expect(p).resolves.toBe('cancelled');
   });
 
+  it('sends the card to the resolved turn target (proactive turns)', async () => {
+    const sender = createSender([]);
+    const pushed: ReplyTarget = { scope: 'c2c', targetId: 'x', forceProactive: true };
+    const ch = new ApprovalChannel(
+      createManager({ findBySessionId: () => makeRecord(sessionKey('c2c', 'peer-qq')) }),
+      sender,
+      makeConfig(),
+      createLogger(),
+      { targetFor: () => pushed },
+    );
+    const { handler } = installAndCapture(ch, []);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+
+    expect(sender.sendMarkdown.mock.calls[0]![0]).toEqual(pushed);
+    ch.cancelPending(sessionKey('c2c', 'peer-qq'));
+    await expect(p).resolves.toBe('cancelled');
+  });
+
+  it('delegates to next when the turn is not delivered to QQ', async () => {
+    const sender = createSender([]);
+    const ch = new ApprovalChannel(
+      createManager({ findBySessionId: () => makeRecord(sessionKey('group', 'g1'), 'group') }),
+      sender,
+      makeConfig(),
+      createLogger(),
+      { targetFor: () => undefined },
+    );
+    const { handler } = installAndCapture(ch, []);
+
+    const outcome = await handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('allowed-once' as ApprovalOutcome));
+
+    expect(outcome).toBe('allowed-once');
+    expect(sender.sendMarkdown).not.toHaveBeenCalled();
+  });
+
   it('registers a global waterfall listener without probing the approval service', () => {
     const ch = new ApprovalChannel(
       createManager({ findBySessionId: () => undefined }),

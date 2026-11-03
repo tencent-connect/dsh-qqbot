@@ -649,6 +649,31 @@ export class SessionManager {
     return undefined;
   }
 
+  /**
+   * 这条 session 对应的 QQ 地址。只读：不把宿主里的 agent 收进会话表，也不拥有它的生命周期。
+   * 内存里有记录时沿用它的 replyTarget（含 msgId）；否则按 prefs 的 sessionId 反查对端。
+   */
+  deliveryAddress(sessionId: string): ReplyTarget | undefined {
+    const existing = this.findBySessionId(sessionId);
+    if (existing) return existing.replyTarget;
+
+    const key = this.modelResolver.findSessionKey(sessionId);
+    if (key === undefined || this.sessions.has(key)) return undefined;
+    const parsed = this.parseSessionKey(key);
+    if (parsed === undefined) return undefined;
+    return { scope: parsed.scope, targetId: parsed.peerId };
+  }
+
+  /** `qqbot:${appId}:${scope}:${peerId}` → scope + peer。只认本机器人的 key。 */
+  private parseSessionKey(key: string): { scope: ChatScope; peerId: string } | undefined {
+    const match = /^qqbot:([^:]+):(c2c|group):(.+)$/.exec(key);
+    if (match === null || match[1] !== this.config.appId) return undefined;
+    const scope = match[2];
+    const peerId = match[3];
+    if ((scope !== 'c2c' && scope !== 'group') || peerId === undefined || peerId === '') return undefined;
+    return { scope, peerId };
+  }
+
   findByAgent(agent: DshAgent): SessionRecord | undefined {
     for (const record of this.sessions.values()) {
       if (record.agent === agent) return record;

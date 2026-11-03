@@ -168,6 +168,39 @@ afterEach(async () => {
   rmSync(env.home, { recursive: true, force: true });
 });
 
+describe('deliveryAddress', () => {
+  it('内存里没有会话时，只按 prefs 返回 QQ 地址，不唤醒 agent', () => {
+    const sessionId = 'session-live';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+
+    const address = createManager(registry).deliveryAddress(sessionId);
+
+    expect(address).toEqual({ scope: 'c2c', targetId: PEER });
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(registry.get).not.toHaveBeenCalled();
+  });
+
+  it('未知 session 返回 undefined', () => {
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+
+    expect(createManager(registry).deliveryAddress('session-dead')).toBeUndefined();
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('对端已经换成另一条活会话时，不为旧 id 返回地址', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const manager = createManager(registry);
+    const live = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    new PrefsStore().setSessionId(KEY, 'session-old');
+
+    expect(manager.deliveryAddress('session-old')).toBeUndefined();
+    expect(manager.deliveryAddress(live.sessionId)).toEqual(REPLY);
+  });
+});
+
 describe('getOrCreate — 对照组（迁移主路径行为正确）', () => {
   it('全新用户：legacy 不存在 → 铸造 session- 前缀 id 创建并落盘', async () => {
     const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });

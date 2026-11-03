@@ -52,6 +52,19 @@ export interface SendFileConfig {
   maxFiles: number;
 }
 
+/**
+ * 非 QQ 读者输入（如桌面端续聊 QQ 会话）的回合是否主动推送到 QQ。
+ * - off：不推送，回复只留在发起的界面；
+ * - c2c：只推送私聊会话（默认，避免桌面上的私人操作出现在群里）；
+ * - all：私聊和群聊都推送。
+ */
+export type ExternalTurnDelivery = 'off' | 'c2c' | 'all';
+
+/** 主动推送策略（定时任务等服务回合始终主动推送） */
+export interface ProactiveDeliveryConfig {
+  externalTurns: ExternalTurnDelivery;
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -74,7 +87,7 @@ export interface ImQQBotConfig {
   textChunkLimit: number;
   /** 是否启用流式输出（群聊始终不启用） */
   streaming: boolean;
-  /** 每会话最大闲置时长(ms)，超时自动回收 */
+  /** 每会话最大闲置时长(ms)，超时自动回收；<=0 表示不回收 */
   sessionIdleTimeout: number;
   /** 并发队列最大长度 */
   maxQueue: number;
@@ -96,6 +109,8 @@ export interface ImQQBotConfig {
   vision: VisionConfig;
   /** 附件发送（qqbot_send_file 工具与交付物投递共用） */
   sendFile: SendFileConfig;
+  /** 主动推送策略 */
+  proactiveDelivery: ProactiveDeliveryConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -118,7 +133,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
-  sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)'),
+  sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)，<=0 不回收'),
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
@@ -168,4 +183,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     sendPresentedFiles: true,
     maxFiles: 4,
   }).description('附件发送配置'),
+  proactiveDelivery: Schema.object({
+    externalTurns: Schema.union(['off', 'c2c', 'all']).default('c2c')
+      .description('非 QQ 输入（如桌面续聊）的回合是否推送到 QQ：off=不推送，c2c=仅私聊，all=私聊和群聊'),
+  }).default({
+    externalTurns: 'c2c',
+  }).description('主动推送策略（定时任务等服务回合始终推送）'),
 });

@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData } from './button-utils.ts';
 import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
+import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 
 // ── 最小契约（对齐 dsh-user-approval，避免硬依赖） ──
 
@@ -126,17 +127,23 @@ export class ApprovalChannel {
   private readonly sender: ApprovalChannelSenderLike;
   private readonly logger: Logger;
   private readonly config: ApprovalChannelConfigLike;
+  private readonly targets: DeliveryTargetResolver | undefined;
 
+  /**
+   * @param targets 回合投递目标解析（与出站共享）。缺省时按会话 replyTarget 被动回复。
+   */
   public constructor(
     manager: ApprovalChannelManagerLike,
     sender: ApprovalChannelSenderLike,
     config: ApprovalChannelConfigLike,
     logger: Logger,
+    targets?: DeliveryTargetResolver,
   ) {
     this.manager = manager;
     this.sender = sender;
     this.config = config;
     this.logger = logger;
+    this.targets = targets;
   }
 
   /**
@@ -155,7 +162,9 @@ export class ApprovalChannel {
       const request = req as ApprovalRequest;
       const nextFn = next as () => Promise<ApprovalOutcome>;
       const record = self.manager.findBySessionId(request.agent.id);
-      if (record) return self.park(record, request);
+      // 本回合按策略不投递到 QQ → 交给链上其他 answerer（Web/TUI）
+      const target = record ? self.resolveTarget(request.agent.id, record) : undefined;
+      if (record && target) return self.park(record, target, request);
       return nextFn();
     }, { global: true, prepend: true });
     this.logger.info('im-qqbot: QQ approval channel installed');
@@ -206,7 +215,11 @@ export class ApprovalChannel {
   }
 
   /** 走 QQ 通道：发审批消息 + 挂起 Promise，等待用户决策 */
-  private async park(record: ApprovalSessionRecordLike, request: ApprovalRequest): Promise<ApprovalOutcome> {
+  private async park(
+    record: ApprovalSessionRecordLike,
+    target: ReplyTarget,
+    request: ApprovalRequest,
+  ): Promise<ApprovalOutcome> {
     const key = record.sessionKey;
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败
     if (request.signal?.aborted) return 'cancelled';
@@ -215,7 +228,7 @@ export class ApprovalChannel {
     const nonce = randomUUID().slice(0, 8);
     try {
       await this.sender.sendMarkdown(
-        record.replyTarget,
+        target,
         buildApprovalText(request, command),
         { keyboard: buildApprovalKeyboard(nonce) },
       );
@@ -239,6 +252,11 @@ export class ApprovalChannel {
       this.pending.set(key, entry);
       this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
     });
+  }
+
+  /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */
+  private resolveTarget(sessionId: string, record: ApprovalSessionRecordLike): ReplyTarget | undefined {
+    return this.targets ? this.targets.targetFor(sessionId) : record.replyTarget;
   }
 
   private removeAbort(entry: PendingApproval): void {
