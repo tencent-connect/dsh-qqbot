@@ -33,7 +33,7 @@ export function relTime(at: number | undefined, now: number | undefined): string
   return `${Math.floor(diff / 86400)} 天前`;
 }
 
-/** all at 时间点（本地 HH:mm），仅在有 at 时给出。 */
+/** 消息发出时刻的本地时间（HH:mm），仅在有 at 时给出。 */
 export function clockOf(at: number | undefined): string {
   if (at === undefined || !Number.isFinite(at)) return '';
   const d = new Date(at);

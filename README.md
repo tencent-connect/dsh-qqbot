@@ -222,6 +222,8 @@ sessionKey: `qqbot:${appId}:${scope}:${peerId}`，新会话铸造 UUID 会话 id
 
 解析策略：进程内复用 → 持久化恢复 → 全新创建。
 
+QQ 群聊和私聊的补充提示词按当前 Agent 作用域加载，恢复会话时继续使用对应场景的配置。
+
 ## 设计原则
 
 - **纯 Cordis 插件** — 遵循 dsh "Plugins, not loop changes" 原则
@@ -255,5 +257,3 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ## License
 
 [MIT](./LICENSE)
-
-QQ 群聊和私聊的补充提示词按当前 Agent 作用域加载，恢复会话时继续使用对应场景的配置。

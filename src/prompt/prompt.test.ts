@@ -1,24 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { RULES_TEXT } from './rules.ts';
-import { scopeText, GROUP_SCOPE_TEXT, C2C_SCOPE_TEXT } from './scope.ts';
 import { parsePersonaSections, selectPersonaText, roleSectionReport } from './persona.ts';
 import { selectExtraPrompt, EXTRA_MAX_CHARS } from './extra.ts';
 import { relTime, clockOf, turnMetaText } from './turn-meta.ts';
 import { assembleUserBlocks } from './user-blocks.ts';
 
 describe('prompt rules', () => {
-  it('encourages tool use and forbids fabricated calls (no file/task-only restriction)', () => {
-    expect(RULES_TEXT).toContain('主动调用');
-    expect(RULES_TEXT).toContain('编造');
-    expect(RULES_TEXT).not.toContain('只有用户明确要求处理文件或执行任务');
-  });
-});
-
-describe('scope text', () => {
-  it('differs between group and c2c', () => {
-    expect(scopeText('group')).toBe(GROUP_SCOPE_TEXT);
-    expect(scopeText('c2c')).toBe(C2C_SCOPE_TEXT);
-    expect(GROUP_SCOPE_TEXT).not.toBe(C2C_SCOPE_TEXT);
+  it('declares the QQ chat channel only — no style or behavioral instructions', () => {
+    expect(RULES_TEXT).toContain('QQ');
+    // 通道层只声明场景事实：语气、工具使用、防幻觉等一律交给宿主与模型自身
+    expect(RULES_TEXT).not.toContain('工具');
+    expect(RULES_TEXT).not.toContain('编造');
+    expect(RULES_TEXT).not.toContain('回复');
   });
 });
 

@@ -70,8 +70,7 @@ export interface ImQQBotConfig {
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
-  directPrompt?: string;
-  /** 单条消息最大长度（QQ 限制约 5000 字符） */
+  directPrompt?: string;  /** 单条消息最大长度（QQ 限制约 5000 字符） */
   textChunkLimit: number;
   /** 是否启用流式输出（群聊始终不启用） */
   streaming: boolean;

@@ -20,27 +20,39 @@ function fakeSystemPrompt() {
 const NL = String.fromCharCode(10);
 function card(p: string) { return ['# 你是谁', '你是鲸鱼。', '', '## 群聊规则 〔群聊〕', p + '别刷屏。', '', '## 私聊规则 〔私聊〕', p + '直接点。'].join(NL); }
 function entry(o: Partial<QQPromptEntry> = {}): QQPromptEntry {
-  return { scope: 'group', personaCard: () => card(''), extraPrompts: () => ({ group: 'GROUP_EXTRA', direct: 'DIRECT_EXTRA' }), ...o };
+  return {
+    scope: 'group',
+    personaCard: () => card(''),
+    extraPrompts: () => ({ group: 'GROUP_EXTRA', direct: 'DIRECT_EXTRA' }),
+    ...o,
+  };
 }
 
 describe('installQQPrompt (DSH section/context 注册)', () => {
-  it('registers 4 sections + 2 contexts; dispose clears', () => {
+  it('registers 3 sections + 2 contexts; dispose clears', () => {
     const sp = fakeSystemPrompt();
     const h = installQQPrompt(sp.ctx, entry());
-    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules', 'qqbot:scope']);
+    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
     expect([...sp.contexts.keys()]).toEqual(['qqbot:turn-meta', 'qqbot:background']);
     h.dispose();
     expect(sp.sections.size).toBe(0); expect(sp.contexts.size).toBe(0);
   });
-  it('group vs c2c scope/persona/extra differ', () => {
+  it('group vs c2c persona/extra differ', () => {
     const g = fakeSystemPrompt(); const gh = installQQPrompt(g.ctx, entry({ scope: 'group' }));
     const gt = g.renderSections();
-    expect(gt).toContain('多人群聊'); expect(gt).toContain('别刷屏'); expect(gt).not.toContain('直接点');
+    expect(gt).toContain('QQ'); expect(gt).toContain('别刷屏'); expect(gt).not.toContain('直接点');
     expect(gt).toContain('GROUP_EXTRA'); expect(gt).not.toContain('DIRECT_EXTRA'); expect(gt).not.toContain('〔群聊〕');
     const c = fakeSystemPrompt(); installQQPrompt(c.ctx, entry({ scope: 'c2c' }));
     const ct = c.renderSections();
-    expect(ct).toContain('一对一私聊'); expect(ct).toContain('DIRECT_EXTRA'); expect(ct).not.toContain('别刷屏');
+    expect(ct).toContain('QQ'); expect(ct).toContain('DIRECT_EXTRA');
+    expect(ct).not.toContain('别刷屏'); expect(ct).not.toContain('GROUP_EXTRA');
     gh.dispose();
+  });
+  it('built-in rules always render; persona/extra empty by default', () => {
+    const sp = fakeSystemPrompt();
+    installQQPrompt(sp.ctx, entry({ personaCard: () => '', extraPrompts: () => ({}) }));
+    expect(sp.renderSections()).toContain('QQ');
+    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
   });
   it('lazily reads persona/extra so edits apply without reinstall', () => {
     const sp = fakeSystemPrompt(); let extra = 'OLDEX'; let persona = '# X' + NL + 'OLDPER';

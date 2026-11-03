@@ -1,7 +1,6 @@
 /**
- * 本轮 user 消息的正文 block 组装。
- * 目前正文只承载「用户真实内容（含语音转录/附件媒体行）」；引用块由 inbound 的 buildQuotePart 产出，
- * 群聊背景不再进入正文。元信息（来源/@/发送者/时间）走 turn-meta 的 runtime context。
+ * 本轮 user 消息的正文 block 组装。正文只承载用户真实内容；元信息走 turn-meta。
+ * TODO(split-2): 尚未接线，当前 inbound 直接提交正文。
  */
 export interface UserBlockInput {
   /** 用户正文（已含语音转录/附件媒体行）。 */
