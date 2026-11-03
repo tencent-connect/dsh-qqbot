@@ -25,6 +25,12 @@ import type {
 import type { VisionConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'plugin:dsh-im-qqbot': { kind: 'plugin:dsh-im-qqbot' };
+  }
+}
+
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
 type ImageAttachmentRef = ImageBlock['attachment'];
 type ImageMediaType = ImageAttachmentRef['mediaType'];
@@ -120,15 +126,12 @@ async function callVision(
   imageRef: ImageAttachmentRef,
   signal: AbortSignal,
 ): Promise<string> {
-  // v4 producer-owned source kind（迁移器同款改写）；本地 dsh-llm 类型尚为 v3 联合，做类型桥接
-  const visionSource = { kind: 'plugin:dsh-im-qqbot' } as unknown as { kind: 'plugin'; plugin: string };
-
   const message = createUserMessage({
     content: [
       { type: 'image', attachment: imageRef },
       { type: 'text', text: prompt },
     ],
-    source: visionSource,
+    source: { kind: 'plugin:dsh-im-qqbot' },
   });
 
   const options: GenerateOptions = {

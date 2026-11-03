@@ -1,3 +1,4 @@
+import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
 /**
  * SessionManager — 管理 QQ peer → dsh Agent 的映射和生命周期
  *
@@ -50,24 +51,6 @@ const COMPACTION_ERROR_HINTS: Record<string, string> = {
   commit: '压缩提交失败',
   persistence: '压缩完成但保存失败',
 };
-
-/** system-prompt section 最小结构（name/order/text） */
-interface PromptSection {
-  name: string;
-  order: number;
-  text: string;
-}
-
-/** system-prompt/assemble waterfall 的 context 最小结构 */
-interface AssembleContext {
-  agent?: DshAgent;
-}
-
-/** system-prompt/assemble 的组装产物最小结构 */
-interface AssembledPrompt {
-  sections?: PromptSection[];
-  [key: string]: unknown;
-}
 
 /** 复刻宿主 latestCompletedPrefixBoundary：最后一个 turn/end 起到下一 turn 开始前的边界 */
 export function latestCompletedPrefixBoundary(events: readonly unknown[]): number | undefined {
@@ -133,6 +116,7 @@ export class SessionManager {
       (key, record) => {
         this.logger.info(`evicting idle session: key=${key}`);
         this.sessions.delete(key);
+        this.releasePrompt(record.agent);
         record.agent.cancel({ kind: 'user' });
         void record.handle.dispose().catch(() => {});
         // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
@@ -141,40 +125,39 @@ export class SessionManager {
       },
     );
 
-    this.registerScopePromptInjection();
   }
 
+  /** 已装 prompt 的 agent → 句柄。释放时须同步 delete：live 复用的 agent 要能重装，否则 prompt 永久丢失。 */
+  private readonly promptHandles = new WeakMap<DshAgent, QQPromptHandle>();
+
   /**
-   * 通过 system-prompt/assemble waterfall 注入群聊/私聊额外 system prompt。
-   *
-   * 该事件在每次 turn 构建 request 时触发；此处按会话 scope（群聊/私聊）
-   * 追加对应的额外 prompt section。会话尚未建立（首次 assemble）或未配置
-   * 额外 prompt 时原样返回，不做改动。
+   * 在 agent.ctx 上安装 QQ prompt（幂等、fail-soft）：失败仅 warn，不打断会话建立。
+   * TODO(split-2): personaCard / turnContext 由 inbound 接线，当前恒空。
    */
-  private registerScopePromptInjection(): void {
-    const assemble = async (
-      _assembly: unknown,
-      context: AssembleContext,
-      next: () => Promise<AssembledPrompt>,
-    ): Promise<AssembledPrompt> => {
-      const assembled = await next();
-      if (!context.agent) return assembled;
+  private attachPrompt(agent: DshAgent, scope: ChatScope): void {
+    if (this.promptHandles.has(agent)) return;
+    if (!agent.ctx.get?.('systemPrompt')) return;
+    try {
+      this.promptHandles.set(agent, installQQPrompt(agent.ctx, {
+        scope,
+        personaCard: () => '',
+        extraPrompts: () => ({ group: this.config.groupPrompt, direct: this.config.directPrompt }),
+      }));
+    } catch (err) {
+      this.logger.warn(`qq prompt install failed (session keeps working without it): ${errorText(err)}`);
+    }
+  }
 
-      const record = this.findByAgent(context.agent);
-      if (!record) return assembled;
-
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
-      if (!prompt) return assembled;
-
-      return {
-        ...assembled,
-        sections: [...(assembled.sections ?? []), { name: 'qqbot:scope-prompt', order: 90, text: prompt }],
-      };
-    };
-
-    (this.ctx as unknown as {
-      on(event: 'system-prompt/assemble', handler: typeof assemble): void;
-    }).on('system-prompt/assemble', assemble);
+  /** 释放 prompt 注册项；须在 handle.dispose() 之前（agent 销毁后 ctx 可能失效）。 */
+  private releasePrompt(agent: DshAgent): void {
+    const handle = this.promptHandles.get(agent);
+    if (!handle) return;
+    this.promptHandles.delete(agent);
+    try {
+      handle.dispose();
+    } catch (err) {
+      this.logger.warn(`qq prompt dispose failed: ${errorText(err)}`);
+    }
   }
 
   /**
@@ -308,6 +291,7 @@ export class SessionManager {
     if (boundary === undefined) {
       this.logger.warn(`fork unavailable (no completed turn), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
       return;
@@ -317,6 +301,7 @@ export class SessionManager {
     if (seed === undefined) {
       this.logger.warn(`fork seed unavailable (old host), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
       return;
@@ -343,12 +328,15 @@ export class SessionManager {
     this.modelResolver.setSessionId(key, childId);
 
     const oldHandle = record.handle;
+    const oldAgent = record.agent;
     record.sessionId = childId;
+    this.attachPrompt(created.agent, record.scope);
     record.agent = created.agent;
     record.handle = created;
     record.agentPreset = composed.agentPreset;
     record.lastActivity = Date.now();
 
+    this.releasePrompt(oldAgent);
     void oldHandle.dispose().catch(() => {});
     this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
@@ -589,6 +577,7 @@ export class SessionManager {
       agentPreset,
     };
 
+    this.attachPrompt(agent, scope);
     this.sessions.set(key, record);
 
     // 挂载到对应工作区（侧边栏可见性）；fail-soft、异步执行，不阻塞消息处理。
@@ -674,6 +663,7 @@ export class SessionManager {
 
     if (!record) return;
     this.sessions.delete(key);
+    this.releasePrompt(record.agent);
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
     this.logger.info(`session removed: key=${key}`);
@@ -746,6 +736,7 @@ export class SessionManager {
     const records = [...this.sessions.values()];
     this.sessions.clear();
     for (const record of records) {
+      this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
