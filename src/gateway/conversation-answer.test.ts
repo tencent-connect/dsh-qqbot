@@ -123,10 +123,11 @@ describe('pending answers through the configured middleware chain', () => {
     expect(f.newTurn).not.toHaveBeenCalled();
   });
 
-  it('runs a mentioned slash command before the pending answer handler', async () => {
+  it('rejects a non-owner slash command without consuming the pending question', async () => {
     const f = fixture('group', false); f.ask(); const input = f.input('/bot-ping', 'actor', f.peer, true);
     await runMiddlewareChain(f.middlewares, input);
-    expect(f.sendText).toHaveBeenCalledWith(input.replyTarget, expect.stringContaining('pong'));
+    expect(f.sendText).toHaveBeenCalledWith(input.replyTarget, '斜杠命令仅机器人超管可用。');
+    expect(input.stopReason).toBe('slash-command-owner-required');
     expect(f.dependencies.recordHumanReply).not.toHaveBeenCalled();
     expect(f.channel.canAcceptText('group', f.peer, '2', 'actor')).toBe(true);
     expect(f.service.store.messages(f.key)).toMatchObject([{ contextEligible: false, provenance: 'command' }]);

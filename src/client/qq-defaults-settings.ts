@@ -15,11 +15,11 @@ export function QQDefaultsSettings({ store, selectorSource, t, workspaces = [], 
   if (!defaults) return h('section', { className: 'imqc', 'aria-label': '新对话默认设置' }, h('h3', null, '新对话默认设置'),
     h('p', { role: state.error ? 'alert' : 'status', className: state.error ? 'imqc-error' : 'imqc-hint' }, state.error ?? '正在读取新对话默认设置…'),
     h(Button, { variant: 'ghost', size: 'sm', disabled: state.loading, onClick: store.refresh }, '刷新默认设置'));
-  return h(DefaultsSettingsDraft, { store, selectorSource, defaults, t, workspaces, defaultWorkspaceName, tools: state.directory?.tools ?? [], commands: state.directory?.commands ?? [] });
+  return h(DefaultsSettingsDraft, { store, selectorSource, defaults, t, workspaces, defaultWorkspaceName, tools: state.directory?.tools ?? [] });
 }
 
-function DefaultsSettingsDraft({ store, selectorSource, defaults, t, tools, commands, workspaces = [], defaultWorkspaceName }: {
-  store: QQSessionStore; selectorSource: SelectorSource; defaults: QQDefaults; t?: import('./qq-locale.ts').QQTranslate; tools: Parameters<typeof QQAgentSettingsForm>[0]['tools']; commands: Parameters<typeof QQAgentSettingsForm>[0]['commands']; workspaces?: ReadonlyArray<{ workspaceId: string; title: string; path: string }>; defaultWorkspaceName?: string;
+function DefaultsSettingsDraft({ store, selectorSource, defaults, t, tools, workspaces = [], defaultWorkspaceName }: {
+  store: QQSessionStore; selectorSource: SelectorSource; defaults: QQDefaults; t?: import('./qq-locale.ts').QQTranslate; tools: Parameters<typeof QQAgentSettingsForm>[0]['tools']; workspaces?: ReadonlyArray<{ workspaceId: string; title: string; path: string }>; defaultWorkspaceName?: string;
 }): ReactNode {
   const [retained, setRetained] = useState<DefaultsDraft>(() => drafts.get(store) ?? { draft: structuredClone(defaults), base: structuredClone(defaults) });
   const { draft, base } = retained;
@@ -50,7 +50,7 @@ function DefaultsSettingsDraft({ store, selectorSource, defaults, t, tools, comm
   return h('section', { className: 'imqc imqc-defaultsSettings', 'aria-label': ttl, 'aria-busy': busy },
     h('h3', { className: 'imqb-cardTitle' }, ttl),
     h('p', { className: 'imqb-cardHint' }, t ? t('defaults.hint') : '之后首次接入的群聊和私聊复制这些设置。保存立即生效，不改动已接入的对话，也不会重载插件。'),
-    h(QQAgentSettingsForm, { settings: draft.settings, tools, catalog, commands, scope: 'defaults', onPickDirectory: selectorSource.pickDirectory, onCreateWorkspace: selectorSource.createWorkspace, workspaces, defaultWorkspaceName, defaultCwd: store.getSnapshot().directory?.defaultCwd, disabled: busy, onRefreshCatalog: catalog.refresh, onChange: settings => { setRetained(value => ({ ...value, draft: { ...value.draft, settings } })); setError(''); setNotice(''); } }),
+    h(QQAgentSettingsForm, { settings: draft.settings, tools, catalog, scope: 'defaults', onPickDirectory: selectorSource.pickDirectory, onCreateWorkspace: selectorSource.createWorkspace, workspaces, defaultWorkspaceName, defaultCwd: store.getSnapshot().directory?.defaultCwd, disabled: busy, onRefreshCatalog: catalog.refresh, onChange: settings => { setRetained(value => ({ ...value, draft: { ...value.draft, settings } })); setError(''); setNotice(''); } }),
     conflict && dirty ? h('p', { role: 'alert', className: 'imqc-error' }, '默认设置已在其他位置更新。草稿保留，请放弃修改以载入最新设置。') : null,
     error ? h('p', { role: 'alert', className: 'imqc-error' }, error) : null,
     notice ? h('p', { role: 'status', className: 'imqc-hint' }, notice) : null,

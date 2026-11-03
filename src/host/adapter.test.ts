@@ -42,6 +42,20 @@ describe('host adapter', () => {
     expect(adapter.capabilities).toContain('serviceFor(presets实例方法)');
   });
 
+  it('uses the current Agent scoped service before a legacy or global service', async () => {
+    const scoped = { compactNow: vi.fn() };
+    const legacy = { compactNow: vi.fn() };
+    const adapter = createHostAdapter(makeCtx({ compaction: legacy, agentPresets: { serviceFor: () => legacy } }));
+    expect(await adapter.serviceFor({ ctx: makeCtx({ compaction: scoped }) }, 'compaction')).toBe(scoped);
+  });
+
+  it('supports modern preset compaction without a root preset registry resolver', async () => {
+    const compaction = { compactNow: vi.fn() };
+    const adapter = createHostAdapter(makeCtx({}));
+    expect(await adapter.serviceFor({ ctx: makeCtx({ compaction }) }, 'compaction')).toBe(compaction);
+    expect(adapter.capabilities).toContain('serviceFor(Agent作用域)');
+  });
+
   it('serviceFor：无宿主解析能力时返回 undefined（不再依赖已移除的模块回退）', async () => {
     const adapter = createHostAdapter(makeCtx({}));
     expect(await adapter.serviceFor({ ctx: {} }, 'compaction')).toBeUndefined();

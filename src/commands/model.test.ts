@@ -19,11 +19,20 @@ function harness(raw = '', kind: 'c2c' | 'group' = 'c2c') {
     message: { kind, senderId: 'owner', groupOpenid: 'group-a' }, command: { raw },
     bot: { sendMarkdown }, replyTarget: { scope: kind, targetId: kind === 'group' ? 'group-a' : 'owner' },
   } as unknown as SlashCommandHandlerContext;
-  const command = modelCommand({ manager: manager as unknown as SessionManager, config: ConfigSchema({}) });
+  const command = modelCommand({ manager: manager as unknown as SessionManager, config: ConfigSchema({}), origin: 'web-owner' });
   return { manager, sendMarkdown, run: () => command.handler(ctx) };
 }
 
 describe('/model defaults and scope', () => {
+  it('shows the QQ Web reset destination when it differs from the Host default', async () => {
+    const { manager, run, sendMarkdown } = harness();
+    Object.assign(manager, { getQQDefaultModel: () => ({ provider: 'qq-web', model: 'selected-default' }) });
+    await run();
+    const content = sendMarkdown.mock.calls[0]?.[1];
+    expect(content).toContain('QQ 网页默认:** qq-web/selected-default');
+    expect(content).not.toContain('QQ 网页默认:** web/default');
+  });
+
   it.each(['reset', 'default'])('awaits %s and clears only the current peer override', async (argument) => {
     const { manager, run } = harness(argument, 'group');
     let finish: (() => void) | undefined;

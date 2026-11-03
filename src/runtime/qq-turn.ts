@@ -74,8 +74,11 @@ type Fold = { kind: 'evidence'; evidence: Evidence } | { kind: 'suppressed'; rea
 function suppressed(reason: string): { kind: 'suppressed'; reason: string } { return { kind: 'suppressed', reason }; }
 
 function trustedContext(message: UserMessage): boolean {
-  const kind: string = message.source.kind;
-  return kind === 'runtime-context' || kind === 'skill-catalog' || kind === 'time-context';
+  const source = message.source;
+  const kind: string = source.kind;
+  return kind === 'runtime-context' || kind === 'skill-catalog' || kind === 'time-context'
+    || (kind === 'model-selection' && 'form' in source && source.form === 'notice'
+      && 'summary' in source && typeof source.summary === 'string');
 }
 
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }

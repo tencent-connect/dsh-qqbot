@@ -38,7 +38,13 @@ it('clears hidden legacy defaults for new peers while preserving existing snapsh
     await manager.clearModelOverride('group', 'fresh');
     expect(service.requireEntry(fresh.key).settings?.model).toBeNull();
     expect(manager.getEffectiveModel('group', 'fresh')).toEqual(route);
-    service.store.updatePolicy(prior.key, prior.policy.version, { ...prior.policy, toolMode: 'restricted', allowedModels: ['legacy-provider/legacy-model'] });
+    await service.saveDefaults(service.store.defaults().version, { ...cleared, model: { ...route, reasoningEffort: 'high' }, reasoningEffort: 'low' });
+    await manager.clearModelOverride('group', 'fresh');
+    expect(manager.getEffectiveModel('group', 'fresh')).toEqual({ ...route, reasoningEffort: 'high' });
+    const restarted = new ConversationService(ctx, manager, config, logger, root); manager.conversations = restarted;
+    expect(manager.getEffectiveModel('group', 'fresh')).toEqual({ ...route, reasoningEffort: 'high' });
+    await restarted.saveDefaults(restarted.store.defaults().version, cleared);
+    restarted.store.updatePolicy(prior.key, prior.policy.version, { ...prior.policy, toolMode: 'restricted', allowedModels: ['legacy-provider/legacy-model'] });
     await manager.clearModelOverride('group', 'prior');
     // Development builds have no legacy settings.yaml fallback: clearing a model override yields the host default.
     expect(manager.getEffectiveModel('group', 'prior')).toEqual(route);

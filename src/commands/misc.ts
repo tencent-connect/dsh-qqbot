@@ -1,17 +1,18 @@
 /**
  * 杂项命令
  *
- * - /bot-ping /bot-version：QQBot 插件特有（连通性测试、版本信息）
+ * - /bot-ping /bot-version /bot-me：QQBot 插件特有（连通性、版本、身份信息）
  * - /stop：中止当前生成（对应底层 agent cancel，通用能力）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { getScopePeer, PLUGIN_VERSION } from '../shared/index.ts';
+import { getScopePeer, PLUGIN_VERSION, sendMarkdownChunked } from '../shared/index.ts';
 
 /** /bot-ping — 测试当前 dsh 与 QQ 连接的网络延迟 */
 export function pingCommand(): CategorizedCommand {
   return {
     name: 'bot-ping',
     category: 'qqbot',
+    authority: 'query',
     scope: 'all',
     description: '测试当前 dsh 与 QQ 连接的网络延迟',
     usage: [
@@ -45,6 +46,7 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'bot-version',
     category: 'qqbot',
+    authority: 'query',
     scope: 'all',
     description: '查看版本信息',
     handler: async (cmdCtx) => {
@@ -59,11 +61,30 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   };
 }
 
+/** /bot-me — 查看私聊用户或群成员与群的 OpenID，不创建 Agent 会话。 */
+export function meCommand({ config }: CommandDeps): CategorizedCommand {
+  return {
+    name: 'bot-me',
+    category: 'qqbot',
+    authority: 'query',
+    scope: 'all',
+    description: '查看你的 OpenID',
+    handler: async (cmdCtx) => {
+      const senderId = cmdCtx.message.senderId ?? 'unknown';
+      const lines = [`🆔 你的 OpenID：**${senderId}**`];
+      if (cmdCtx.message.groupOpenid) lines.push(`👥 本群 OpenID：**${cmdCtx.message.groupOpenid}**`);
+      await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+      return { kind: 'noop' as const };
+    },
+  };
+}
+
 /** /stop — 中止当前生成 */
 export function stopCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'stop',
     category: 'agent',
+    authority: 'stop',
     scope: 'all',
     description: '中止当前生成',
     handler: async (cmdCtx) => {

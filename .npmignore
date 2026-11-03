@@ -3,9 +3,12 @@ dev.ts
 cordis.dev.yml
 tsconfig.json
 docs/*
-!docs/native-sessions.md
-!docs/native-sessions.en.md
-!docs/settings-and-message-records.md
+!docs/guides/
+docs/guides/*
+!docs/guides/native-sessions.md
+!docs/guides/native-sessions.en.md
+!docs/guides/settings-and-message-records.md
+!docs/guides/upgrading-from-0.5.5.md
 .env
 .env.example
 .dsh-sessions/

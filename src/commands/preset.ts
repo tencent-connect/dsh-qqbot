@@ -4,16 +4,16 @@
  * 无参数列出可用 preset（可点击切换），有参数切换，reset/default 重置为默认。
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { commandAllowlistAuth, selectionMenuAccess } from './auth.ts';
+import { selectionCommandAuthority, selectionMenuAccess } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 
-export function presetCommand({ manager, config, logger, origin }: CommandDeps): CategorizedCommand {
+export function presetCommand({ manager, config, origin }: CommandDeps): CategorizedCommand {
   return {
     name: 'preset',
     category: 'agent',
-    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（复用审批的名单语义）
+    authority: selectionCommandAuthority,
+    // 私聊与群聊共用命令入口，由注册中心统一校验机器人超管。
     scope: 'all',
-    authorized: commandAllowlistAuth(config, logger),
     description: '查看预设；/preset id 或 /preset reset 开始新会话，保留旧历史与工作区',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
@@ -36,7 +36,7 @@ export function presetCommand({ manager, config, logger, origin }: CommandDeps):
           lines.push(access.editable ? `<qqbot-cmd-input text="/preset ${p.id}" show="/preset ${display}"/>` : display);
         }
         if (!options.length) lines.push('本对话当前没有已授权且可用的预设。');
-        if (!access.editable) lines.push('', '以上仅供查看；只有机器人所有者或此对话控制者可切换预设。');
+        if (!access.editable) lines.push('', '以上仅供查看；只有机器人超管可切换预设。');
         else lines.push('', '手动指定: `/preset <id>`；`/preset reset` 清除会话覆盖，恢复获授权的 QQ 网页默认。');
         lines.push('空闲时切换或重置预设会开始新会话，不携带旧上下文，保留原会话历史和工作区。');
 

@@ -10,6 +10,7 @@ const runtime = await vi.hoisted(async () => {
 });
 import { act, createElement as h } from 'react';
 import { createRoot } from 'react-dom/client';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { QQConversationView, QQMessageTimeline } from './qq-conversation-view.ts';
 import { QQSessionStore } from './qq-session-store.ts';
 import { testT } from './qq-locale.ts';
@@ -20,7 +21,7 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 function fixture(change = {}) {
   return { key: `view-${++sequence}`, appId: 'app', scope: 'group', peerId: 'group', name: '测试群', alias: '', currentSessionId: 'current',
     sessions: [{ sessionId: 'current', startedAt: 2 }, { sessionId: 'old', startedAt: 1 }], members: [], policy: defaultPolicy('custom', '/project'),
-    settings: { preset: '', model: null, prompt: '', cwd: '', execution: { kind: 'native', permission: 'read-only' }, slashCommands: true },
+    settings: { preset: '', model: null, prompt: '', cwd: '', execution: { kind: 'native', permission: 'read-only' } },
     recording: { version: 1, enabled: true, since: 1, retentionDays: 0 }, lastActivity: 2, observedAllMessages: false,
     admitted: true, running: false, currentModel: null, currentPreset: 'standard', currentPermission: 'workspace-write', nextPreset: 'standard', deliveryState: null,
     currentWorkspace: { id: 'workspace', title: '项目', path: '/project' }, ...change };
@@ -42,9 +43,8 @@ describe('QQ settings and message pages', () => {
     await act(async () => root.render(view(store)));
     expect([...document.querySelectorAll('[role="tab"]')].map(item => item.textContent)).toEqual(['会话设置', '消息记录']);
     expect(container.querySelector('.imqc-peerSettings')).not.toBeNull();
-    // 斜杠命令清单是唯一新增的可折叠区（来自命令注册表）
-    expect(container.querySelectorAll('details').length).toBe(1);
-    expect(container.querySelector('details.imqc-cmdList')).not.toBeNull();
+    expect(container.querySelector('[aria-label="斜杠命令"]')).toBeNull();
+    expect(container.querySelector('details.imqc-cmdList')).toBeNull();
     // 记录默认全部保留：无"保留条数"输入，改为"清空消息记录"按钮。
     expect(container.querySelector('input[aria-label="保留消息记录条数"]')).toBeNull();
     expect(container.textContent).toContain('清空消息记录');
@@ -85,6 +85,101 @@ describe('QQ settings and message pages', () => {
   });
 });
 describe('QQ timeline behavior', () => {
+  it.each([{ expiresAt: 200_000 }, { expiresAt: 1 }, { expiresAt: null }, undefined])('renders a read-only search toolbar without send-window advice (%j)', passiveReply => {
+    const entry = fixture({ passiveReply }); const { store, perform } = setup(entry);
+    const rendered = document.createElement('div'); rendered.innerHTML = renderToStaticMarkup(h(QQMessageTimeline, { entry, store }));
+    const toolbar = rendered.querySelector('.imqc-timelineToolbar');
+    const form = toolbar.querySelector('form[role="search"]');
+    expect(form.querySelector('.imqc-timelineSearchInput > input[type="search"]')).not.toBeNull();
+    expect(form.querySelector('button[type="submit"]').textContent).toBe('查询');
+    expect(rendered.querySelector('.imqc-inline')).toBeNull();
+    expect(rendered.textContent).not.toMatch(/被动回复窗口|主动发送|机器人权限|暂无可用的被动回复来源/);
+    expect(perform).not.toHaveBeenCalled();
+  });
+  it('groups paging and message actions while keeping sender, timestamp and failed delivery details separate', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(100_000); const entry = fixture({ passiveReply: { expiresAt: 100_500 } }); const { store, perform } = setup(entry);
+    const open = vi.spyOn(store, 'openSession');
+    const inbound = { direction: 'inbound', order: 1, change: 1, message: { id: 'in', senderId: 'user', senderName: '小明', at: 1, text: '> 引用内容\n\n正文', mentioned: true, attachments: [], sessionId: 'old' } };
+    const outbound = { direction: 'outbound', order: 2, change: 2, delivery: { id: 'out', key: entry.key, text: '回复', at: 2, updatedAt: 2, state: 'failed', parts: [{ index: 0, state: 'failed' }], error: 'QQ 40034025: msg_id expired', provenance: 'web', sourceSessionId: 'removed-session' } };
+    perform.mockResolvedValue({ timeline: { items: [inbound, outbound], snapshot: 2, hasMore: true, nextBefore: 1 } });
+    await act(async () => root.render(h(QQMessageTimeline, { entry, store })));
+    const toolbar = container.querySelector('.imqc-timelineToolbar');
+    expect(button('读取更早记录').parentElement).toBe(toolbar.querySelector('.imqc-timelinePaging'));
+    expect(button('读取更早记录').closest('form')).toBeNull();
+    const messages = [...container.querySelectorAll('.imqc-timelineMessage')];
+    for (const [index, sender] of ['小明', '机器人'].entries()) {
+      const header = messages[index].querySelector('.imqc-messageHeader');
+      const meta = header.querySelector('.imqc-messageMeta');
+      expect(meta.querySelector('.imqc-messageWho').textContent).toBe(sender);
+      expect(meta.querySelector('time.imqc-messageWhen').getAttribute('datetime')).toBe(new Date(index + 1).toISOString());
+      expect(meta.children).toHaveLength(2);
+      await act(async () => header.querySelector('.imqc-messageAside > button').click());
+    }
+    expect(open.mock.calls.map(([sessionId]) => sessionId)).toEqual(['old', 'current']);
+    expect(messages[0].querySelector('blockquote').textContent).toContain('引用内容');
+    const details = messages[1].querySelector('.imqc-messageBody > details');
+    expect(details.open).toBe(false);
+    await act(async () => details.querySelector('summary').click());
+    expect(details.open).toBe(true);
+    expect(details.textContent).toContain('来源：网页显式发送');
+    expect(details.textContent).toContain('QQ 40034025: msg_id expired');
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(container.textContent).not.toMatch(/被动回复窗口|主动发送|机器人权限/);
+    expect(perform).toHaveBeenCalledTimes(1);
+  });
+  it('reloads immediately after records reset and keeps the search and subsequent delta cursor', async () => {
+    vi.useFakeTimers(); const entry = fixture(); const { store, perform } = setup(entry);
+    const old = { direction: 'inbound', order: 8, change: 8, message: { id: 'old', senderId: 'user', senderName: '小明', at: 8, text: 'needle old', mentioned: true, attachments: [] } };
+    const fresh = { ...old, order: 1, change: 1, message: { ...old.message, id: 'fresh', text: 'needle fresh' } };
+    perform.mockResolvedValueOnce({ timeline: { items: [old], snapshot: 8, hasMore: true, nextBefore: 8 } })
+      .mockResolvedValueOnce({ timeline: { items: [old], snapshot: 8, hasMore: true, nextBefore: 8 } })
+      .mockResolvedValueOnce({ timeline: { items: [], snapshot: 0, nextAfter: 0, hasMore: false } })
+      .mockResolvedValueOnce({ timeline: { items: [fresh], snapshot: 1, nextAfter: 1, hasMore: false } })
+      .mockResolvedValueOnce({ timeline: { items: [], snapshot: 1, nextAfter: 1, hasMore: false } });
+    await act(async () => root.render(h(QQMessageTimeline, { entry, store })));
+    const input = container.querySelector('input[type="search"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(runtime.dom.window.HTMLInputElement.prototype, 'value').set.call(input, ' needle ');
+      input.dispatchEvent(new runtime.dom.window.Event('input', { bubbles: true }));
+    });
+    await click('查询');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(perform.mock.calls[2][0]).toEqual({ action: 'timeline', key: entry.key, query: 'needle', after: 8 });
+    expect(perform.mock.calls[3][0]).toEqual({ action: 'timeline', key: entry.key, query: 'needle' });
+    expect(container.textContent).not.toContain('needle old');
+    expect(container.textContent).toContain('needle fresh');
+    expect(container.querySelector('.imqc-timelinePaging')).toBeNull();
+    expect(container.querySelector('.imqc-timeline').getAttribute('aria-busy')).toBe('false');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(perform.mock.calls[4][0]).toEqual({ action: 'timeline', key: entry.key, query: 'needle', after: 1 });
+  });
+  it('ignores a late reset-recovery response after the search changes', async () => {
+    vi.useFakeTimers(); const entry = fixture(); const { store, perform } = setup(entry);
+    const row = { direction: 'inbound', order: 8, change: 8, message: { id: 'old', senderId: 'user', senderName: '小明', at: 8, text: 'original body', mentioned: true, attachments: [] } };
+    const replacement = { ...row, order: 2, change: 2, message: { ...row.message, id: 'replacement', text: 'other search result' } };
+    let finishRecovery;
+    const recovery = new Promise(resolve => { finishRecovery = resolve; });
+    perform.mockResolvedValueOnce({ timeline: { items: [row], snapshot: 8, hasMore: false } })
+      .mockResolvedValueOnce({ timeline: { items: [], snapshot: 0, nextAfter: 0, hasMore: false } })
+      .mockImplementationOnce(() => recovery)
+      .mockResolvedValueOnce({ timeline: { items: [replacement], snapshot: 2, hasMore: false } })
+      .mockResolvedValueOnce({ timeline: { items: [], snapshot: 2, nextAfter: 2, hasMore: false } });
+    await act(async () => root.render(h(QQMessageTimeline, { entry, store })));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(perform).toHaveBeenCalledTimes(3);
+    const input = container.querySelector('input[type="search"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(runtime.dom.window.HTMLInputElement.prototype, 'value').set.call(input, 'other');
+      input.dispatchEvent(new runtime.dom.window.Event('input', { bubbles: true }));
+    });
+    await click('查询');
+    await act(async () => { finishRecovery({ timeline: { items: [row], snapshot: 1, hasMore: false } }); });
+    expect(container.textContent).toContain('other search result');
+    expect(container.textContent).not.toContain('original body');
+    expect(container.querySelector('.imqc-timeline').getAttribute('aria-busy')).toBe('false');
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(perform.mock.calls[4][0]).toEqual({ action: 'timeline', key: entry.key, query: 'other', after: 2 });
+  });
   it('starts delta polling at the first snapshot and clears expired search results in the rendered view', async () => {
     vi.useFakeTimers(); const entry = fixture(); const { store, perform } = setup(entry);
     const row = { direction: 'inbound', order: 1, change: 1, message: { id: 'private', senderId: 'user', senderName: '小明', at: 1, text: 'needle-private-body', mentioned: true, attachments: [] } };

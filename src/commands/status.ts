@@ -9,6 +9,7 @@ export function statusCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'bot-status',
     category: 'qqbot',
+    authority: 'query',
     scope: 'all',
     description: '查看当前会话状态',
     handler: async (cmdCtx) => {

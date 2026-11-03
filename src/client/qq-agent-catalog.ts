@@ -8,13 +8,17 @@ export interface QQAgentCatalog {
   readonly errors: readonly string[];
 }
 
-export function useQQAgentCatalog(source: SelectorSource | undefined): QQAgentCatalog & { refresh: () => void } {
-  const [value, setValue] = useState<QQAgentCatalog>({ models: null, presets: null, loading: true, errors: [] });
+export function useQQAgentCatalog(source: SelectorSource | undefined, enabled = true): QQAgentCatalog & { refresh: () => void } {
+  const [value, setValue] = useState<QQAgentCatalog>({ models: null, presets: null, loading: enabled, errors: [] });
   const [attempt, setAttempt] = useState(0);
   const generation = useRef(0);
   const refresh = useCallback(() => setAttempt(current => current + 1), []);
   useEffect(() => {
     const request = ++generation.current;
+    if (!enabled) {
+      setValue(current => current.loading || current.errors.length ? { ...current, loading: false, errors: [] } : current);
+      return;
+    }
     setValue(current => ({ ...current, loading: true, errors: [] }));
     const timeout = setTimeout(() => {
       if (generation.current !== request) return;
@@ -35,6 +39,6 @@ export function useQQAgentCatalog(source: SelectorSource | undefined): QQAgentCa
       }));
     });
     return () => { generation.current += 1; clearTimeout(timeout); };
-  }, [source, attempt]);
+  }, [source, attempt, enabled]);
   return { ...value, refresh };
 }

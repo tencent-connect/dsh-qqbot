@@ -22,7 +22,7 @@ export function registerConversationRoutes(ctx: Context, service: ConversationSe
         if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: '跨来源请求被拒绝' });
         const body = await readBody(req);
         const suffix = new URL(req.url ?? CONVERSATIONS_PATH, 'http://localhost').pathname.slice(CONVERSATIONS_PATH.length);
-        const action = ['/defaults', '/settings', '/lifecycle', '/timeline'].includes(suffix) ? suffix.slice(1) : field(body, 'action');
+        const action = ['/defaults', '/settings', '/lifecycle', '/recording', '/timeline'].includes(suffix) ? suffix.slice(1) : field(body, 'action');
         let result: ConversationActionResult = {};
         if (action === 'owners') {
           if (!Array.isArray(body.ownerIds) || body.ownerIds.some(id => typeof id !== 'string' || !id.trim())) throw new Error('所有者标识无效');
@@ -36,7 +36,10 @@ export function registerConversationRoutes(ctx: Context, service: ConversationSe
           const { scope, peerId } = entry;
           const manager = service.manager;
           const running = service.busy(key);
-          if (action === 'settings') {
+          if (action === 'peer-settings') {
+            if (!Number.isSafeInteger(body.expectedVersion)) throw new Error('配置版本无效');
+            result.notice = await service.savePeerSettings(key, Number(body.expectedVersion), body.patch);
+          } else if (action === 'settings') {
             if (!Number.isSafeInteger(body.expectedVersion) || typeof body.receiveEnabled !== 'boolean') throw new Error('对话设置无效');
             result.notice = await service.saveSettings(key, Number(body.expectedVersion), body.settings, field(body, 'alias', true), body.receiveEnabled);
           } else if (action === 'admit') {
@@ -49,6 +52,9 @@ export function registerConversationRoutes(ctx: Context, service: ConversationSe
             if (running) throw new Error('会话忙碌，请稍后修改生命周期');
             if (!Number.isSafeInteger(body.expectedVersion)) throw new Error('配置版本无效');
             service.store.updateLifecycle(key, Number(body.expectedVersion), body.lifecycle);
+          } else if (action === 'recording') {
+            if (!Number.isSafeInteger(body.expectedRecordingVersion) || typeof body.enabled !== 'boolean' || !Number.isSafeInteger(body.retentionDays)) throw new Error('消息保存设置无效');
+            service.store.updateRecording(key, Number(body.expectedRecordingVersion), { enabled: body.enabled, retentionDays: Number(body.retentionDays) });
           } else if (action === 'clear-records') {
             if (!Number.isSafeInteger(body.expectedRecordingVersion) || Number(body.expectedRecordingVersion) !== (service.store.get(key)?.recording?.version ?? 0)) throw new Error('记录设置已更新，请刷新后重试');
             service.clearRecords(key);

@@ -23,7 +23,7 @@ READ_RPCS = frozenset({'session/modelCatalog', 'agentPresets/list', 'session/pro
     'session/state', 'session/events', 'session/list', 'session/wait', 'directoryPicker/list'})
 WRITE_RPCS = frozenset({'session/create', 'session/prompt', 'session/updateQueue',
     'session/cancel', 'workspace/create'})
-COMMANDS = frozenset({'help', 'status', 'model', 'model-primary', 'model-short', 'model-secondary',
+COMMANDS = frozenset({'help', 'status', 'me', 'model', 'model-primary', 'model-short', 'model-secondary',
     'model-reset', 'model-default', 'model-invalid', 'preset', 'preset-standard', 'preset-minimal',
     'preset-reset', 'preset-default', 'preset-invalid', 'new', 'reset', 'clear', 'stop',
     'ping', 'version', 'smoke', 'compact'})

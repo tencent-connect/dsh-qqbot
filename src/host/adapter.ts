@@ -43,7 +43,7 @@ export function createHostAdapter(ctx: Context, _logger?: AdapterLogger): HostAd
     resolveFn = (agent, name) => presets.serviceFor!(agent, name);
     capabilities.push('serviceFor(presets实例方法)');
   } else {
-    capabilities.push('serviceFor(serviceForAgent动态)');
+    capabilities.push('serviceFor(Agent作用域)');
   }
 
   return {
@@ -56,7 +56,13 @@ export function createHostAdapter(ctx: Context, _logger?: AdapterLogger): HostAd
     },
 
     async serviceFor(agent, name) {
-      // 宿主通过 resolveFn 提供按名称解析 agent 级服务；无该能力时本层不提供（不再回退到已不存在的模块）。
+      const scoped = agent.ctx;
+      if (scoped && typeof scoped === 'object' && 'get' in scoped && typeof scoped.get === 'function') {
+        try {
+          const value: unknown = scoped.get(name);
+          if (value !== undefined && value !== null) return value;
+        } catch { /* Legacy preset lookup remains available when scoped injection is absent. */ }
+      }
       if (!resolveFn) return undefined;
       try {
         return resolveFn(agent, name);

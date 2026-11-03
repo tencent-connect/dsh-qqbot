@@ -2,7 +2,7 @@
  * 模型命令：/model — 查看或切换模型
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { commandAllowlistAuth, selectionMenuAccess } from './auth.ts';
+import { selectionCommandAuthority, selectionMenuAccess } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 import type { ModelEntry, ModelRoute } from '../model/types.ts';
 import type { ChatScope } from '../types.ts';
@@ -14,13 +14,13 @@ function currentModel(manager: CommandDeps['manager'], scope: ChatScope, peerId:
     : manager.getEffectiveModel(scope, peerId);
 }
 
-export function modelCommand({ manager, config, logger, origin }: CommandDeps): CategorizedCommand {
+export function modelCommand({ manager, config, origin }: CommandDeps): CategorizedCommand {
   return {
     name: 'model',
     category: 'agent',
-    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（与 /preset 同构）
+    authority: selectionCommandAuthority,
+    // 私聊与群聊共用命令入口，由注册中心统一校验机器人超管。
     scope: 'all',
-    authorized: commandAllowlistAuth(config, logger),
     description: '查看或切换当前会话模型（/model provider/model，/model reset 恢复网页默认）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
@@ -42,7 +42,7 @@ export function modelCommand({ manager, config, logger, origin }: CommandDeps): 
         try {
           models = await manager.listAvailableModels();
           current = currentModel(manager, scope, peerId);
-          defaultRoute = manager.getDefaultModel();
+          defaultRoute = manager.getQQDefaultModel?.() ?? manager.getDefaultModel();
         } catch (error) {
           return `无法读取模型配置：${error instanceof Error ? error.message : String(error)}`;
         }
@@ -76,7 +76,7 @@ export function modelCommand({ manager, config, logger, origin }: CommandDeps): 
         }
 
         const defaultPath = `${defaultRoute.provider}/${defaultRoute.model}`;
-        if (!access.editable) lines.push('', '以上仅供查看；只有机器人所有者或此对话控制者可切换模型。');
+        if (!access.editable) lines.push('', '以上仅供查看；只有机器人超管可切换模型。');
         else {
           if (access.allows(defaultPath) && models.some(model => `${model.provider}/${model.id}` === defaultPath)) lines.push('', '<qqbot-cmd-input text="/model reset" show="恢复 QQ 网页默认"/>');
           else lines.push('', 'QQ 网页默认当前不可用或未获此对话授权，不能恢复。');

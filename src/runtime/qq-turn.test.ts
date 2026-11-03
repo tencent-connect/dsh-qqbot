@@ -1,10 +1,11 @@
 import type {} from '@deepseek-ai/dsh-agent/types';
+import type {} from '@deepseek-ai/dsh-agent';
 import type {} from '@deepseek-ai/dsh-time-context';
 import type {} from '@deepseek-ai/dsh-tool-skill';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '../../node_modules/@deepseek-ai/dsh-agent-loop/lib/types/runtime-context.d.ts';
 import { createAssistantMessage, createMessage, createUserMessage, ToolCallId, type FileBlock, type UserMessage } from '@deepseek-ai/dsh-llm';
-import { Session, SessionId, type TurnEndReason } from '@deepseek-ai/dsh-session';
+import { Session, SessionId, SessionSeq, type TurnEndReason } from '@deepseek-ai/dsh-session';
 import { describe, expect, it } from 'vitest';
 import { payloadHash, type HumanReceipt, type QQOperation } from './qq-operations.ts';
 import { classifyTurn, classifyTurnInputs } from './qq-turn.ts';
@@ -56,7 +57,7 @@ function start(op: QQOperation): Session {
 function verdict(session: Session, operations: readonly QQOperation[], receipts: readonly HumanReceipt[] = []) {
   return classifyTurn(session.snapshotEvents(), 1, operations, receipts);
 }
-function nativeContext(source: { kind: 'runtime-context' } | { kind: 'time-context' } | { kind: 'skill-catalog'; form: 'catalog'; entries: [] }): UserMessage {
+function nativeContext(source: Extract<UserMessage['source'], { kind: 'runtime-context' | 'time-context' | 'skill-catalog' | 'model-selection' }>): UserMessage {
   const message = user('native context');
   const event = Session.create(SessionId('context'));
   event.append('user/message', { ...message, source }, { surfaceOp: 'append' });
@@ -75,6 +76,42 @@ describe('classifyTurn with stock Session events', () => {
     const final = assistant(session, 'QQ answer');
     finish(session);
     expect(verdict(session, [op])).toEqual({ kind: 'qq', operationId: op.operationId, finalMessageId: final.id, text: 'QQ answer', inputSeq: 4 });
+  });
+
+  it('authorizes a QQ turn with the native model-selection notice appended after its opening', () => {
+    const op = operation(); const session = start(op);
+    const notice = nativeContext({ kind: 'model-selection', form: 'notice', summary: 'old/model → new/model' });
+    enter(session, [op.message, notice]);
+    expect(classifyTurnInputs(session.snapshotEvents(), 1, [op], [])).toEqual({ kind: 'qq', operationId: op.operationId, inputSeq: 4 });
+    const final = assistant(session, 'QQ answer after model change'); finish(session);
+    expect(verdict(session, [op])).toEqual({ kind: 'qq', operationId: op.operationId, finalMessageId: final.id, text: 'QQ answer after model change', inputSeq: 4 });
+  });
+
+  it('suppresses a native model-selection notice mixed with a real web input', () => {
+    const op = operation(); const session = Session.create(op.sessionId);
+    const web = user('web steer');
+    const notice = nativeContext({ kind: 'model-selection', form: 'notice', summary: 'old/model → new/model' });
+    enqueue(session, op.message); enqueue(session, web, 'next-step');
+    session.append('turn/start', { turn: 1 }); claim(session); claim(session, 'next-step');
+    enter(session, [op.message, notice, web]); assistant(session); finish(session);
+    expect(classifyTurnInputs(session.snapshotEvents(), 1, [op], [])).toEqual({ kind: 'suppressed', reason: 'mixed-input' });
+    expect(verdict(session, [op])).toEqual({ kind: 'suppressed', reason: 'mixed-input' });
+  });
+
+  it('does not treat other model-selection context forms as the native notice', () => {
+    const op = operation(); const session = start(op);
+    enter(session, [op.message, nativeContext({ kind: 'model-selection', form: 'catalog' })]);
+    assistant(session); finish(session);
+    expect(verdict(session, [op])).toEqual({ kind: 'suppressed', reason: 'unclaimed-input' });
+  });
+
+  it('suppresses a model-selection notice that rewrites the admitted QQ input', () => {
+    const op = operation(); const session = start(op); enter(session, [op.message]);
+    const notice = nativeContext({ kind: 'model-selection', form: 'notice', summary: 'old/model → new/model' });
+    const inputSeq = SessionSeq(4);
+    session.append('user/message', notice, { surfaceOp: { op: 'replace', startSeq: inputSeq, endSeq: inputSeq }, sourceEventSeqs: [inputSeq] });
+    assistant(session); finish(session);
+    expect(verdict(session, [op])).toEqual({ kind: 'suppressed', reason: 'input-history-rewritten' });
   });
 
   it('does not authorize a web queue message or a web-only steer turn', () => {
@@ -116,9 +153,14 @@ describe('classifyTurn with stock Session events', () => {
     expect(verdict(session, [op])).toEqual({ kind: 'suppressed', reason: 'qq-input-modified' });
   });
 
-  it.each(['runtime-context', 'skill-catalog', 'time-context'] as const)('suppresses a web-edited queued %s message even when its original source is retained', kind => {
+  it.each([
+    { kind: 'runtime-context' },
+    { kind: 'skill-catalog', form: 'catalog', entries: [] },
+    { kind: 'time-context' },
+    { kind: 'model-selection', form: 'notice', summary: 'old/model → new/model' },
+  ] satisfies Array<Parameters<typeof nativeContext>[0]>)('suppresses a web-edited queued $kind message even when its original source is retained', source => {
     const op = operation(); const session = Session.create(op.sessionId);
-    const context = nativeContext(kind !== 'skill-catalog' ? { kind } : { kind, form: 'catalog', entries: [] });
+    const context = nativeContext(source);
     enqueue(session, context, 'next-step');
     const edited: UserMessage = { ...context, content: [{ type: 'text', text: 'Private web edit' }] };
     session.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [edited], outcome: 'canceled' });

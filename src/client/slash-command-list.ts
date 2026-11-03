@@ -1,7 +1,7 @@
 import { createElement as h, type ReactNode } from 'react';
 import type { SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
 
-/** 可折叠的斜杠命令清单：按 通用能力/QQ 内置 分组展示。会话设置表单与超管面板共用。 */
+/** 全局超管面板中的命令清单，内容来自服务端注册表。 */
 export function SlashCommandList({ commands }: { commands: readonly SlashCommandDescriptor[] }): ReactNode {
   const visible = commands.filter((command) => command.hidden !== true);
   return h('details', { className: 'imqc-cmdList' },
@@ -15,6 +15,7 @@ export function SlashCommandList({ commands }: { commands: readonly SlashCommand
         ...items.map((command) => h('div', { className: 'imqc-cmdRow', key: command.name },
           h('code', null, `/${command.name}`),
           command.aliases.length ? h('span', { className: 'imqc-hint' }, `（别名 /${command.aliases.join('、/')}）`) : null,
+          command.scope === 'owner' ? h('span', { className: 'imqc-hint' }, '仅超管') : null,
           h('span', { className: 'imqc-hint' }, command.description))));
     }));
 }

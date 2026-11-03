@@ -24,5 +24,5 @@ export const PLUGIN_HOME = resolvePluginHome(process.env.QQBOT_DATA_DIR, homedir
  * 保证「agent 在哪写文件」与「白名单允许哪个目录」不漂移。
  */
 export function resolveAgentCwd(cwdConfig: string | undefined): string {
-  return cwdConfig || resolve(PLUGIN_HOME, 'workspace');
+  return cwdConfig ? resolve(cwdConfig) : resolve(PLUGIN_HOME, 'workspace');
 }

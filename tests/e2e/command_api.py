@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 COMMANDS = frozenset({
-    'help', 'status', 'model', 'model-primary', 'model-short', 'model-secondary',
+    'help', 'status', 'me', 'model', 'model-primary', 'model-short', 'model-secondary',
     'model-reset', 'model-default', 'model-invalid', 'preset', 'preset-standard',
     'preset-minimal', 'preset-reset', 'preset-default', 'preset-invalid', 'new',
     'reset', 'clear', 'stop', 'compact', 'ping', 'version', 'smoke',

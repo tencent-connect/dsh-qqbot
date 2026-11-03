@@ -15,6 +15,7 @@ interface BackgroundState { next: number; consumed: number; published: StoredMes
 export interface MemberProfile { nickname: string; scene: 'group' | 'c2c'; sceneName: string; claimedAt: number }
 interface Catalog {
   format: 2; appId: string; owners: string[]; entries: ConversationEntry[];
+  legacyPrefsMigration?: { version: 1; completedAt: number };
   /** openid -> 展示资料；可选（旧目录无此字段）。 */
   memberProfiles?: Record<string, MemberProfile>;
   defaults: QQDefaults;
@@ -22,7 +23,7 @@ interface Catalog {
   operations: Record<string, DeliveryReservation>;
   timeline: Record<string, TimelineState>;
 }
-export interface StoreOptions { defaultPolicy?: () => ConversationPolicy; now?: () => number; defaultSettings?: () => QQAgentSettings; resolveSettings?: (settings: QQAgentSettings, entry: ConversationEntry) => QQAgentSettings; projectSettings?: (entry: ConversationEntry) => QQAgentSettings }
+export interface StoreOptions { defaultPolicy?: () => ConversationPolicy; now?: () => number; defaultSettings?: () => QQAgentSettings; resolveSettings?: (settings: QQAgentSettings, entry: ConversationEntry) => QQAgentSettings; projectSettings?: (entry: ConversationEntry) => QQAgentSettings; legacyOwnerIds?: () => readonly string[] }
 export interface EnsureOptions { senderId?: string; senderName?: string; name?: string; allMessages?: boolean; admitted?: boolean }
 export interface BackgroundSnapshot { text: string; cursor: number; messageIds: string[] }
 export interface MessageQuery { before?: number; query?: string; limit?: number }
@@ -39,6 +40,11 @@ function natural(value: unknown): number {
 function strings(value: unknown): string[] {
   if (!Array.isArray(value) || !value.every((item): item is string => typeof item === 'string')) throw new TypeError('Invalid QQ owner identities');
   return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
+}
+function validateOwnerIds(value: unknown): string[] {
+  const owners = strings(value);
+  if (owners.some(id => id.length > 1_024) || owners.length > 100) throw new TypeError('Too many QQ owner identities');
+  return owners;
 }
 function hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function validOperationId(value: string): boolean {
@@ -63,6 +69,9 @@ export class ConversationStore {
   private reconcileNeeded = false;
   private catalogNeedsMigration = false;
   private migrationFailed = false;
+  private prefsMigrationBlocked = false;
+  private startupMaintenanceDeferred = false;
+  private legacyOwnerBootstrapEligible: boolean;
   private readonly storageErrors = new Map<string, string>();
 
   public constructor(private readonly dataDir: string, private readonly appId: string, private readonly options: StoreOptions = {}) {
@@ -71,12 +80,20 @@ export class ConversationStore {
     this.now = options.now ?? Date.now;
     this.createPolicy = options.defaultPolicy ?? (() => defaultPolicy());
     this.resumeRecordingMigration();
+    this.legacyOwnerBootstrapEligible = !existsSync(this.path);
     this.catalog = this.load();
+    this.restoreLegacyPrefsRequirement();
+    if (this.prefsMigrationBlocked) { this.startupMaintenanceDeferred = true; return; }
+    this.runStartupMaintenance();
+  }
+
+  private runStartupMaintenance(): void {
     this.migrateSettings();
     this.migrateRecording();
     this.reconcileArchiveCursors();
     this.pruneExpired();
     this.recoverDeliveries();
+    this.startupMaintenanceDeferred = false;
   }
 
   public key(scope: ConversationEntry['scope'], peerId: string): string {
@@ -91,6 +108,7 @@ export class ConversationStore {
     return entry ? clone(entry) : undefined;
   }
   public errors(): string[] { return [...this.storageErrors.values()]; }
+  public legacyMigrationBlocked(): boolean { return this.prefsMigrationBlocked; }
   public recordingError(key: string): string | undefined { return this.storageErrors.get(key) ?? this.storageErrors.get('catalog'); }
   public ownerIds(): string[] { return [...this.catalog.owners]; }
   public defaults(): QQDefaults { return clone(this.catalog.defaults); }
@@ -119,8 +137,7 @@ export class ConversationStore {
   }
   public setOwnerIds(ids: string[]): void {
     this.assertWritable();
-    const owners = strings(ids);
-    if (owners.some((id) => id.length > 1_024) || owners.length > 100) throw new TypeError('Too many QQ owner identities');
+    const owners = validateOwnerIds(ids);
     const profiles = { ...(this.catalog.memberProfiles ?? {}) };
     // 删除已不在名单里的 profile，避免残留展示资料。
     for (const id of Object.keys(profiles)) if (!owners.includes(id)) delete profiles[id];
@@ -156,9 +173,10 @@ export class ConversationStore {
   }
 
   public ensure(scope: ConversationEntry['scope'], peerId: string, options: EnsureOptions = {}): ConversationEntry {
-    this.assertWritable();
     const key = this.key(scope, peerId);
     const existing = this.find(key);
+    if (this.prefsMigrationBlocked && existing) return clone(existing);
+    this.assertWritable();
     const at = this.now();
     const entry: ConversationEntry = existing ? clone(existing) : {
       key, appId: this.appId, scope, peerId, name: options.name ?? '', alias: '', currentSessionId: null,
@@ -210,6 +228,7 @@ export class ConversationStore {
       entry.settings.preset = presetId; entry.policy.version++;
     }
     entry.currentSessionId = sessionId;
+    delete entry.legacySessionAssociation;
     this.replace(entry);
     return clone(entry);
   }
@@ -244,7 +263,7 @@ export class ConversationStore {
     this.replace(entry);
     return clone(entry);
   }
-  /** 更新记录开关与按天保留期限（不再有按条数上限；条数概念已移除）。 */
+  /** 更新保存开关；保留已有显式按天期限，不设置正文条数上限。 */
   public updateRecording(key: string, expectedVersion: number, input: Pick<RecordingSettings, 'enabled' | 'retentionDays'>): ConversationEntry {
     this.assertWritable();
     const entry = this.require(key);
@@ -312,33 +331,120 @@ export class ConversationStore {
 
   /** Import only verified exact account prefixes; no title/name heuristics. */
   public migratePrefs(input?: unknown): number {
-    this.assertWritable();
+    this.assertRecordingWritable();
+    if (this.catalog.legacyPrefsMigration) return 0;
     let value = input;
-    if (value === undefined) {
-      const path = join(this.dataDir, 'model-prefs.json');
-      if (!existsSync(path)) return 0;
-      value = JSON.parse(readFileSync(path, 'utf8'));
+    const legacyPath = join(this.dataDir, 'model-prefs.json');
+    if (value === undefined && !existsSync(legacyPath)) return 0;
+    this.requireLegacyPrefsMigration();
+    let fromLegacyFile = false;
+    let data: Record<string, unknown>;
+    let ids: Record<string, unknown>;
+    let overrides: Record<string, unknown>;
+    let presets: Record<string, unknown>;
+    try {
+      if (value === undefined) {
+        value = JSON.parse(readFileSync(legacyPath, 'utf8'));
+        fromLegacyFile = true;
+      }
+      data = object(value);
+      ids = data.sessionIds === undefined ? {} : object(data.sessionIds);
+      overrides = data.overrides === undefined ? {} : object(data.overrides);
+      presets = data.presets === undefined ? {} : object(data.presets);
+    } catch (error) {
+      this.prefsMigrationBlocked = true;
+      this.storageErrors.set('legacy-prefs', `QQ 旧偏好读取失败，已保留原文件；确认迁移前暂停接收和创建会话：${error instanceof Error ? error.message : String(error)}`);
+      return 0;
     }
-    const data = object(value);
-    if (data.sessionIds === undefined) return 0;
-    const ids = object(data.sessionIds);
+    this.prefsMigrationBlocked = true;
+    this.storageErrors.set('legacy-prefs', 'QQ 旧偏好迁移尚未完成，原文件已保留；修复错误后重试迁移');
+    const next = clone(this.catalog);
     let count = 0;
+    const keys = new Set([...Object.keys(ids), ...Object.keys(overrides), ...Object.keys(presets)]);
+    for (const key of keys) {
+      const target = this.legacyTarget(key);
+      if (!target) continue;
+      const id = ids[key];
+      const sessionId = typeof id === 'string' && id.trim() && id.length <= 1_024 && !id.includes('\0') ? id : undefined;
+      const model = this.legacyModel(overrides[key]);
+      const presetValue = presets[key];
+      const preset = typeof presetValue === 'string' && presetValue.trim() && presetValue.length <= 256 && !presetValue.includes('\0') ? presetValue.trim() : undefined;
+      if (!sessionId && !model && !preset) continue;
+      const existing = next.entries.find(entry => entry.key === key);
+      // An earlier importer may already have produced this entry. Its settings can have
+      // been edited since then; the catalog is authoritative once the entry exists.
+      if (existing) {
+        if (sessionId && existing.currentSessionId === sessionId) existing.legacySessionAssociation ??= { state: 'pending', sessionId };
+        continue;
+      }
+      if (sessionId && next.entries.some(entry => entry.sessions.some(row => row.sessionId === sessionId))) throw new Error('Legacy QQ Session belongs to more than one conversation');
+      const at = this.now();
+      const entry: ConversationEntry = {
+        key, appId: this.appId, ...target, name: '', alias: '', currentSessionId: sessionId ?? null,
+        ...(sessionId ? { legacySessionAssociation: { state: 'pending', sessionId } } : {}),
+        sessions: [], lifecycle: { rotateDays: 0, maxMessages: 0, retentionDays: null },
+        nativeLog: { enabled: false, since: null }, recording: { version: 1, enabled: false, since: null, retentionDays: 0 },
+        members: [], policy: validatePolicy(this.createPolicy()), lastActivity: at, observedAllMessages: false, defaultsPending: false,
+      };
+      entry.settings = validateQQAgentSettings({ ...this.projectSettings(entry), ...(model ? { model } : {}), ...(preset ? { preset } : {}) });
+      if (sessionId) entry.sessions.push({ sessionId, startedAt: at, receivedMessages: 0, role: clone(entry.policy.role), prompt: entry.scope === 'group' ? entry.settings.promptGroup : entry.settings.promptDirect });
+      next.entries.push(entry);
+      next.background[key] = { next: 1, consumed: 0, published: [], seen: [] };
+      next.timeline[key] = { nextOrder: 1, nextChange: 1 };
+      count += 1;
+    }
+    if (fromLegacyFile && this.legacyOwnerBootstrapEligible && this.catalog.entries.length === 0 && this.catalog.owners.length === 0 && count > 0) {
+      next.owners = validateOwnerIds(this.options.legacyOwnerIds?.() ?? []);
+    }
+    next.legacyPrefsMigration = { version: 1, completedAt: this.now() };
+    // Projection and validation must finish before the only catalog write. A failed
+    // write leaves both the entries and completion marker available for a full retry.
+    this.commit(next, { legacyMigration: true });
+    this.prefsMigrationBlocked = false;
+    this.storageErrors.delete('legacy-prefs');
+    if (this.startupMaintenanceDeferred) this.runStartupMaintenance();
+    return count;
+  }
+
+  private legacyPrefsRequirementPath(): string { return join(this.dataDir, `legacy-prefs-required-${hash(this.appId)}.json`); }
+
+  private requireLegacyPrefsMigration(): void {
+    this.prefsMigrationBlocked = true;
+    this.storageErrors.set('legacy-prefs', 'QQ 旧偏好迁移尚未完成；请保留或恢复 model-prefs.json 后重试迁移');
+    try {
+      atomicWrite(this.legacyPrefsRequirementPath(), [JSON.stringify({ version: 1, required: true, accountHash: hash(this.appId) })]);
+    } catch (error) {
+      this.storageErrors.set('legacy-prefs', `QQ 旧偏好迁移标记写入失败，暂停接收和创建会话：${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  private restoreLegacyPrefsRequirement(): void {
+    if (this.catalog.legacyPrefsMigration || !existsSync(this.legacyPrefsRequirementPath())) return;
+    this.prefsMigrationBlocked = true;
+    this.storageErrors.set('legacy-prefs', 'QQ 旧偏好迁移尚未完成；请保留或恢复 model-prefs.json 后重试迁移');
+    try {
+      const data = object(JSON.parse(readFileSync(this.legacyPrefsRequirementPath(), 'utf8')));
+      if (data.version !== 1 || data.required !== true || data.accountHash !== hash(this.appId)) throw new Error('Invalid QQ preference migration requirement');
+    } catch (error) {
+      this.storageErrors.set('legacy-prefs', `QQ 旧偏好迁移标记无效，暂停接收和创建会话：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private legacyTarget(key: string): Pick<ConversationEntry, 'scope' | 'peerId'> | undefined {
     for (const scope of ['group', 'c2c'] satisfies ConversationEntry['scope'][]) {
       const prefix = `qqbot:${this.appId}:${scope}:`;
-      for (const [key, sessionId] of Object.entries(ids)) {
-        if (!key.startsWith(prefix) || typeof sessionId !== 'string' || !sessionId) continue;
-        const peerId = key.slice(prefix.length);
-        if (!peerId || this.find(key)?.sessions.some((item) => item.sessionId === sessionId)) continue;
-        const existed = this.find(key);
-        const migrated = this.ensure(scope, peerId);
-        if (!existed) { migrated.policy = validatePolicy(this.createPolicy()); migrated.settings = this.projectSettings(migrated); migrated.defaultsPending = false; }
-        migrated.nativeLog = { enabled: false, since: null };
-        this.replace(migrated);
-        this.bindSession(key, sessionId);
-        count += 1;
-      }
+      if (!key.startsWith(prefix)) continue;
+      const peerId = key.slice(prefix.length);
+      if (peerId && peerId.length <= 1_024 && !peerId.includes('\0')) return { scope, peerId };
     }
-    return count;
+    return undefined;
+  }
+
+  private legacyModel(input: unknown): QQAgentSettings['model'] {
+    if (input === undefined) return null;
+    try { return validateQQAgentSettings({ ...defaultQQAgentSettings(), model: input }).model; }
+    catch { return null; }
   }
 
   public recordMessage(key: string, input: GroupMessageRecord): boolean {
@@ -356,8 +462,9 @@ export class ConversationStore {
     const retainedMessage: GroupMessageRecord = expired ? { ...message, text: '', senderName: '', attachments: [], bodyState: 'expired', bodyHash: hash(message.text) } : message;
     const stored = { cursor: state.next, message: retainedMessage };
     const timeline = this.timelineState(key);
+    const recorded: StoredMessage = { ...stored, order: timeline.nextOrder, change: timeline.nextChange, message: { ...retainedMessage, bodyState: expired ? 'expired' : 'available', bodyHash: hash(message.text) } };
     if (recording.enabled) {
-      this.append(key, this.messagePath(key), { ...stored, order: timeline.nextOrder, change: timeline.nextChange, message: { ...message, ...(expired ? { text: '', senderName: '', attachments: [] } : {}), bodyState: expired ? 'expired' : 'available', bodyHash: hash(message.text) } });
+      this.append(key, this.messagePath(key), recorded);
       seen.add(message.id); // The ledger append is durable even if the catalog replacement fails.
     }
     const nextCatalog = clone(this.catalog);
@@ -459,8 +566,11 @@ export class ConversationStore {
     const limit = Math.min(1000, requestedLimit);
     const query = options.query?.toLocaleLowerCase() ?? '';
     const result: Array<GroupMessageRecord & { cursor: number }> = [];
+    const seen = new Set<string>();
     for (const line of reversedLines(this.messagePath(key))) {
       const item = parseStoredMessage(JSON.parse(line));
+      if (seen.has(item.message.id)) continue;
+      seen.add(item.message.id);
       if (item.cursor >= before || item.message.bodyState === 'expired') continue;
       if (query && !`${item.message.senderName}\n${item.message.text}`.toLocaleLowerCase().includes(query)) continue;
       result.push({ ...item.message, cursor: item.cursor });
@@ -484,22 +594,30 @@ export class ConversationStore {
     const limit = Math.min(1000, requestedLimit);
     const query = options.query?.toLocaleLowerCase() ?? '';
     const rows = new Map<string, TimelineEntry>();
+    const expired = new Set<string>();
     for (const line of forwardLines(this.messagePath(key))) {
       const row = parseStoredMessage(JSON.parse(line));
       if (row.order === undefined || row.change === undefined) throw new Error('QQ timeline migration incomplete');
+      if (row.message.bodyState === 'expired') expired.add(`inbound:${row.message.id}`);
       if (row.change <= snapshot) rows.set(`inbound:${row.message.id}`, { direction: 'inbound', order: row.order, change: row.change, message: { ...row.message, cursor: row.cursor } });
     }
     for (const line of forwardLines(this.deliveryPath(key))) {
       const delivery = parseDelivery(JSON.parse(line));
       if (delivery.key !== key || delivery.order === undefined || delivery.change === undefined) throw new Error('Invalid QQ timeline delivery');
+      if (delivery.bodyState === 'expired') expired.add(`outbound:${delivery.id}`);
       if (delivery.change <= snapshot) rows.set(`outbound:${delivery.id}`, { direction: 'outbound', order: delivery.order, change: delivery.change, delivery });
     }
     for (const [id, operation] of Object.entries(this.catalog.operations)) {
       if (operation.key !== key || rows.has(`outbound:${id}`) || operation.order === undefined || operation.change === undefined || operation.change > snapshot) continue;
       rows.set(`outbound:${id}`, { direction: 'outbound', order: operation.order, change: operation.change, delivery: this.retiredDelivery(id, operation) });
     }
+    // Expiry also revokes body access through an older pagination snapshot.
+    for (const [id, row] of rows) if (expired.has(id)) {
+      if (row.direction === 'inbound') row.message = { ...row.message, text: '', senderName: '', attachments: [], bodyState: 'expired' };
+      else { row.delivery = { ...row.delivery, text: '', bodyState: 'expired' }; delete row.delivery.error; }
+    }
     let items = [...rows.values()].filter(row => row.order < before && (after === undefined || row.change > after));
-    // 记录默认不按条数清理；被清空/过期（expired）的正文不再出现在时间线。
+    // Incremental pages retain body-free identities so clients can remove expired rows.
     if (after === undefined) items = items.filter(row => (row.direction === 'inbound' ? row.message.bodyState : row.delivery.bodyState) !== 'expired');
     // Incremental pages must include replacements that no longer match the search.
     if (query && after === undefined) items = items.filter(row => {
@@ -516,6 +634,7 @@ export class ConversationStore {
   public beginDelivery(key: string, operationId: string, text: string, partCount = 1, publish = true, provenance: DeliveryProvenance = {}): { record: DeliveryRecord; created: boolean } {
     this.assertWritable();
     const entry = this.require(key);
+    this.prune(key, this.recording(entry).retentionDays);
     if (!validOperationId(operationId) || !text.trim() || text.length > 100_000) throw new TypeError('Invalid QQ send request');
     if (!Number.isSafeInteger(partCount) || partCount < 1 || partCount > 1_000) throw new TypeError('Invalid QQ delivery part count');
     if (typeof publish !== 'boolean') throw new TypeError('Invalid QQ delivery publication mode');
@@ -552,9 +671,9 @@ export class ConversationStore {
     if (!existing) throw new Error('QQ delivery not found');
     if ((existing.state === 'unknown' || existing.state === 'failed') && (update.state === 'pending' || update.state === 'sending')) throw new Error('QQ delivery cannot be retried under the same operation identity');
     if (existing.state === 'accepted' && update.state !== 'accepted') throw new Error('Accepted QQ delivery cannot be retried');
-    if (existing.bodyState === 'expired') throw new Error('QQ delivery body has expired; it cannot be resent');
+    if (existing.bodyState === 'expired' && (update.state === 'pending' || update.state === 'sending')) throw new Error('QQ delivery body has expired; it cannot be resent');
     const timeline = this.timelineState(key);
-    const record = parseDelivery({ ...existing, ...update, updatedAt: this.now(), change: timeline.nextChange });
+    const record = parseDelivery({ ...existing, ...update, ...(existing.bodyState === 'expired' ? { error: undefined } : {}), updatedAt: this.now(), change: timeline.nextChange });
     this.append(key, this.deliveryPath(key), record);
     const next = clone(this.catalog);
     next.timeline[key] = { ...timeline, nextChange: timeline.nextChange + 1 };
@@ -643,17 +762,25 @@ export class ConversationStore {
     this.commit(next);
   }
   private assertWritable(): void {
+    this.assertRecordingWritable();
+    if (this.prefsMigrationBlocked) throw new Error('QQ 旧偏好迁移未确认，暂停修改和创建会话；请先修复 model-prefs.json 后重试迁移');
+  }
+  private assertRecordingWritable(): void {
     if (this.migrationFailed) throw new Error('QQ 记录迁移不完整，需重启恢复');
   }
-  private commit(next: Catalog): void {
-    this.assertWritable();
-    try { atomicWrite(this.path, [JSON.stringify(next)]); this.catalog = next; this.storageErrors.delete('catalog'); }
+  private commit(next: Catalog, options: { legacyMigration?: boolean } = {}): void {
+    if (options.legacyMigration) this.assertRecordingWritable(); else this.assertWritable();
+    try {
+      atomicWrite(this.path, [JSON.stringify(next)]); this.catalog = next;
+      if (!options.legacyMigration) this.legacyOwnerBootstrapEligible = false;
+      this.storageErrors.delete('catalog');
+    }
     catch (error) { this.reconcileNeeded = true; this.storageErrors.set('catalog', `QQ 记录写入失败：${error instanceof Error ? error.message : String(error)}`); throw error; }
   }
   private append(key: string, path: string, value: unknown): void {
     this.assertWritable();
     try { appendRecord(path, value); this.storageErrors.delete(key); }
-    catch (error) { this.storageErrors.set(key, `QQ 记录写入失败：${error instanceof Error ? error.message : String(error)}`); throw error; }
+    catch (error) { this.reconcileNeeded = true; this.storageErrors.set(key, `QQ 记录写入失败：${error instanceof Error ? error.message : String(error)}`); throw error; }
   }
   private recording(entry: ConversationEntry): RecordingSettings {
     if (!entry.recording) throw new Error('QQ recording migration incomplete');
@@ -694,9 +821,12 @@ export class ConversationStore {
     if (cached) return cached;
     const entry = this.require(key);
     const items: StoredMessage[] = [];
+    const seen = new Set<string>();
     if (this.recording(entry).enabled) {
       for (const line of reversedLines(this.messagePath(key))) {
         const item = parseStoredMessage(JSON.parse(line));
+        if (seen.has(item.message.id)) continue;
+        seen.add(item.message.id);
         if (item.message.bodyState !== 'expired') items.push(item);
         if (items.length >= Math.max(100, entry.policy.context.maxMessages + 1)) break;
       }
@@ -715,7 +845,7 @@ export class ConversationStore {
   private recoverDeliveries(): void {
     for (const entry of this.catalog.entries) {
       for (const record of this.deliveries(entry.key)) {
-        if ((record.state === 'sending' || record.state === 'pending') && record.bodyState !== 'expired') this.updateDelivery(entry.key, record.id, {
+        if (record.state === 'sending' || record.state === 'pending') this.updateDelivery(entry.key, record.id, {
           state: 'unknown', error: '宿主在发送期间退出，结果未知；请先核对 QQ。',
           parts: record.parts.map((part) => part.state === 'pending' ? { ...part, state: 'unknown' } : part),
         });
@@ -742,8 +872,7 @@ export class ConversationStore {
     this.assertWritable();
     const now = this.now();
     this.require(key);
-    // 记录默认不按条数清理：只按 retentionDays（历史遗留，通常为 0=不清理）过期，不做数量淘汰。
-    if (now - (this.lastPrune.get(key) ?? 0) < 3_600_000) return;
+    if (!this.reconcileNeeded && now - (this.lastPrune.get(key) ?? 0) < 3_600_000) return;
     const cutoff = retentionDays > 0 ? now - retentionDays * 86_400_000 : -Infinity;
     const next = clone(this.catalog);
     let changed = false;
@@ -801,10 +930,12 @@ export class ConversationStore {
       const retained = state.published.filter(row => row.message.at >= cutoff && !expiredDelivery.has(row.message.id.replace(/^published:/, '')));
       if (retained.length !== state.published.length) { state.published = retained; changed = true; }
     }
+    if (inbound.length !== latestInbound.size || deliveries.some(row => expiredDelivery.has(row.id) && row !== latestDelivery.get(row.id))) changed = true;
     if (changed) {
+      // Expired identities remain as single durable tombstones, including all operation reservations.
       const ledgers = [
-        { path: this.messagePath(key), rows: inbound },
-        { path: this.deliveryPath(key), rows: deliveries },
+        { path: this.messagePath(key), rows: [...latestInbound.values()].sort((a, b) => a.cursor - b.cursor) },
+        { path: this.deliveryPath(key), rows: deliveries.filter(row => !expiredDelivery.has(row.id) || row === latestDelivery.get(row.id)) },
       ];
       this.writeMigration(next, ledgers);
       this.catalog = next;
@@ -860,7 +991,7 @@ export class ConversationStore {
     for (const entry of next.entries) {
       if (entry.lastMessage && entry.lastMessageAt === undefined) { entry.lastMessage = ''; changed = true; }
       if (!entry.recording) {
-        entry.recording = { version: 1, enabled: true, since: this.now(), retentionDays: entry.policy.context.mode === 'archive' ? entry.policy.context.retentionDays : 7 };
+        entry.recording = { version: 1, enabled: true, since: this.now(), retentionDays: entry.policy.context.mode === 'archive' ? entry.policy.context.retentionDays : 0 };
         changed = true;
       }
       const messages = [...forwardLines(this.messagePath(entry.key))].map(line => parseStoredMessage(JSON.parse(line)));
@@ -931,7 +1062,13 @@ export class ConversationStore {
       if (timeline[key].nextOrder < 1 || timeline[key].nextChange < 1) throw new Error('Invalid QQ timeline cursor');
     }
     const defaults = data.defaults === undefined ? { version: 1, settings: validateQQAgentSettings(this.options.defaultSettings?.() ?? defaultQQAgentSettings()) } : validateQQDefaults(data.defaults);
-    return { format: 2, appId: this.appId, owners: strings(data.owners), entries, defaults, background, operations, timeline, ...(data.memberProfiles !== undefined && typeof data.memberProfiles === 'object' && data.memberProfiles !== null ? { memberProfiles: data.memberProfiles as Record<string, MemberProfile> } : {}) };
+    let legacyPrefsMigration: Catalog['legacyPrefsMigration'];
+    if (data.legacyPrefsMigration !== undefined) {
+      const marker = object(data.legacyPrefsMigration);
+      if (marker.version !== 1) throw new Error('Unsupported legacy QQ preference migration');
+      legacyPrefsMigration = { version: 1, completedAt: natural(marker.completedAt) };
+    }
+    return { format: 2, appId: this.appId, owners: strings(data.owners), entries, defaults, background, operations, timeline, ...(legacyPrefsMigration ? { legacyPrefsMigration } : {}), ...(data.memberProfiles !== undefined && typeof data.memberProfiles === 'object' && data.memberProfiles !== null ? { memberProfiles: data.memberProfiles as Record<string, MemberProfile> } : {}) };
   }
 }
 

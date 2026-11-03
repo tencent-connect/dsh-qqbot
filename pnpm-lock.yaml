@@ -57,6 +57,9 @@ importers:
       '@deepseek-ai/dsh-client-ui-layout':
         specifier: link:../../deepseek-harness/packages/client/ui-layout
         version: link:../../deepseek-harness/packages/client/ui-layout
+      '@deepseek-ai/dsh-client-ui-permission-presets':
+        specifier: link:../../deepseek-harness/packages/client/ui-permission-presets
+        version: link:../../deepseek-harness/packages/client/ui-permission-presets
       '@deepseek-ai/dsh-client-ui-primitives':
         specifier: link:../../deepseek-harness/packages/client/ui-primitives
         version: link:../../deepseek-harness/packages/client/ui-primitives

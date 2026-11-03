@@ -72,9 +72,9 @@ export function setupMiddlewares(
   bot.use(rateLimiter());
   bot.use(async (ctx, next) => {
     const service = manager.conversations;
-    if (ctx.message.content.trim().startsWith('/') && service && !service.slashAllowed(ctx.replyTarget.scope, ctx.replyTarget.targetId, ctx.message.senderId)) {
-      await ctx.bot.sendText(ctx.replyTarget, '此 QQ 对话已停用斜杠命令。请联系机器人超级管理员，或在网页对话设置中开启。');
-      ctx.stop('slash-commands-disabled'); return;
+    if (ctx.message.content.trim().startsWith('/') && !service?.isOwner(ctx.message.senderId)) {
+      await ctx.bot.sendText(ctx.replyTarget, '斜杠命令仅机器人超管可用。');
+      ctx.stop('slash-command-owner-required'); return;
     }
     await next();
   });

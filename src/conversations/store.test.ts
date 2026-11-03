@@ -568,7 +568,7 @@ describe('independent durable QQ recording and timeline', () => {
     writeFileSync(logPath(archiveEntry.key, 'messages'), `${JSON.stringify(record)}\n`);
     const reloaded = store();
     expect(reloaded.get(archiveEntry.key)?.recording?.retentionDays).toBe(3);
-    expect(reloaded.get(recentEntry.key)?.recording?.retentionDays).toBe(7);
+    expect(reloaded.get(recentEntry.key)?.recording?.retentionDays).toBe(0);
     expect(reloaded.get(archiveEntry.key)?.policy).toEqual(target.get(archiveEntry.key)?.policy);
     expect(reloaded.timeline(archiveEntry.key).items[0]).toMatchObject({ direction: 'inbound', message: { id: 'legacy' } });
     const row = reloaded.timeline(archiveEntry.key).items[0];
@@ -722,4 +722,67 @@ describe('retention recovery ordering', () => {
     expect(changes.items[1]).toMatchObject({ direction: 'inbound', message: { id: 'fresh' } });
     expect(target.snapshotBackground(entry.key, 'fresh').text).not.toContain('OLD_CACHE_BODY');
   });
+});
+
+
+describe('QQ message bodies without a fixed count limit', () => {
+  function seedMessages(entry: { key: string }, count: number): void {
+    mkdirSync(join(logPath(entry.key, 'messages'), '..'), { recursive: true });
+    writeFileSync(logPath(entry.key, 'messages'), Array.from({ length: count }, (_, index) => JSON.stringify({
+      cursor: index + 1, order: index + 1, change: index + 1,
+      message: msg(`seed-${index}`, `PRESERVED_BODY_${index}_END`, { bodyState: 'available' }),
+    })).join('\n') + '\n');
+  }
+
+  it('preserves and paginates over 1,000 bodies across restarts without changing Session history', () => {
+    const initial = store(); const entry = initial.ensure('group', 'unbounded-history');
+    initial.bindSession(entry.key, 'native-old'); initial.bindSession(entry.key, 'native-current');
+    seedMessages(entry, 1_200);
+    const target = store();
+    const page = target.timeline(entry.key, { limit: 1000 });
+    expect(page.items).toHaveLength(1000);
+    const oldest = page.items.at(-1);
+    if (!oldest) throw new Error('Missing pagination boundary');
+    const earlier = target.timeline(entry.key, { before: oldest.order, snapshot: page.snapshot, limit: 1000 });
+    expect(earlier.items).toHaveLength(200);
+    expect(target.messages(entry.key, { query: 'PRESERVED_BODY_0_END' })).toMatchObject([{ id: 'seed-0', text: 'PRESERVED_BODY_0_END' }]);
+    expect(target.recordMessage(entry.key, msg('seed-0', 'duplicate'))).toBe(false);
+    expect(target.get(entry.key)?.sessions.map(row => row.sessionId)).toEqual(['native-old', 'native-current']);
+    now += 8 * 86_400_000;
+    const reloaded = store();
+    expect(reloaded.get(entry.key)?.recording?.retentionDays).toBe(0);
+    expect(reloaded.timeline(entry.key, { query: 'PRESERVED_BODY_0_END' }).items).toHaveLength(1);
+    expect(readFileSync(logPath(entry.key, 'messages'), 'utf8')).toContain('PRESERVED_BODY_0_END');
+  }, 30_000);
+
+  it('preserves pending outbound bodies after more than 1,000 inbound messages and keeps send IDs idempotent', () => {
+    const initial = store(); const entry = initial.ensure('c2c', 'mixed-history');
+    seedMessages(entry, 1_100);
+    const target = store();
+    target.beginDelivery(entry.key, 'outbound-first', 'OUTBOUND_BODY', 2, false);
+    target.updateDelivery(entry.key, 'outbound-first', { state: 'sending', parts: [{ index: 0, state: 'accepted', receiptId: 'part-one' }, { index: 1, state: 'pending' }] });
+    target.recordMessage(entry.key, msg('fresh'));
+    expect(target.timeline(entry.key, { query: 'PRESERVED_BODY_0_END' }).items).toHaveLength(1);
+    expect(target.beginDelivery(entry.key, 'outbound-first', 'OUTBOUND_BODY', 2, false)).toMatchObject({ created: false, record: { state: 'sending', text: 'OUTBOUND_BODY' } });
+    target.updateDelivery(entry.key, 'outbound-first', { state: 'accepted', parts: [{ index: 0, state: 'accepted', receiptId: 'part-one' }, { index: 1, state: 'accepted', receiptId: 'part-two' }] });
+    const reloaded = store();
+    expect(reloaded.beginDelivery(entry.key, 'outbound-first', 'OUTBOUND_BODY', 2, false)).toMatchObject({ created: false, record: { state: 'accepted', text: 'OUTBOUND_BODY', parts: [{ receiptId: 'part-one' }, { receiptId: 'part-two' }] } });
+    expect(reloaded.messages(entry.key, { query: 'PRESERVED_BODY_0_END' })).toHaveLength(1);
+    reloaded.clearRecords(entry.key);
+    expect(reloaded.beginDelivery(entry.key, 'outbound-first', 'OUTBOUND_BODY', 2, false)).toMatchObject({ created: false, record: { state: 'accepted', text: '', bodyState: 'expired' } });
+  }, 30_000);
+
+  it('keeps earlier bodies and appends without rewriting both ledgers per message', () => {
+    const initial = store(); const entry = initial.ensure('group', 'append-history'); seedMessages(entry, 1000);
+    const target = store(); const writes = vi.spyOn(fileOps, 'atomicWrite');
+    try {
+      for (let index = 0; index < 11; index++) target.recordMessage(entry.key, msg(`new-${index}`));
+      expect(writes.mock.calls.filter(([path]) => path.endsWith('.jsonl'))).toHaveLength(0);
+      expect(target.timeline(entry.key, { query: 'PRESERVED_BODY_0_END' }).items).toHaveLength(1);
+      now += 3_600_000; target.pruneExpired();
+      expect(writes.mock.calls.filter(([path]) => path.endsWith('.jsonl'))).toHaveLength(0);
+      expect(target.hasMessage(entry.key, 'seed-0')).toBe(true);
+    } finally { writes.mockRestore(); }
+    expect(store().messages(entry.key, { query: 'PRESERVED_BODY_0_END' })).toHaveLength(1);
+  }, 30_000);
 });

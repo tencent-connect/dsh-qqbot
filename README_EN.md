@@ -1,5 +1,7 @@
 <div align="center">
 
+Existing users should read the [upgrade guide](./docs/guides/upgrading-from-0.5.5.md) before switching. Runtime requirements, QQ outbound behavior and body retention have changed. Migrated legacy conversations do not silently enable message recording or automatic Session rotation.
+
 <img width="120" src="https://img.shields.io/badge/🤖-QQ_Bot-blue?style=for-the-badge" alt="QQ Bot" />
 
 **A QQ Bot plugin for [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), connecting DeepSeek AI assistants to QQ private and group chats.**
@@ -73,11 +75,11 @@ Credentials are saved automatically after the scan; later launches need no re-sc
 
 Open QQ Bots for a dedicated sidebar grouped by group chats and private chats. Search names, local aliases, or Session titles. The sidebar shows the actual gateway status; saved credentials do not imply a connected gateway. The conversation directory survives restarts.
 
-Open Settings to manage the account, access rules and defaults for new peers. Change credentials and Unbind remain visible. New-peer defaults contain the Agent preset, native execution permission, model, extra prompt, working directory and slash-command switch. Changes apply only to peers admitted afterward.
+Open Settings to manage the account, access rules and defaults for new peers. Change credentials and Unbind remain visible. New-peer defaults contain the Agent preset, native execution permission, model, extra prompt and working directory. Changes apply only to peers admitted afterward.
 
-Each peer has its own settings. Model and permission changes apply while idle. Saved extra prompts and persona changes take effect when the prompt is assembled at each step. Group and private-chat extra prompts are configured separately, with an 80,000-character limit each. Only Agent preset and working directory changes require a new QQ Session. The phone `/preset` command still starts a new Session and preserves history.
+Each peer keeps its reception switch, QQ alias, extra prompt and tool scope. Use the native composer for the current model and reasoning effort, and the new-Session entry for the Agent preset and workspace. The composer uses one permission menu for native modes and a fourth option, Custom tools. Selecting Custom tools keeps the current native permission as its base; edit the tool list in QQ conversation settings. Saved extra prompts apply to subsequent prompt assembly, with an 80,000-character limit for group and private prompts each. The phone `/preset` command still starts a new Session and preserves history and workspace. An unavailable preset leaves the existing Session unchanged and reports the reason.
 
-Unsaved settings drafts stay in the current browser tab and never include AppSecret. The UI follows DSH's light and dark themes. The native selectors have been verified with DSH `0.2.2-alpha.2`; older client seed tables and directory APIs are untested.
+Unsaved settings drafts stay in the current browser tab and never include AppSecret. The UI follows DSH's light and dark themes. Native chat keeps its composer, model and reasoning-effort controls; account and peer settings use the plugin extension interfaces. The native selectors have been verified with DSH `0.2.2-alpha.2`; older client seed tables and directory APIs are untested.
 
 For multiple instances or isolated testing, set `QQBOT_DATA_DIR` to a separate absolute path for each instance. It isolates the conversation directory, policies, message records, delivery results, model/preset preferences, and media. Without this setting, the existing `~/.dsh-qqbot` data location remains in use.
 
@@ -130,15 +132,17 @@ Web and QQ share the current Session and native Inbox. Web input replies only on
 
 ### Independent settings for each group or contact
 
-The native QQ settings view has only Settings and Message records. Edit reception, alias and Agent configuration. Message records are kept indefinitely and can be cleared manually. Historical Sessions appear under their peer in the left sidebar.
+QQ conversation settings contain reception, QQ alias, execution permission, custom tools, extra prompts and the recording switch. Use the native composer for model and reasoning effort, and the new-Session entry for preset and workspace. QQ message records are retained by default and can be cleared manually. Historical Sessions appear under their peer in the left sidebar. See [defaults and message records](./docs/guides/settings-and-message-records.md).
 
-Native execution uses the selected Agent's actual tools, sandbox and approval policy. Custom tools provide searchable multi-selection and restrict that toolset further. Existing resource and approval constraints remain until the owner explicitly confirms replacing them. Read-only does not confine all reads to the working directory.
+The composer's single permission menu contains native modes and a fourth option, Custom tools, and shares the current DSH Session's permission state. Selecting Custom tools keeps the current native permission as its base. Search and edit the tool list in QQ conversation settings; effective access is the intersection of the Agent's actual tools, native permission and QQ tool selection. Selecting a tool does not add it to the Agent. Editing an alias or prompt does not reset the current model, preset, workspace or native permission. Imported advanced authorization constraints remain until QQ settings are saved again; saving rebuilds the policy from this version's native permission and tool mode. See the upgrade guide for the differences. Read-only does not confine all reads to the working directory.
 
-Web administration uses DSH authentication. QQ owners may use slash commands even when the peer disables them, but cannot bypass its tool or resource limits. Existing controller ceilings remain. QQ group administration does not confer bot ownership.
+Web administration uses DSH authentication. The global superadmin list controls all QQ slash commands. Add members by pairing code, rename them, or remove them from this list. Superadmins remain subject to each peer's tool and resource limits. QQ group administration does not confer superadmin access. Native DSH Web commands do not use QQ identity checks; approval and question buttons retain their own permission rules.
 
 ### Recording and model background
 
-QQ inbound and outbound text is kept indefinitely, with no automatic cleanup. Use Clear message records in the peer's Message records view to remove recorded text manually; message IDs remain for deduplication. Recording, background selection and automatic replies are independent. Clearing records does not delete native Session history or change Agent tool permissions.
+Recording, background selection and automatic replies are independent. Enabled QQ records continue across Sessions with no automatic count or age limit by default; existing explicitly configured retention periods still apply. Delivery-state updates neither count as new messages nor move an old message to the front. Upstream historyLimit defaults to 10 and controls the separate in-memory group-context buffer, not persistent message retention. Migrated legacy peers whose recording is off stay off.
+
+Clear message records removes QQ bodies while keeping message identities, body hashes, delivery state and operation-idempotency metadata to prevent replay. Native DSH Session history remains independent: QQ cleanup does not delete its questions, background or answers, or change Agent tool permissions.
 
 Recent background defaults to all three limits of 10 messages, 10 minutes and 4,000 characters. History queries require an explicit `qqbot_group_history` grant. Unapproved and disabled peers retain discovery identity without saving new text. Only events actually pushed by QQ can be recorded.
 
@@ -171,7 +175,7 @@ The native conversation keeps its composer, model and permission controls. The Q
 
 | Config | Type | Default | Description |
 |------|------|--------|------|
-| `access.c2cMode` | `open`/`allowlist`/`disabled` | `allowlist` | Direct-chat access mode; an empty allowlist denies everyone |
+| `access.c2cMode` | `open`/`allowlist`/`disabled` | `open` | Direct-chat access mode; an empty allowlist denies everyone |
 | `access.c2cAllow` | string[] | `[]` | Direct-chat allowlist (user openid) |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
 | `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
@@ -206,6 +210,8 @@ This build does not register an Agent file-send tool or automatically deliver ge
 
 ## Built-in Commands
 
+All QQ slash commands require a global superadmin, including help, queries and stop commands. The Web command list and QQ help both come from the server command registry.
+
 | Command | Description |
 |------|------|
 | `/new` (aliases `/reset` `/clear`) | Start a new session while keeping the phone's model/preset overrides |
@@ -216,12 +222,13 @@ This build does not register an Agent file-send tool or automatically deliver ge
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
+| `/bot-me` | Show your OpenID and, in a group, its OpenID; does not create an Agent task |
 | `/bot-status` | View current session status |
 | `/bot-help` | View all commands |
 
 Model and next-session preset priority is **phone command override → QQ Web default → current DSH default**. Commands do not change the Web default or another chat. Saving Web configuration reloads the bot and retains saved chat overrides. `/model` uses DSH's native model selection and keeps the Session ID, history, and current preset; switching preset starts a new current Session and retains the old history and workspace. Validation or switching failures preserve the original Session and configuration.
 
-In groups, use `@bot /command`; private chats accept `/command` directly. Queries are available to admitted members. Changing models, presets, or permissions and resetting or compacting a group Session requires the owner or that group's controller, within the group's allowed choices. The current requester, a controller, or the owner can `/stop`. Other changes report busy during generation. Unknown commands return help rather than becoming model instructions.
+Superadmins use `@bot /command` in groups or send `/command` directly in private chats. Commands remain subject to the current peer's access rules and allowed choices. Every command from a non-superadmin is denied. Other changes report busy during generation. Unknown commands from a superadmin return help rather than becoming model instructions.
 
 <details>
 <summary>Implementation detail (core modules, session routing, design principles)</summary>
@@ -302,11 +309,11 @@ Resolution strategy: in-process reuse → persisted resume → fresh create.
 - **Final text only, no streaming**: QQ receives the turn's final answer text; streamed content stays in DSH. `streaming` is legacy-compat and ignored in this version.
 - **No tool traces or files**: tool calls/results show only in DSH; no agent file-send tool is registered (`qqbot_send_file` is unavailable at runtime) and tool-generated files are not delivered. `showToolResults` and `sendFile.sendPresentedFiles` are legacy-compat and ignored.
 - **Groups reply only on @ by default**: new groups have `requireMention=true`; non-@ group messages are at most background and never trigger a reply, and whether non-@ messages are even received depends on the QQ platform enabling full group-message events.
-- **Session rotation ≠ record retention**: the native session auto-rotates after 7 days or 1,000 QQ messages at a safe boundary (history kept); message records are kept indefinitely and only cleared by the manual "clear records" action (ids retained for dedupe).
+- **Session rotation ≠ record retention**: newly admitted peers default to native Session rotation after 7 days or 1,000 QQ messages at a safe boundary, keeping history. This branch adds Session rotation; it is not an upstream message-cleanup rule. QQ bodies have no automatic count or age limit by default. Existing explicit retention periods and manual clearing preserve deduplication metadata and native Session history.
 - **Tool capability is host-bounded**: MCP/network tools cannot be domain-restricted; memory_*, subagent/delegation tools are unavailable; in native mode execution cannot exceed granted sandbox scope. If the current native permission is outside the allowed set, tools are restricted.
 - **Media relies on local temp files**: downloads live in `QQBOT_DATA_DIR/media` (default `~/.dsh-qqbot/media`) and are pruned by `media.ttlHours` (default 24h); long-lived local paths can expire. Downloads are HTTPS-only with SSRF/size/timeout guards.
 - **QQ sessions may appear duplicated in the workspace list**: the plugin reuses native sessions and the host has no public filter, so this limitation remains.
-- **Access control is fail-closed**: DMs default to `allowlist` with an empty list = deny all; groups default to `open`.
+- **Access control is fail-closed**: DMs and groups default to `open`. An explicitly selected `allowlist` mode with an empty list denies everyone.
 - **Some client copy is hard-coded Chinese**: the `qqbot` locale namespace covers only part of the strings; the rest is inline Chinese, not fully i18n'd.
 
 ## Dev Note

@@ -46,6 +46,8 @@ export interface DeliveryProvenance { sourceSessionId?: string; sourceMessageId?
 export interface ConversationEntry {
   key: string; appId: string; scope: 'group' | 'c2c'; peerId: string;
   name: string; alias: string; currentSessionId: string | null;
+  /** A legacy mapping is retained until the native Session has been resolved successfully. */
+  legacySessionAssociation?: { state: 'pending'; sessionId: string };
   sessions: Array<{ sessionId: string; startedAt: number; endedAt?: number; receivedMessages?: number; role?: RoleSettings; prompt?: string }>;
   lifecycle?: ConversationLifecycle; nativeLog?: NativeLogSettings; recording?: RecordingSettings;
   workspaceId?: string;
@@ -93,12 +95,24 @@ export type TimelineEntry =
 export interface TimelineQuery { before?: number; snapshot?: number; after?: number; query?: string; limit?: number }
 export interface TimelinePage { items: TimelineEntry[]; snapshot: number; hasMore: boolean; nextBefore?: number; nextAfter?: number }
 /** UI-facing slash-command metadata derived from the command registry (no handlers). */
-export interface SlashCommandDescriptor { name: string; aliases: string[]; description: string; category: 'agent' | 'qqbot'; scope: string; hidden?: boolean }
+export interface SlashCommandDescriptor { name: string; aliases: string[]; description: string; category: 'agent' | 'qqbot'; scope: 'owner'; hidden?: boolean }
 export interface ConversationSnapshot { conversations: ConversationView[]; tools: ToolCatalogEntry[]; ownerIds: string[]; defaults?: QQDefaults; commands?: SlashCommandDescriptor[]; /** QQ default working directory used when a conversation leaves cwd empty. */ defaultCwd?: string; errors?: string[] }
+export interface QQPeerSettingsPatch {
+  alias?: string;
+  receiveEnabled?: boolean;
+  promptGroup?: string;
+  promptDirect?: string;
+  toolScope?: { kind: 'native' } | { kind: 'custom'; tools: string[] };
+  permission?: ConversationSandboxMode;
+  nativePermission?: string;
+  expectedPermission?: string | null;
+}
 export type ConversationAction =
   | { action: 'defaults'; expectedVersion: number; settings: QQAgentSettings }
   | { action: 'settings'; key: string; expectedVersion: number; settings: QQAgentSettings; alias: string; receiveEnabled: boolean }
+  | { action: 'peer-settings'; key: string; expectedVersion: number; patch: QQPeerSettingsPatch }
   | { action: 'clear-records'; key: string; expectedRecordingVersion: number }
+  | { action: 'recording'; key: string; expectedRecordingVersion: number; enabled: boolean; retentionDays: number }
   | { action: 'timeline'; key: string; before?: number; snapshot?: number; after?: number; query?: string; limit?: number }
   | { action: 'create-session'; key: string; operationId: string; expectedCurrentSessionId: string | null; expectedPolicyVersion: number; workspaceId: string; presetId: string }
   | { action: 'unarchive'; key: string; sessionId: string }

@@ -63,6 +63,24 @@ function fixture(scope: 'group' | 'c2c' = 'group', mode: Mode = 'open') {
   return { service, manager, config, agent, cancelPending, logger, root, data, patchPath, original, request, post, key };
 }
 
+describe('independent QQ recording controls', () => {
+  it.each(['/recording', '/action'])('updates through %s during generation without changing execution authority', async suffix => {
+    const f = fixture(); const before = f.service.requireEntry(f.key);
+    Object.assign(f.agent, { status: 'running' });
+    const response = await f.post(suffix, { action: 'recording', key: f.key, expectedRecordingVersion: before.recording!.version, enabled: false, retentionDays: 7 });
+    expect(response.status).toBe(200);
+    const next = f.service.requireEntry(f.key);
+    expect(next.recording).toMatchObject({ enabled: false, retentionDays: 7, version: before.recording!.version + 1 });
+    expect(next.policy).toEqual(before.policy);
+    expect(next.settings).toEqual(before.settings);
+    expect(f.agent.cancel).not.toHaveBeenCalled();
+    expect(f.cancelPending).not.toHaveBeenCalled();
+    const stale = await f.post(suffix, { action: 'recording', key: f.key, expectedRecordingVersion: before.recording!.version, enabled: true, retentionDays: 0 });
+    expect(stale.status).toBe(409);
+    expect(f.service.requireEntry(f.key).recording).toEqual(next.recording);
+  });
+});
+
 describe('new QQ Sessions through the real action route', () => {
   it('accepts the empty workspace selection and passes an explicit cleared binding', async () => {
     const f = fixture();

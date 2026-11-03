@@ -38,8 +38,8 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
 }
 
 /** 单个用途的认领面板：生成码 / 展示进行中的码 / 已认领成员列表（可撤销）。 */
-export function PairClaimPanel({ purpose, title, hint, enabled = true }: {
-  purpose: PairPurpose; title: string; hint?: string; enabled?: boolean;
+export function PairClaimPanel({ purpose, title, description, hint, enabled = true }: {
+  purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean;
 }): ReactNode {
   const { status, error, reload } = usePairStatus(enabled);
   const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
@@ -111,6 +111,7 @@ export function PairClaimPanel({ purpose, title, hint, enabled = true }: {
   const openAdd = (): void => { setAddOpen(true); setMsg(null); if (code === null) issue(); };
   return h('div', { className: 'imqc-pair' },
     h('div', { className: 'imqc-inline' }, h('strong', null, title), h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: openAdd }, '添加…')),
+    description ? h('p', { className: 'imqc-hint' }, description) : null,
     hint ? h('p', { className: 'imqc-hint' }, hint) : null,
     msg ? h('p', { className: 'imqc-hint', role: 'status' }, msg) : null,
     error ? h('p', { className: 'imqc-error', role: 'alert' }, error) : null,

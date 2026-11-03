@@ -19,8 +19,6 @@ export const ZH = {
   // 会话设置面板（点5）
   'peer.settings.aria': '会话设置',
   'peer.deferred.hint': '补充提示词立即生效；Agent 预设与工作目录在下次新会话生效；模型与权限可在原生输入区调整。',
-  'peer.saveHint.dirty': '有未保存修改。',
-  'peer.saveHint.saved': '已保存。',
   // 侧栏（点6 / 点7）
   'sidebar.newSession': '新建会话',
   'sidebar.newSession.aria': '为{name}新建会话',
@@ -35,7 +33,7 @@ export const ZH = {
   'account.title': '账号与访问',
   'account.hint': '这一栏决定外部 QQ 用户能否触发本机 DSH、以及谁算管理员，只能在 DSH Web 配置。DSH 本身没有白名单——能打开本页面的人就是本机操作者。',
   'owners.title': '斜杠命令超管',
-  'owners.hint': '在任何 QQ 会话里都能使用斜杠命令（含 /model、/preset、/permission 等改动类命令）、审批工具调用、回答机器人提问与中止任务。它不开放工具、也不绕过执行权限——工具与权限仍在会话设置里配置。',
+  'owners.hint': '所有 QQ 斜杠命令仅限此名单中的全局超管使用，名单对所有已启用且获准接入的 QQ 对话生效。不开放额外工具，不绕过执行权限。审批和提问按钮仍按原权限处理；DSH 网页斜杠命令不受此名单限制。',
   'owners.count': '{count} 个 OpenID。斜杠命令超管见下方说明。',
 } as const;
 
@@ -46,8 +44,6 @@ const EN: QQBotDict = {
   'view.settings.title': 'QQ chat settings',
   'peer.settings.aria': 'Chat settings',
   'peer.deferred.hint': 'Extra prompt applies immediately; agent preset and working directory apply to the next new session; model and permission can be changed in the native composer.',
-  'peer.saveHint.dirty': 'Unsaved changes.',
-  'peer.saveHint.saved': 'Saved.',
   'sidebar.newSession': 'New session',
   'sidebar.newSession.aria': 'Start a new session for {name}',
   'sidebar.current': 'Current',
@@ -59,7 +55,7 @@ const EN: QQBotDict = {
   'account.title': 'Account & access',
   'account.hint': 'This section decides whether external QQ users can drive this local DSH, and who counts as an admin. It is configured only in DSH Web. DSH itself has no allowlist — anyone who can open this page is the local operator.',
   'owners.title': 'Slash-command superadmin',
-  'owners.hint': 'Can use slash commands in any QQ chat (including mutating ones like /model, /preset, /permission), approve tool calls, answer bot questions, and stop tasks. This does not open tools or bypass execution permission — tools and permissions are configured in each chat settings.',
+  'owners.hint': 'Only global superadmins on this list can use QQ slash commands in any enabled, admitted QQ chat. This grants no additional tools and does not bypass execution permissions. Approval and question buttons retain their existing permissions; DSH web slash commands are not restricted by this list.',
   'owners.count': '{count} OpenID(s). See the note below for what slash-command superadmin can do.',
 };
 

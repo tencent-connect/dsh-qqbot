@@ -13,10 +13,10 @@ import type { CommandDeps } from './types.ts';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function fixture(actor = 'controller', origin: CommandDeps['origin'] = 'qq') {
+function fixture(actor = 'owner', origin: CommandDeps['origin'] = 'qq') {
   const root = mkdtempSync(join(tmpdir(), 'qq-command-menu-')); roots.push(root);
   const ctx = { on: () => () => {}, get: (name: string) => name === 'permissionPresets' ? { catalog: () => ({ options: [{ value: 'read-only' }, { value: 'workspace-write' }] }) } : undefined } as unknown as Context;
-  const config = ConfigSchema({ appId: 'menus', appSecret: 'dummy', cwd: root });
+  const config = ConfigSchema({ appId: 'menus', appSecret: 'dummy', cwd: root, access: { c2cMode: 'open', groupMode: 'open' } });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const manager = {
     getDefaultModel: () => ({ provider: 'p', model: 'default' }), getDefaultPreset: () => 'standard', getEffectivePreset: () => 'standard',
@@ -32,7 +32,7 @@ function fixture(actor = 'controller', origin: CommandDeps['origin'] = 'qq') {
   Object.assign(manager, { conversations: service });
   const entry = service.entry('group', 'g');
   service.store.setOwnerIds(['owner']);
-  service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, controllers: ['controller'], allowedModels: ['p/allowed'], allowedPresets: ['allowed-preset'], allowedPermissions: ['read-only'] });
+  service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, nativeTools: false, controllers: ['controller'], allowedModels: ['p/allowed'], allowedPresets: ['allowed-preset'], allowedPermissions: ['read-only'] });
   const sendMarkdown = vi.fn(async (_target: unknown, _text: string) => {});
   const commands = buildCommandList({ manager: manager as unknown as SessionManager, config, logger, origin });
   const run = async (name: string, raw = '') => {
@@ -44,8 +44,8 @@ function fixture(actor = 'controller', origin: CommandDeps['origin'] = 'qq') {
 }
 
 describe('mobile menus use the same per-conversation authority as mutations', () => {
-  it.each(['controller', 'owner'])('shows %s only executable model and preset choices', async actor => {
-    const f = fixture(actor);
+  it('shows the owner only executable model and preset choices', async () => {
+    const f = fixture();
     await f.run('model'); const model = f.sendMarkdown.mock.calls[0]?.[1];
     expect(model).toContain('text="/model p/allowed"'); expect(model).toContain('actual/current');
     expect(model).not.toContain('p/forbidden'); expect(model).not.toContain('text="/model reset"');
@@ -55,12 +55,17 @@ describe('mobile menus use the same per-conversation authority as mutations', ()
     expect(preset).toContain('不携带旧上下文');
   });
 
-  it.each(['model', 'preset'])('lets a member view %s as plain read-only values without mutation buttons', async name => {
-    const f = fixture('member'); await f.run(name); const text = f.sendMarkdown.mock.calls[0]?.[1];
-    expect(text).toContain('只读'); expect(text).toContain('以上仅供查看'); expect(text).not.toContain('<qqbot-cmd-input');
-    expect(text).not.toContain('forbidden');
-    const reply = await f.run(name, name === 'model' ? 'p/allowed' : 'allowed-preset');
-    expect(reply).toContain('无权限'); expect(f.manager.setModelOverride).not.toHaveBeenCalled(); expect(f.manager.setPresetOverride).not.toHaveBeenCalled();
+  it.each(['member', 'controller'])('blocks %s from query and mutation handlers even when bypassing SDK middleware', async actor => {
+    const f = fixture(actor);
+    for (const name of ['model', 'preset', 'permission', 'bot-me', 'stop', 'bot-help']) {
+      expect(await f.run(name)).toBe('斜杠命令仅机器人超管可用。');
+    }
+    expect(f.sendMarkdown).not.toHaveBeenCalled(); expect(f.manager.restoreExisting).not.toHaveBeenCalled();
+    for (const name of ['model', 'preset']) {
+      const reply = await f.run(name, name === 'model' ? 'p/allowed' : 'allowed-preset');
+      expect(reply).toBe('斜杠命令仅机器人超管可用。');
+    }
+    expect(f.manager.setModelOverride).not.toHaveBeenCalled(); expect(f.manager.setPresetOverride).not.toHaveBeenCalled();
   });
 
   it('keeps the service allowlist authoritative even for an owner typing an unlisted option', async () => {
@@ -76,18 +81,54 @@ describe('mobile menus use the same per-conversation authority as mutations', ()
     expect(f.sendMarkdown.mock.calls[0]?.[1]).toContain('text="/model p/allowed"');
   });
 
-  it('lists only the inherited default when the conversation has no explicit selection list', async () => {
+  it('lists all available choices when the conversation has no explicit selection list', async () => {
     const f = fixture(); const entry = f.service.requireEntry(f.entry.key);
     f.service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, allowedModels: [], allowedPresets: [] });
     await f.run('model'); const model = f.sendMarkdown.mock.calls[0]?.[1];
-    expect(model).toContain('text="/model p/default"'); expect(model).toContain('text="/model reset"'); expect(model).not.toContain('p/allowed');
+    expect(model).toContain('text="/model p/default"'); expect(model).toContain('text="/model reset"'); expect(model).toContain('text="/model p/allowed"'); expect(model).toContain('text="/model p/forbidden"');
     f.sendMarkdown.mockClear(); await f.run('preset'); const preset = f.sendMarkdown.mock.calls[0]?.[1];
-    expect(preset).toContain('text="/preset standard"'); expect(preset).not.toContain('allowed-preset');
+    expect(preset).toContain('text="/preset standard"'); expect(preset).toContain('text="/preset allowed-preset"'); expect(preset).toContain('text="/preset forbidden-preset"');
   });
 
-  it('permission query distinguishes member read-only mode choices from authorization editing', async () => {
-    const f = fixture('member'); const text = await f.run('permission');
-    expect(text).toContain('本对话可用模式（只读）：read-only'); expect(text).not.toContain('workspace-write');
-    expect(text).toContain('仅所有者或此对话控制者可切换');
+  it('follows native Agent selections even when legacy allowlists are populated', async () => {
+    const f = fixture(); const entry = f.service.requireEntry(f.entry.key);
+    f.service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, nativeTools: true });
+    await f.run('model');
+    expect(f.sendMarkdown.mock.calls[0]?.[1]).toContain('text="/model p/forbidden"');
+    f.sendMarkdown.mockClear(); await f.run('preset');
+    expect(f.sendMarkdown.mock.calls[0]?.[1]).toContain('text="/preset forbidden-preset"');
+  });
+
+  it('permission query keeps the owner within the conversation mode ceiling', async () => {
+    const f = fixture(); const text = await f.run('permission');
+    expect(text).toContain('本对话可用模式：read-only'); expect(text).not.toContain('workspace-write');
+    expect(text).toContain('授权范围只能由所有者在 DSH 网页修改');
+  });
+
+  it('rechecks owner identity after an async restore even when the former owner is a controller', async () => {
+    const f = fixture();
+    const entry = f.service.requireEntry(f.entry.key);
+    f.service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, controllers: ['owner'] });
+    f.manager.restoreExisting.mockImplementationOnce(async () => { f.service.store.setOwnerIds([]); return undefined; });
+    expect(await f.run('model', 'p/allowed')).toContain('命令操作者的权限已撤销');
+    expect(f.service.canManage('group', 'g', 'owner')).toBe(true);
+  });
+
+  it('does not require a QQ owner identity on an authenticated web mutation', async () => {
+    const f = fixture('web-identity', 'web-owner');
+    expect(await f.run('model', 'p/allowed')).toContain('当前会话模型已切换');
+    expect(f.manager.setModelOverride).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a direct QQ handler when the owner directory service is unavailable', async () => {
+    const f = fixture(); f.service.manager.conversations = undefined;
+    expect(await f.run('model')).toBe('斜杠命令仅机器人超管可用。');
+    expect(f.manager.restoreExisting).not.toHaveBeenCalled(); expect(f.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicit web-owner standalone query handling available without the QQ service', async () => {
+    const f = fixture('web-identity', 'web-owner'); f.service.manager.conversations = undefined;
+    await f.run('model');
+    expect(f.sendMarkdown.mock.calls[0]?.[1]).toContain('text="/model p/allowed"');
   });
 });

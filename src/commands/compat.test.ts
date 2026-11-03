@@ -36,7 +36,7 @@ function dependencies() {
     getStatus: vi.fn(() => ({ active: true, provider: 'actual', model: 'actual-model', preset: 'standard', nextPreset: 'minimal' })),
     remove: vi.fn(async () => undefined),
   };
-  const deps: CommandDeps = { manager: manager as unknown as SessionManager, config: ConfigSchema({}) };
+  const deps: CommandDeps = { manager: manager as unknown as SessionManager, config: ConfigSchema({}), origin: 'web-owner' };
   return { deps, manager };
 }
 
@@ -122,6 +122,7 @@ describe('mobile commands explain the same defaults as Web', () => {
     await helpCommand(deps, () => commands).handler(context());
     const markdown = vi.mocked(sendMarkdownChunked).mock.calls[0]?.[1];
     expect(markdown).toContain('text="/stop"');
+    expect(markdown).toContain('斜杠命令仅机器人超管可用。');
     expect(markdown).toContain('/model reset');
     expect(markdown).toContain('QQ 命令覆盖 > QQ 网页默认 > DSH 默认');
     expect(markdown).toContain('/reset');
@@ -146,6 +147,7 @@ describe('mobile commands explain the same defaults as Web', () => {
       expect(typeof descriptor.name).toBe('string');
       expect(descriptor.name.startsWith('/')).toBe(false);
       expect(['agent', 'qqbot']).toContain(descriptor.category);
+      expect(descriptor.scope).toBe('owner');
     }
     // 别名展开：new 命令注册为数组时首个为 name、其余进 aliases
     const names = descriptors.map((descriptor) => descriptor.name);

@@ -61,7 +61,7 @@ describe('QQ account defaults and per-peer settings', () => {
   it('persists versioned defaults for new peers without altering existing group or private peers', () => {
     const { root, store } = fixture();
     const group = store.ensure('group', 'old-group'); const direct = store.ensure('c2c', 'old-person');
-    const settings = { ...defaultQQAgentSettings(), preset: 'new-agent', model: { provider: 'p', model: 'm' }, cwd: '/tmp/new', promptGroup: 'new prompt', slashCommands: false };
+    const settings = { ...defaultQQAgentSettings(), preset: 'new-agent', model: { provider: 'p', model: 'm' }, cwd: '/tmp/new', promptGroup: 'new prompt' };
     store.updateDefaults(1, settings);
     expect(store.get(group.key)).toEqual(group); expect(store.get(direct.key)).toEqual(direct);
     const reloaded = new ConversationStore(root, 'account');

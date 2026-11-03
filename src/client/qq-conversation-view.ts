@@ -10,7 +10,7 @@ import type { QQTranslate } from './qq-locale.ts';
 import { QQSessionStore, useQQSessionStore, type QQDrawerTab } from './qq-session-store.ts';
 import { QQPeerSettings } from './qq-peer-settings.ts';
 import { conversationName } from './conversation-state.ts';
-import { deliveryExplanation, deliverySummary, passiveReplyFeedback } from './delivery-feedback.ts';
+import { deliveryExplanation, deliverySummary } from './delivery-feedback.ts';
 import { mergeTimeline, timelineIdentity, timelineMatches } from './qq-timeline-state.ts';
 
 type ViewTab = 'settings' | 'messages';
@@ -87,7 +87,7 @@ export function QQConversationView({ sessionId, store, selectorSource, t, useSes
           entry.archived ? h('div', { className: 'imqc-banner', role: 'status' }, h('strong', null, '当前 QQ 会话已归档'), h('p', null, '取消归档后继续接收，或新建会话。'),
             h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => setUnarchive(true) }, '取消归档继续…'),
             unarchive ? h('div', { className: 'imqc-actions' }, h('p', null, '确认取消归档并让 QQ 消息继续进入此会话？'), h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: restore }, '确认取消归档'), h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setUnarchive(false) }, '取消')) : null) : null,
-          h(QQPeerSettings, { key: entry.key, entry, store, tools: state.directory?.tools ?? [], commands: state.directory?.commands ?? [], selectorSource, t, workspaces: workspaceChoices, defaultWorkspaceName, defaultCwd: state.directory?.defaultCwd })) : null,
+          h(QQPeerSettings, { key: entry.key, entry, store, tools: state.directory?.tools ?? [], selectorSource, t, workspaces: workspaceChoices, defaultWorkspaceName, defaultCwd: state.directory?.defaultCwd })) : null,
       tab === 'messages' ? h(QQMessageTimeline, { key: entry.key, entry, store }) : null));
 }
 export function QQMessageTimeline({ entry, store }: { entry: ConversationView; store: QQSessionStore }): ReactNode {
@@ -95,14 +95,9 @@ export function QQMessageTimeline({ entry, store }: { entry: ConversationView; s
   const [items, setItems] = useState<TimelineEntry[]>([]); const [page, setPage] = useState<TimelinePage | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
   const generation = useRef(0); const pending = useRef(false); const cursor = useRef<number | undefined>(undefined);
-  const [now, setNow] = useState(Date.now);
+  const latestSnapshot = useRef<number | undefined>(undefined);
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = (): void => { const value = Date.now(); setNow(value); const deadline = entry.passiveReply?.expiresAt; if (deadline !== null && deadline !== undefined && deadline > value) timer = setTimeout(tick, Math.min(1000, deadline - value)); };
-    tick(); return () => { if (timer !== undefined) clearTimeout(timer); };
-  }, [entry.passiveReply?.expiresAt]);
-  useEffect(() => {
-    const request = ++generation.current; let active = true; pending.current = false; cursor.current = undefined;
+    const request = ++generation.current; let active = true; pending.current = false; cursor.current = undefined; latestSnapshot.current = undefined;
     setItems([]); setPage(null); setError('');
     const load = async (): Promise<void> => {
       if (pending.current) return; pending.current = true; setBusy(true);
@@ -110,16 +105,18 @@ export function QQMessageTimeline({ entry, store }: { entry: ConversationView; s
         const result = await store.perform({ action: 'timeline', key: entry.key, query: search, ...(cursor.current === undefined ? {} : { after: cursor.current }) });
         if (!active || generation.current !== request) return;
         if (!result.timeline) throw new Error('消息记录返回格式无效');
-        const next = result.timeline;
-        // 记录被清空（clear-records 会重置时间线游标）：snapshot 回退说明游标已失效，
-        // 丢弃本地行并以全新分页重拉，否则增量 after 永远追不上重编号后的 change。
-        if (cursor.current !== undefined && page && next.snapshot < page.snapshot) {
-          cursor.current = undefined; setItems([]); setPage(null);
-          void load(); return;
+        let next = result.timeline;
+        // 清空记录会重置游标；同一次读取中重拉首页，避免 pending 拦住恢复请求。
+        if (latestSnapshot.current !== undefined && next.snapshot < latestSnapshot.current) {
+          cursor.current = undefined; latestSnapshot.current = undefined; setItems([]); setPage(null);
+          const fresh = await store.perform({ action: 'timeline', key: entry.key, query: search });
+          if (!active || generation.current !== request) return;
+          if (!fresh.timeline) throw new Error('消息记录返回格式无效');
+          next = fresh.timeline;
         }
         setItems(previous => mergeTimeline(previous, next.items, search));
         if (cursor.current === undefined) setPage(next);
-        cursor.current = next.nextAfter ?? next.snapshot; setError('');
+        cursor.current = next.nextAfter ?? next.snapshot; latestSnapshot.current = next.snapshot; setError('');
       } catch (cause) { if (active && generation.current === request) setError(cause instanceof Error ? cause.message : '无法读取消息记录'); }
       finally { if (active && generation.current === request) { pending.current = false; setBusy(false); } }
     };
@@ -136,14 +133,14 @@ export function QQMessageTimeline({ entry, store }: { entry: ConversationView; s
     }).catch((cause: unknown) => { if (generation.current === request) setError(cause instanceof Error ? cause.message : '无法读取更早记录'); })
       .finally(() => { if (generation.current === request) { pending.current = false; setBusy(false); } });
   };
-  const feedback = passiveReplyFeedback(entry.passiveReply, now);
   const visible = items.filter(item => timelineMatches(item, search) && (item.direction === 'inbound' ? item.message.bodyState : item.delivery.bodyState) !== 'expired');
   return h('section', { className: 'imqc-timeline', 'aria-label': 'QQ 消息记录', 'aria-busy': busy },
-    h('p', { className: 'imqc-hint' }, '收到的 QQ 消息在左，机器人回复在右；点每条右侧 ↗ 可在原生会话中查看该轮。'),
-    feedback.summary ? h('p', { className: 'imqc-hint imqc-timelineFeedback' }, feedback.summary) : null,
-    h('form', { className: 'imqc-inline', onSubmit: (event: FormEvent) => { event.preventDefault(); setSearch(query.trim()); } }, h(Input, { type: 'search', value: query, 'aria-label': '搜索消息记录', placeholder: '搜索已保存的消息正文…', onChange: (event: ChangeEvent<HTMLInputElement>) => setQuery(event.target.value) }), h(Button, { type: 'submit', variant: 'outline', size: 'sm' }, '查询')),
+    h('div', { className: 'imqc-timelineToolbar' },
+      h('form', { className: 'imqc-timelineSearch', role: 'search', 'aria-label': '搜索 QQ 消息记录', onSubmit: (event: FormEvent) => { event.preventDefault(); setSearch(query.trim()); } },
+        h(Input, { className: 'imqc-timelineSearchInput', type: 'search', value: query, 'aria-label': '搜索消息记录', placeholder: '搜索已保存的消息正文…', onChange: (event: ChangeEvent<HTMLInputElement>) => setQuery(event.target.value) }),
+        h(Button, { type: 'submit', variant: 'outline', size: 'sm' }, '查询')),
+      page?.hasMore ? h('div', { className: 'imqc-timelinePaging' }, h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: older }, '读取更早记录')) : null),
     error ? h('p', { role: 'alert', className: 'imqc-error' }, error) : null,
-    page?.hasMore ? h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: older }, '读取更早记录') : null,
     h('div', { className: 'imqc-timelineRows' }, ...visible.map(item => {
       const incoming = item.direction === 'inbound';
       const record = incoming ? item.message : item.delivery;
@@ -151,26 +148,22 @@ export function QQMessageTimeline({ entry, store }: { entry: ConversationView; s
       const body = record.bodyState === 'expired' ? '正文已过期' : record.bodyState === 'disabled' ? '正文未记录' : record.text || '无文本内容';
       const provenance = record.provenance === 'web' ? '网页显式发送' : record.provenance === 'automatic' ? 'QQ 自动回复' : record.provenance === 'command' ? 'QQ 命令' : record.provenance === 'interaction' ? 'QQ 交互' : record.provenance === 'legacy' ? '历史记录' : 'QQ';
       const failed = !incoming && (item.delivery.state === 'failed' || item.delivery.state === 'unknown');
+      const target = session && store.entry(session) ? session : entry.currentSessionId;
       return h('article', { key: timelineIdentity(item), className: 'imqc-timelineMessage', 'data-direction': item.direction, 'data-failed': failed || undefined },
+        h('header', { className: 'imqc-messageHeader' },
+          h('div', { className: 'imqc-messageMeta' }, h('span', { className: 'imqc-messageWho' }, incoming ? (item.message.senderName || item.message.senderId.slice(-8)) : '机器人'), h('time', { className: 'imqc-messageWhen', dateTime: new Date(record.at).toISOString() }, new Date(record.at).toLocaleString())),
+          target ? h('div', { className: 'imqc-messageAside' }, h(Button, { variant: 'ghost', size: 'sm', className: 'imqc-jumpTurn', 'aria-label': '在原生会话中查看此消息', title: '在原生会话中查看此消息', onClick: () => store.openSession(target) }, '↗')) : null),
         h('div', { className: 'imqc-messageBody' },
-          h('div', { className: 'imqc-messageMeta' }, h('span', { className: 'imqc-messageWho' }, incoming ? (item.message.senderName || item.message.senderId.slice(-8)) : '机器人'), h('span', { className: 'imqc-messageWhen' }, new Date(record.at).toLocaleString())),
           body ? h(MarkdownText, { text: body, labels: TIMELINE_MARKDOWN_LABELS, variant: 'compact' }) : null,
           incoming && item.message.attachments.length ? h('div', { className: 'imqc-attachRow' }, ...item.message.attachments.map((att, i) => renderAttachment(att, i))) : null,
-          failed ? h('p', { className: 'imqc-error imqc-messageWarn', role: 'alert' }, item.delivery.state === 'failed' ? '发送失败' : '结果未知（可能部分已发出，请核对 QQ）') : null),
-        h('div', { className: 'imqc-messageAside' },
-          // 只在发送失败/结果未知时提供诊断详情（成功消息无需技术信息）。
-          failed ? h('details', { className: 'imqc-msgInfo' }, h('summary', { title: '发送详情', 'aria-label': '发送详情' }, 'ⓘ'),
+          failed ? h('p', { className: 'imqc-error imqc-messageWarn', role: 'alert' }, item.delivery.state === 'failed' ? '发送失败' : '结果未知（可能部分已发出，请核对 QQ）') : null,
+          failed ? h('details', { className: 'imqc-msgInfo' }, h('summary', null, '发送详情'),
             h('div', { className: 'imqc-msgInfoBody' },
               h('p', { className: 'imqc-hint' }, deliverySummary(item.delivery)),
               h('p', { className: 'imqc-hint' }, deliveryExplanation(item.delivery)),
               h('p', { className: 'imqc-hint' }, `来源：${provenance}`),
               ...item.delivery.parts.map(part => h('p', { key: part.index, className: 'imqc-hint' }, `分段 ${part.index + 1}：${part.state}`)),
-              item.delivery.error ? h('p', { role: 'alert', className: 'imqc-error' }, item.delivery.error) : null)) : null,
-          ((): ReactNode => {
-            // 跳转到包含该消息的原生会话；若该 session 不在当前目录（历史被裁剪等），回退到该对话的当前会话，避免落到无 QQ 设置视图的孤儿 session。
-            const target = session && store.entry(session) ? session : entry.currentSessionId;
-            return target ? h(Button, { variant: 'ghost', size: 'sm', className: 'imqc-jumpTurn', 'aria-label': '在原生会话中查看此消息', title: '在原生会话中查看此消息', onClick: () => store.openSession(target) }, '↗') : null;
-          })()));
+              item.delivery.error ? h('p', { role: 'alert', className: 'imqc-error' }, item.delivery.error) : null)) : null));
     })),
     page && visible.length === 0 ? h('p', { className: 'imqc-hint' }, '没有匹配的消息记录。开启记录后，仅保存机器人实际收到的 QQ 消息与投递。') : null);
 }

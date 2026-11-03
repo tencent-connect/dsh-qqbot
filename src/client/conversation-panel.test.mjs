@@ -23,7 +23,7 @@ beforeEach(() => { container = document.createElement('div'); document.body.appe
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 function entry() {
   return { key: 'group-notice', appId: 'app', scope: 'group', peerId: 'group', name: '测试群', alias: '', currentSessionId: null, sessions: [], members: [],
-    settings: { preset: '', model: null, prompt: '', cwd: '', execution: { kind: 'native', permission: 'read-only' }, slashCommands: true },
+    settings: { preset: '', model: null, prompt: '', cwd: '', execution: { kind: 'native', permission: 'read-only' } },
     policy: { version: 1, template: 'chat', name: '聊天', role: { description: '', tone: '', world: '', prompt: '' }, tools: {},
       resources: { readRoots: [], writeRoots: [], sendRoots: [], executionEnabled: false, sandbox: 'read-only', networkDomains: [], maxFiles: 1, maxFileMB: 10 },
       controllers: [], approvers: [], allowedModels: [], allowedPresets: [], allowedPermissions: ['read-only'], permission: 'read-only', cwd: '', requireMention: true,
@@ -115,7 +115,7 @@ describe('QQ explicit send feedback', () => {
     await act(async () => sendButton('本次发送已提交').click());
     expect(fetch).toHaveBeenCalledTimes(1);
   });
-  it('shows current window expiry and the unchanged platform error in delivery records', async () => {
+  it('keeps the platform error without a send-window explanation in read-only records', async () => {
     vi.useFakeTimers(); vi.setSystemTime(100_000);
     const { store, value } = previewStore({ expiresAt: 100_500 });
     store.closePreview(); store.openDrawer(value, 'messages');
@@ -124,11 +124,12 @@ describe('QQ explicit send feedback', () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ timeline: { items: [{ direction: 'outbound', order: 1, change: 1, delivery }], snapshot: 1, hasMore: false, nextAfter: 1 } }), { status: 200 }));
     vi.stubGlobal('fetch', fetch);
     await act(async () => root.render(overlay(store)));
-    expect(document.body.textContent).toContain('被动回复窗口剩余 0 分 1 秒');
+    expect(document.body.textContent).not.toContain('被动回复窗口');
     expect(document.body.textContent).toContain(platformError);
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-    expect(document.body.textContent).toContain('被动回复窗口已过期');
-    expect(document.body.textContent).toContain('是否允许取决于机器人权限');
+    expect(document.body.textContent).not.toContain('被动回复窗口');
+    expect(document.body.textContent).not.toContain('是否允许取决于机器人权限');
+    expect(document.body.textContent).toContain(platformError);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ action: 'timeline', key: value.key, query: '' });
   });

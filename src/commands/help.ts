@@ -2,7 +2,7 @@
  * /bot-help — 查看所有指令，按「通用能力 / QQ 机器人特有」分组展示
  *
  * 通用能力：对应底层 dsh agent 能力（new/compact/model/stop），无前缀
- * QQBot 特有：插件自身封装（bot-ping/bot-version/bot-status/bot-help），带 bot- 前缀
+ * QQBot 特有：插件自身封装（bot-ping/bot-version/bot-me/bot-status/bot-help），带 bot- 前缀
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { sendMarkdownChunked, PLUGIN_VERSION } from '../shared/index.ts';
@@ -15,6 +15,7 @@ export function helpCommand(
   return {
     name: 'bot-help',
     category: 'qqbot',
+    authority: 'query',
     scope: 'all',
     description: '查看所有指令',
     handler: async (cmdCtx) => {
@@ -35,7 +36,7 @@ export function helpCommand(
         return out;
       };
 
-      const lines: string[] = ['### 🤖 QQ 机器人指令', ''];
+      const lines: string[] = ['### 🤖 QQ 机器人指令', '', '斜杠命令仅机器人超管可用。', ''];
 
       if (agentCmds.length > 0) {
         lines.push('**通用能力**', '', ...render(agentCmds), '');

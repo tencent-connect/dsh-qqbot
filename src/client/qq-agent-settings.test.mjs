@@ -33,12 +33,12 @@ const selectors = {
   modelCatalog: async () => ({ ok: true, value: { groups: catalog.models.groups.map(group => ({ ...group, models: group.models.map(model => ({ id: model.model, name: model.name })) })), failures: [] } }),
   listAgentPresets: async () => ({ ok: true, value: { presets: catalog.presets } }),
 };
-function settings(change = {}) { return { preset: '', model: null, promptGroup: '', promptDirect: '', cwd: '', execution: { kind: 'native', permission: 'read-only' }, slashCommands: true, ...change }; }
+function settings(change = {}) { return { preset: '', model: null, promptGroup: '', promptDirect: '', cwd: '', execution: { kind: 'native', permission: 'read-only' }, ...change }; }
 function entry(change = {}) {
   return { key: `settings-${++sequence}`, appId: 'app', scope: 'group', peerId: 'peer', name: '测试群', alias: '', currentSessionId: 'current', sessions: [], members: [],
     policy: { ...defaultPolicy('custom', '/project'), nativeTools: true, receiveEnabled: true }, settings: settings(),
     recording: { version: 1, enabled: true, since: 1, retentionDays: 0 },
-    lastActivity: 1, observedAllMessages: false, admitted: true, running: false, currentModel: null, currentPreset: null, nextPreset: null, deliveryState: null, ...change };
+    lastActivity: 1, observedAllMessages: false, admitted: true, running: false, currentPermission: 'read-only', currentModel: null, currentPreset: null, nextPreset: null, deliveryState: null, ...change };
 }
 function setup(value = entry(), defaults = { version: 1, settings: settings() }) {
   const store = new QQSessionStore({ openSession: vi.fn() });
@@ -91,6 +91,24 @@ describe('shared Agent settings draft form', () => {
     await act(async () => root.render(h(QQAgentSettingsForm, { settings: settings(), tools, catalog, scope: 'defaults', onRefreshCatalog: vi.fn(), onChange: vi.fn() })));
     expect(field('群聊补充提示词').maxLength).toBe(QQ_EXTRA_PROMPT_MAX_CHARS);
     expect(field('私聊补充提示词').maxLength).toBe(QQ_EXTRA_PROMPT_MAX_CHARS);
+    expect(container.querySelector('[aria-label^="模型："]')).not.toBeNull();
+    expect(container.querySelector('[aria-label^="Agent 预设："]')).not.toBeNull();
+    expect(container.textContent).toContain('工作目录');
+  });
+  it.each(['defaults', 'conversation'])('keeps slash command management out of %s settings', async scope => {
+    await act(async () => root.render(h(QQAgentSettingsForm, { settings: settings(), tools, catalog, scope, onRefreshCatalog: vi.fn(), onChange: vi.fn() })));
+    expect(container.textContent).not.toContain('斜杠命令');
+    expect(container.querySelector('[aria-label="斜杠命令"]')).toBeNull();
+  });
+  it('leaves model, effort, preset and workspace to the native session controls in peer settings', async () => {
+    const { store, value } = setup();
+    const source = { ...selectors, modelCatalog: vi.fn(selectors.modelCatalog), listAgentPresets: vi.fn(selectors.listAgentPresets) };
+    await act(async () => root.render(h(QQPeerSettings, { store, entry: value, tools, selectorSource: source, t: testT })));
+    for (const label of ['模型', '推理强度', 'Agent 预设', '工作目录']) expect(container.textContent).not.toContain(label);
+    expect(source.modelCatalog).not.toHaveBeenCalled();
+    expect(source.listAgentPresets).not.toHaveBeenCalled();
+    expect(field('群聊补充提示词')).toBeTruthy();
+    expect(container.textContent).toContain('执行权限');
   });
   it('uses native permission labels, keeps the custom base visible, and updates stable tool IDs', async () => {
     const changes = vi.fn();
@@ -117,7 +135,7 @@ describe('shared Agent settings draft form', () => {
     const effortCatalog = { loading: false, errors: [], presets: [], models: { groups: [{ id: 'p', name: 'P', models: [
       { provider: 'p', model: 'm', name: 'M', description: undefined, efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' },
     ] }], failures: [], defaultModel: { provider: 'p', model: 'm' } } };
-    function Form() { const [draft, update] = useState(settings({ model: null })); return h(QQAgentSettingsForm, { settings: draft, tools, catalog: effortCatalog, onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
+    function Form() { const [draft, update] = useState(settings({ model: null })); return h(QQAgentSettingsForm, { settings: draft, tools, catalog: effortCatalog, scope: 'defaults', onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
     await act(async () => root.render(h(Form)));
     // inherit mode (model null) still shows effort, seeded from the default model's defaultEffort
     expect(container.querySelector('[aria-label^="推理强度："]')).not.toBeNull();
@@ -129,7 +147,7 @@ describe('shared Agent settings draft form', () => {
   });
   it('selects the actual Agent preset independently of model and permission', async () => {
     const changes = vi.fn();
-    function Form() { const [draft, update] = useState(settings()); return h(QQAgentSettingsForm, { settings: draft, tools, catalog, onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
+    function Form() { const [draft, update] = useState(settings()); return h(QQAgentSettingsForm, { settings: draft, tools, catalog, scope: 'defaults', onRefreshCatalog: vi.fn(), onChange: next => { update(next); changes(next); } }); }
     await act(async () => root.render(h(Form)));
     await choose('Agent 预设', '精简 Agent');
     await choose('模型', '测试提供方 / 测试模型');
@@ -142,10 +160,25 @@ describe('shared Agent settings draft form', () => {
 });
 
 describe('peer settings persistence', () => {
-  it('saves shared settings without a message-count field or creating a Session/turn', async () => {
+  it('shows actions only for unsaved edits and hides them after reverting or discarding', async () => {
+    const { store, value, perform } = setup();
+    await act(async () => root.render(peer(store, value)));
+    expect(container.querySelector('.imqc-saveBar')).toBeNull();
+    expect(container.textContent).not.toContain('已保存。');
+    await edit('群聊补充提示词', 'temporary');
+    expect(button('保存会话设置').disabled).toBe(false);
+    await edit('群聊补充提示词', '');
+    expect(container.querySelector('.imqc-saveBar')).toBeNull();
+    await edit('群聊补充提示词', 'another draft');
+    await click('放弃修改');
+    expect(field('群聊补充提示词').value).toBe('');
+    expect(container.querySelector('.imqc-saveBar')).toBeNull();
+    expect(perform).not.toHaveBeenCalled();
+  });
+  it('saves only changed QQ fields without native model, preset or cwd fields', async () => {
     const { store, value, perform } = setup();
     perform.mockImplementation(async action => {
-      const result = snapshot(store, { ...value, alias: action.alias, settings: action.settings, policy: { ...value.policy, version: 2 } });
+      const result = snapshot(store, { ...value, alias: action.patch.alias, settings: { ...value.settings, promptGroup: action.patch.promptGroup }, policy: { ...value.policy, version: 2 } });
       store.accept(result.snapshot);
       return result;
     });
@@ -155,17 +188,22 @@ describe('peer settings persistence', () => {
     const prompt = 'x'.repeat(QQ_EXTRA_PROMPT_MAX_CHARS - tail.length) + tail;
     await edit('QQ 备注', '新备注'); await edit('群聊补充提示词', prompt);
     await click('保存会话设置');
-    expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'settings', key: value.key, expectedVersion: 1, alias: '新备注', receiveEnabled: true,
-      settings: { ...value.settings, promptGroup: prompt } });
-    expect(container.textContent).toContain('补充提示词立即生效');
-    expect(container.textContent).toContain('Agent 预设与工作目录在下次新会话生效');
+    expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'peer-settings', key: value.key, expectedVersion: 1, patch: { alias: '新备注', promptGroup: prompt } });
+    expect(container.querySelector('.imqc-saveBar')).toBeNull();
+    expect(container.textContent).not.toContain('会话设置已保存。');
     expect(field('群聊补充提示词').value).toBe(prompt);
     expect(store.getSnapshot().overlay).toBeNull();
-    // 记录默认全部保留：不再有"保留消息记录条数"输入，改为"清空消息记录"入口。
     expect(container.textContent).not.toContain('保留消息记录条数');
+    expect(container.textContent).toContain('QQ 收发记录默认不自动清理，可手动清空；DSH 会话历史独立保留');
     expect(container.textContent).toContain('清空消息记录');
     expect(container.textContent).not.toContain('新建会话');
     expect(perform).toHaveBeenCalledTimes(1);
+  });
+  it('shows an existing explicit retention period without presenting it as the default', async () => {
+    const { store, value } = setup();
+    await act(async () => root.render(peer(store, { ...value, recording: { ...value.recording, retentionDays: 3 } })));
+    expect(container.textContent).toContain('QQ 收发记录按已有配置保留 3 天');
+    expect(container.textContent).not.toContain('默认不自动清理');
   });
   it('clears message records through a confirm-gated action', async () => {
     const { store, value, perform } = setup();
@@ -184,8 +222,43 @@ describe('peer settings persistence', () => {
     expect(container.textContent).not.toContain('旧版资源限制');
     await click('保存会话设置');
     const action = perform.mock.calls[0][0];
-    expect(action).toMatchObject({ action: 'settings', expectedVersion: 1, settings: { execution: { kind: 'native', permission: 'danger-full-access' } } });
+    expect(action).toEqual({ action: 'peer-settings', key: value.key, expectedVersion: 1, patch: { permission: 'danger-full-access', expectedPermission: 'read-only' } });
     expect(action.confirmNativeTransition).toBeUndefined();
+  });
+  it('follows native permission changes while preserving an unsaved prompt and emits no permission write', async () => {
+    const { store, value, perform } = setup(entry({ settings: settings({ execution: { kind: 'custom', permission: 'danger-full-access', tools: ['read'] } }) }));
+    await act(async () => root.render(peer(store, value)));
+    expect(container.querySelector('[aria-label^="自定义工具的基础权限：仅可查看"]')).not.toBeNull();
+    await edit('群聊补充提示词', 'pending prompt');
+    const newer = { ...value, currentPermission: 'workspace-write' };
+    await act(async () => root.render(peer(store, newer)));
+    expect(field('群聊补充提示词').value).toBe('pending prompt');
+    expect(container.querySelector('[aria-label^="自定义工具的基础权限：工作区内修改"]')).not.toBeNull();
+    perform.mockResolvedValue(snapshot(store, { ...newer, policy: { ...newer.policy, version: 2 }, settings: { ...newer.settings, promptGroup: 'pending prompt' } }));
+    await click('保存会话设置');
+    expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'peer-settings', key: value.key, expectedVersion: 1, patch: { promptGroup: 'pending prompt' } });
+  });
+  it('retains an explicitly edited permission and its native comparison value when native permission changes', async () => {
+    const { store, value, perform } = setup();
+    await act(async () => root.render(peer(store, value)));
+    await edit('群聊补充提示词', 'pending prompt');
+    await choose('执行权限', '完全权限');
+    await act(async () => root.render(peer(store, { ...value, currentPermission: 'workspace-write' })));
+    expect(container.querySelector('[aria-label^="执行权限：完全权限"]')).not.toBeNull();
+    perform.mockRejectedValue(new Error('原生权限已变化，请重新确认'));
+    await click('保存会话设置');
+    expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'peer-settings', key: value.key, expectedVersion: 1, patch: { promptGroup: 'pending prompt', permission: 'danger-full-access', expectedPermission: 'read-only' } });
+    expect(field('群聊补充提示词').value).toBe('pending prompt');
+    expect(container.textContent).toContain('原生权限已变化，请重新确认');
+  });
+  it('changes a custom tool mask without raising the current native permission', async () => {
+    const { store, value, perform } = setup(entry({ settings: settings({ execution: { kind: 'native', permission: 'danger-full-access' } }) }));
+    await act(async () => root.render(peer(store, value)));
+    await choose('执行权限', '自定义工具');
+    await click('只读：文件与搜索');
+    perform.mockResolvedValue(snapshot(store, { ...value, settings: settings({ execution: { kind: 'custom', permission: 'read-only', tools: ['read'] } }), policy: { ...value.policy, version: 2 } }));
+    await click('保存会话设置');
+    expect(perform).toHaveBeenCalledExactlyOnceWith({ action: 'peer-settings', key: value.key, expectedVersion: 1, patch: { toolScope: { kind: 'custom', tools: ['read'] } } });
   });
   it('retains a dirty draft across remount and stops stale-version saves', async () => {
     const { store, value, perform } = setup();

@@ -310,6 +310,7 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps): ReactNode {
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
+    createElement('p', { className: 'imqb2-hint', role: 'note' }, '本版 QQ 仅发送最终正文。旧配置中的流式回复、工具过程与文件发送不生效；需要这些能力时请暂用旧版，升级限制见插件说明。'),
     createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
       createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
       createElement(SegmentedRow, { disabled: busy,

@@ -13,6 +13,7 @@ import { getProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
 import { RuntimeState, RUNTIME_ERROR_HINTS } from './runtime/state.ts';
+import { assertSupportedNode } from './host/node-version.ts';
 
 // ── Cordis 插件元数据 ──
 export const name = 'im-qqbot';
@@ -23,6 +24,7 @@ export type { ImQQBotConfig } from './config.ts';
 
 // ── 插件主体 ──
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
+  assertSupportedNode();
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
 

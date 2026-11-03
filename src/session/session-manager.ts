@@ -198,6 +198,17 @@ export class SessionManager {
   }
   getDefaultPreset(): string { return this.getPresetsService()?.defaultId || ''; }
 
+  getQQDefaultModel(): ModelRoute {
+    const settings = this.conversations?.store.defaults().settings;
+    if (settings?.model) return settings.model;
+    const route = settings ? settings.model ?? this.getDefaultModel() : this.modelResolver.resolveDefault();
+    return settings?.reasoningEffort ? { ...route, reasoningEffort: settings.reasoningEffort } : route;
+  }
+  getQQDefaultPreset(): string {
+    const settings = this.conversations?.store.defaults().settings;
+    return settings ? settings.preset || this.getDefaultPreset() : this.config.preset?.trim() || this.getDefaultPreset();
+  }
+
   /**
    * 获取指定 peer 的生效 preset（per-peer 覆盖 > config.preset）
    */
@@ -280,7 +291,7 @@ export class SessionManager {
 
   /** 先通过新 Session 应用配置或宿主默认，再清除 per-peer 覆盖。 */
   async clearPresetOverride(scope: ChatScope, peerId: string): Promise<PresetSwitchOutcome> {
-    const requested = undefined;
+    const requested = this.getQQDefaultPreset() || undefined;
     this.conversations?.validateSelection(scope, peerId, 'preset', requested || this.getDefaultPreset());
     return this.updatePreset(scope, peerId, requested, true);
   }
@@ -325,13 +336,13 @@ export class SessionManager {
 
   async clearModelOverride(scope: ChatScope, peerId: string): Promise<void> {
     const key = this.sessionKey(scope, peerId);
-    const defaultRoute = (): ModelRoute => this.getDefaultModel();
+    const defaultRoute = (): ModelRoute => this.getQQDefaultModel();
     const fallback = defaultRoute();
     this.conversations?.validateSelection(scope, peerId, 'model', `${fallback.provider}/${fallback.model}`);
     await this.withPeerOperation(key, async () => {
-      await this.switchModel(scope, peerId, defaultRoute());
+      const selected = await this.switchModel(scope, peerId, defaultRoute());
       this.modelResolver.clearOverride(key);
-      this.conversations?.recordModelSetting(scope, peerId, null);
+      this.conversations?.recordModelSetting(scope, peerId, selected, true);
     });
   }
 
@@ -508,6 +519,7 @@ export class SessionManager {
     replyTarget: ReplyTarget,
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
+    this.conversations?.assertMigrationReady();
     this.conversations?.ensure(scope, peerId, senderId);
     return this.withPeerOperation(key, () => this.createOrResume(scope, peerId, senderId, replyTarget));
   }
@@ -545,7 +557,7 @@ export class SessionManager {
       this.logger.info(`using native agent: key=${key} sessionId=${sessionId}`);
     } else {
       if (!this.freshSessionKeys.has(key) && (this.conversations?.store.get(key)?.currentSessionId || this.modelResolver.getSessionId(key))) {
-        throw new Error('原会话不存在，当前映射保持不变。请核对会话存储后重试。');
+        throw new Error('原会话不存在，当前映射和旧关联保持不变。请恢复原会话存储后重试，或明确发送 /new 开始新会话；不会自动创建空会话。');
       }
       const composed = await this.composePreset(this.getEffectivePresetByKey(key));
       agentPreset = composed.agentPreset;
@@ -614,6 +626,7 @@ export class SessionManager {
 
   /** Create a fresh native Session; null clears its workspace binding, undefined inherits it. */
   async replaceSession(scope: ChatScope, peerId: string, workspaceId?: string | null, selection?: { presetId: string; assertCurrent: () => void }): Promise<SessionRecord> {
+    this.conversations?.assertMigrationReady();
     const key = this.sessionKey(scope, peerId);
     return this.withPeerOperation(key, async () => {
       selection?.assertCurrent();

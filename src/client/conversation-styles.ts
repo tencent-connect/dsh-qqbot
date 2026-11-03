@@ -217,6 +217,18 @@ export function installConversationStyles(): void {
 .imqq-selectValue { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imqq-select svg { flex: none; }
 .imqq-selectMenu { max-width: min(520px, calc(100vw - 24px)); }
+.imqq-permissionTrigger { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 220px; height: 28px; padding: 0 4px 0 8px; border: none; border-radius: var(--dsw-radius-sm); background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px; font-weight: 500; cursor: pointer; }
+.imqq-permissionTrigger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }
+.imqq-permissionTrigger:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary)); }
+.imqq-permissionTrigger:disabled { color: var(--dsw-alias-label-dimmed); cursor: default; }
+.imqq-permissionIcon, .imqq-permissionChevron { display: inline-flex; flex: none; }
+.imqq-permissionIcon svg { width: 14px; height: 14px; }
+.imqq-permissionLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imqq-permissionChevron { color: var(--dsw-alias-label-caption); transition: transform 120ms ease; }
+.imqq-permissionChevron[data-open] { transform: rotate(180deg); }
+.imqq-permissionOption { display: inline-flex; align-items: center; gap: 4px; }
+.imqq-permissionBadge { color: var(--dsw-alias-label-tertiary); font-size: 8px; line-height: 10px; font-weight: 500; }
+@container (max-width:460px) { .imqq-permissionTrigger:has(.imqq-permissionIcon) .imqq-permissionLabel { display: none; } }
 .imqq-selectChoice { display: flex; flex-direction: column; gap: 2px; white-space: normal; overflow-wrap: anywhere; }
 .imqq-selectDescription { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 1.5; }
 .imqb2-selector-head > .imqq-selectAnchor { width: min(65%, 360px); }
@@ -230,22 +242,40 @@ export function installConversationStyles(): void {
 .imqc-advanced { border-top: 1px solid var(--dsw-alias-border-l2); padding-block: 14px; }
 .imqc-advanced > summary { cursor: pointer; color: var(--dsw-alias-label-secondary); font-weight: 500; }
 .imqc-advanced > summary:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 3px; }
-.imqc-saveBar { position: sticky; bottom: var(--dsh-composer-height, 0px); z-index: 1; background: var(--dsw-alias-bg-base); border-top: 1px solid var(--dsw-alias-border-l2); padding: 12px 0; }
-.imqc-saveBar > .imqc-hint { width: 100%; }
+.imqc-saveBar { position: sticky; bottom: var(--dsh-composer-height, 0px); z-index: 1; background: var(--dsw-alias-bg-base); border-top: 1px solid var(--dsw-alias-border-l2); padding: 12px 0; justify-content: flex-end; flex-wrap: nowrap; gap: 8px; }
 .imqc-historyRow { display: grid; gap: 5px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); padding: 12px; color: inherit; background: var(--dsw-alias-bg-layer-1); font: inherit; cursor: pointer; }
 .imqc-historyRow:hover { background: var(--dsw-alias-bg-layer-2); }
 .imqc-currentBadge { font-size: 11px; color: var(--dsw-alias-state-success-primary); }
 .imqc-partDetails { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
 .imqc-partDetails > summary { cursor: pointer; }
 .imqc-receiptId { display: block; overflow-wrap: anywhere; font-size: 11px; }
-.imqc-timelineRows { display: flex; flex-direction: column; gap: 12px; margin: 14px 0; }
-.imqc-timelineMessage { max-width: 85%; width: fit-content; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); display: flex; align-items: flex-start; gap: 8px; }
+.imqc-timeline { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.imqc-timelineToolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.imqc-timelineSearch { display: flex; flex: 1 1 260px; align-items: center; gap: 8px; min-width: 0; }
+.imqc-timelineSearchInput { flex: 1; min-width: 0; }
+.imqc-timelineSearch > button { flex: none; }
+.imqc-timelinePaging { display: flex; justify-content: flex-end; margin-left: auto; }
+.imqc-timelineRows { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.imqc-timelineMessage { max-width: 85%; width: fit-content; min-width: 0; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-bg-layer-1); }
 .imqc-timelineMessage[data-failed] { border-color: var(--dsw-alias-state-error-primary); }
+.imqc-messageHeader { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 4px; }
+.imqc-messageHeader > .imqc-messageMeta { display: flex; flex: 1; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 12px; min-width: 0; }
+.imqc-messageWho { color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.imqc-messageWhen { flex: none; color: var(--dsw-alias-label-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.imqc-messageAside { display: flex; flex: none; align-items: center; }
+.imqc-messageAside > .imqc-jumpTurn { min-width: 28px; padding-inline: 4px; color: var(--dsw-alias-label-tertiary); }
+.imqc-messageBody { min-width: 0; overflow-wrap: anywhere; }
+.imqc-messageBody > .imqc-messageWarn { padding: 0; margin: 6px 0 0; }
+.imqc-msgInfo { margin-top: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.imqc-msgInfo > summary { cursor: pointer; }
+.imqc-msgInfo > summary:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 3px; border-radius: var(--dsw-radius-sm); }
+.imqc-msgInfoBody { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--dsw-alias-border-l2); }
+.imqc-msgInfoBody > p { margin: 4px 0; padding: 0; }
 .imqc-attachRow { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
 .imqc-attachChip { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
-.imqc-attachImage { max-width: 260px; max-height: 260px; border-radius: var(--dsw-radius-md); display: block; }
-.imqc-attachVideo { max-width: 320px; border-radius: var(--dsw-radius-md); display: block; }
-.imqc-attachAudio { width: 260px; }
+.imqc-attachImage { max-width: min(260px, 100%); max-height: 260px; border-radius: var(--dsw-radius-md); display: block; }
+.imqc-attachVideo { max-width: min(320px, 100%); border-radius: var(--dsw-radius-md); display: block; }
+.imqc-attachAudio { width: 260px; max-width: 100%; }
 .imqc-attachFile { font-size: 12px; color: var(--dsw-alias-label-link, var(--dsw-alias-label-secondary)); word-break: break-all; }
 .imqc-timelineMessage[data-direction=outbound] { align-self: flex-end; background: var(--dsw-alias-bg-layer-2); }
 .imqq-settingsModal { width: min(1000px, calc(100vw - 32px)); height: min(900px, calc(100dvh - 32px)); }
@@ -253,9 +283,10 @@ export function installConversationStyles(): void {
 .imqq-settingsContent { min-height: 0; }
 .imqq-settingsContent > :last-child { min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .imqq-settingsModal .imqc-settingsView { height: auto; overflow: visible; padding: 0; }
-.imqq-settingsModal .imqc-saveBar { bottom: 0; }
+.imqq-settingsModal .imqc-saveBar { bottom: 0; background: var(--dsw-alias-bg-layer-2); }
 .imqq-settingsModal .imqc-peerSettings { padding-bottom: 8px; }
 @media(max-width:600px) { .imqc-timelineMessage { max-width: 96%; } .imqc-settingsView { padding: 12px; padding-bottom: calc(var(--dsh-composer-height, 0px) + 16px); } .imqc-tool { grid-template-columns: minmax(0, 1fr) 76px; } }
+@media(max-width:420px) { .imqc-timelinePaging { width: 100%; justify-content: center; } .imqc-messageHeader { gap: 6px; } }
 `;
   if (!style.isConnected) document.head.appendChild(style);
 }

@@ -14,6 +14,7 @@ export function newCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: ['new', 'reset', 'clear'],
     category: 'agent',
+    authority: 'manage',
     scope: 'all',
     description: '开始新会话（/reset、/clear 同义；保留模型与预设覆盖）',
     handler: async (cmdCtx) => {
@@ -29,6 +30,7 @@ export function compactCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'compact',
     category: 'agent',
+    authority: 'manage',
     scope: 'all',
     description: '压缩会话历史（摘要替换旧记录，保留上下文）',
     handler: async (cmdCtx) => {

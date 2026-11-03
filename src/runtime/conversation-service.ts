@@ -12,7 +12,7 @@ import { WorkspaceId, type Workspace } from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-permission-presets';
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy';
 import { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval';
-import { ConversationStore } from '../conversations/index.ts';
+import { ConversationConflictError, ConversationStore } from '../conversations/index.ts';
 import { defaultPolicy, validatePolicy, validatePolicyTools, catalogTools, installPolicy, toolCatalogEntry } from '../policy/index.ts';
 import type { ConversationEntry, ConversationPolicy, ConversationSnapshot, SlashCommandDescriptor, ToolCatalogEntry, DeliveryRecord, GroupMessageRecord } from '../shared/conversation-protocol.ts';
 import { describeCommands } from '../commands/index.ts';
@@ -75,26 +75,26 @@ export class ConversationService {
   readonly pairing = new PairingService();
   private readonly deliveryQueue = new ConversationQueue();
   private sender?: QQBotSender;
-  private readonly commandAuthority = new AsyncLocalStorage<{scope: ChatScope; peerId: string; actor: string; webOwner: boolean; stopping: boolean}>();
-  withCommandAuthority<T>(scope: ChatScope, peerId: string, actor: string, webOwner: boolean, stopping: boolean, action: () => Promise<T> | T): Promise<T> | T { return this.commandAuthority.run({scope, peerId, actor, webOwner, stopping}, action); }
+  private readonly commandAuthority = new AsyncLocalStorage<{scope: ChatScope; peerId: string; actor: string; webOwner: boolean}>();
+  withCommandAuthority<T>(scope: ChatScope, peerId: string, actor: string, webOwner: boolean, action: () => Promise<T> | T): Promise<T> | T { return this.commandAuthority.run({scope, peerId, actor, webOwner}, action); }
   assertCommandAuthority(scope: ChatScope, peerId: string): void {
     const caller = this.commandAuthority.getStore(); if (!caller) return;
     if (caller.scope !== scope || caller.peerId !== peerId || !this.admitted(scope, peerId)) throw new Error('命令的对话权限已变更');
-    if (!caller.webOwner && !(caller.stopping ? this.canStop(scope, peerId, caller.actor) : this.canManage(scope, peerId, caller.actor))) throw new Error('命令操作者的权限已撤销');
+    if (!caller.webOwner && !this.isOwner(caller.actor)) throw new Error('命令操作者的权限已撤销');
   }
 
   constructor(readonly ctx: Context, readonly manager: SessionManager, readonly config: ImQQBotConfig, readonly logger: Logger, dataDir = PLUGIN_HOME) {
     const operationDir = join(dataDir, `operations-${createHash('sha256').update(config.appId).digest('hex')}`);
     this.operations = new QQOperations(operationDir);
     this.sessionOperations = new SessionOperations(operationDir);
-    this.store = new ConversationStore(dataDir, config.appId, { defaultPolicy: () => {
+    this.store = new ConversationStore(dataDir, config.appId, { legacyOwnerIds: () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : [], defaultPolicy: () => {
       const policy = defaultPolicy('chat', resolveAgentCwd(config.cwd));
       policy.requireMention = config.requireMention;
       // 不限制模型/预设：空数组表示"不限"，会话设置里用户可自由选择。
       policy.allowedModels = [];
       policy.allowedPresets = [];
       return policy;
-    }, defaultSettings: () => ({ ...defaultQQAgentSettings(), preset: config.preset?.trim() || '', model: config.provider && config.model ? { provider: config.provider, model: config.model } : null, cwd: config.cwd || '', promptGroup: config.groupPrompt || '', promptDirect: config.directPrompt || '' }),
+    }, defaultSettings: () => ({ ...defaultQQAgentSettings(), preset: config.preset?.trim() || '', model: config.provider && config.model ? { provider: config.provider, model: config.model } : null, cwd: config.cwd ? resolveAgentCwd(config.cwd) : '', promptGroup: config.groupPrompt || '', promptDirect: config.directPrompt || '' }),
       // Keep model === null as "inherit host default"; the default reasoning effort rides on settings.reasoningEffort.
       resolveSettings: settings => ({ ...settings, preset: settings.preset || manager.getDefaultPreset?.() || '', cwd: settings.cwd || resolveAgentCwd(config.cwd) }),
       projectSettings: entry => ({ ...defaultQQAgentSettings(), preset: manager.getEffectivePreset?.(entry.scope, entry.peerId) || manager.getDefaultPreset?.() || config.preset || '', model: manager.getEffectiveModel?.(entry.scope, entry.peerId) ?? manager.getDefaultModel(), cwd: entry.policy.cwd || resolveAgentCwd(config.cwd), promptGroup: config.groupPrompt || '', promptDirect: config.directPrompt || '', execution: entry.policy.nativeTools === true ? { kind: 'native', permission: entry.policy.resources.sandbox } : { kind: 'custom', permission: entry.policy.resources.sandbox, tools: Object.entries(entry.policy.tools).filter(([, decision]) => decision !== 'deny').map(([id]) => id) } }),
@@ -130,7 +130,11 @@ export class ConversationService {
     });
   }
   setSender(sender: QQBotSender): void { this.sender = sender; }
+  assertMigrationReady(): void {
+    if (this.store.legacyMigrationBlocked()) throw new Error('旧版 QQ 偏好迁移受阻。请先恢复偏好文件并重启；原文件和会话关联保持不变，未自动创建会话。');
+  }
   admitted(scope: ChatScope, peerId: string): boolean {
+    if (this.store.legacyMigrationBlocked()) return false;
     const mode = scope === 'group' ? this.config.access.groupMode : this.config.access.c2cMode;
     const allow = scope === 'group' ? this.config.access.groupAllow : this.config.access.c2cAllow;
     const enabled = this.store.get(this.store.key(scope, peerId))?.policy.receiveEnabled !== false;
@@ -373,7 +377,6 @@ export class ConversationService {
     return { ok: persisted, message: persisted ? '已从白名单移除' : '写入失败，请手动移除' };
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }
-  slashAllowed(scope: ChatScope, peerId: string, actor?: string): boolean { return this.isOwner(actor) || this.entry(scope, peerId).settings?.slashCommands !== false; }
   canManage(scope: ChatScope, peerId: string, actor?: string): boolean {
     if (!actor) return false;
     return this.isOwner(actor) || (scope === 'c2c' ? actor === peerId : this.entry(scope, peerId).policy.controllers.includes(actor));
@@ -410,7 +413,7 @@ export class ConversationService {
     if (this.attached.has(record.agent)) { this.store.bindSession(entry.key, record.sessionId, workspaceId, record.agent.session.header?.cwd, presetId); return; }
     if (!this.activationFloor.has(record.sessionId)) this.activationFloor.set(record.sessionId, nativeSession(record).snapshotEvents().length - 1);
     this.refreshCatalog(record.agent);
-    this.applyExecutionPolicy(record, entry.policy, !entry.sessions.some(row => row.sessionId === record.sessionId));
+    if (entry.legacySessionAssociation?.sessionId !== record.sessionId) this.applyExecutionPolicy(record, entry.policy, !entry.sessions.some(row => row.sessionId === record.sessionId));
     this.policyDisposers.set(record.sessionId, installPolicy(record.agent.ctx, {
       agentId: record.sessionId,
       getPolicy: () => this.effectivePolicy(entry.key, record.sessionId),
@@ -429,7 +432,8 @@ export class ConversationService {
     const permissionAllowed = record ? this.permissionAllowed(record) : policy.nativeTools === false ? policy.allowedPermissions.includes(permission) : !!permissionSandbox(policy.resources.sandbox);
     const tools = Object.fromEntries(Object.entries(policy.tools).map(([id, decision]) => [id, permissionAllowed ? decision : 'deny']));
     tools.qqbot_send_file = 'deny';
-    return { ...policy, permission, receiveEnabled: this.admitted(entry.scope, entry.peerId) && permissionAllowed, resources: { ...policy.resources, sandbox: record ? this.ctx.get('sandboxPolicy')?.overrideOf(nativeSession(record)) ?? policy.resources.sandbox : policy.resources.sandbox }, tools };
+    const sandbox = record ? permissionSandbox(this.sandbox(record)) ?? policy.resources.sandbox : policy.resources.sandbox;
+    return { ...policy, permission, receiveEnabled: this.admitted(entry.scope, entry.peerId) && permissionAllowed, resources: { ...policy.resources, sandbox }, tools };
   }
   private refreshCatalog(agent: DshAgent): void {
     try {
@@ -498,7 +502,7 @@ export class ConversationService {
   private applyExecutionPolicy(record: SessionRecord, policy: ConversationPolicy, force = false): void {
     // A restored native selection is authoritative; unrelated policy edits must
     // not reset it to the creation default or change Host-wide defaults.
-    if (!force && record.agent.session.snapshotEvents().some(event => event.type === 'permission/preset' || event.type === 'sandbox/mode')) return;
+    if (!force && (policy.nativeTools !== false || record.agent.session.snapshotEvents().some(event => event.type === 'permission/preset' || event.type === 'sandbox/mode'))) return;
     const permissions = this.ctx.get('permissionPresets');
     if (permissions?.catalog().options.some(option => option.value === policy.permission)) permissions.set(nativeSession(record), policy.permission);
     else {
@@ -631,13 +635,13 @@ export class ConversationService {
     await this.validateAgentSettings(settings);
     this.store.updateDefaults(expectedVersion, settings);
   }
-  private async validateAgentSettings(settings: QQAgentSettings): Promise<void> {
-    if (settings.model) await this.manager.validateModelSetting(settings.model);
-    if (settings.preset) {
+  private async validateAgentSettings(settings: QQAgentSettings, options: { sessionControls?: boolean; tools?: boolean } = {}): Promise<void> {
+    if (options.sessionControls !== false && settings.model) await this.manager.validateModelSetting(settings.model);
+    if (options.sessionControls !== false && settings.preset) {
       const presets = await this.manager.listPresets();
       if (!presets.some(preset => preset.id === settings.preset)) throw new Error('Agent 预设当前不可用，请刷新后重试');
     }
-    if (settings.execution.kind === 'custom') {
+    if (options.tools !== false && settings.execution.kind === 'custom') {
       for (const id of settings.execution.tools) {
         const tool = this.catalogs.get(id);
         if (!tool?.available) throw new Error(`工具 ${id} 当前不可用`);
@@ -651,24 +655,72 @@ export class ConversationService {
     if (this.busy(key)) throw new Error('会话正在生成，请停止后再清空消息记录。');
     this.store.clearRecords(key);
   }
-  async saveSettings(key: string, expectedVersion: number, input: unknown, alias: string, receiveEnabled: boolean): Promise<string | undefined> {
+  async savePeerSettings(key: string, expectedVersion: number, input: unknown): Promise<string | undefined> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('QQ 会话设置补丁无效');
+    const allowed = new Set(['alias', 'receiveEnabled', 'promptGroup', 'promptDirect', 'toolScope', 'permission', 'nativePermission', 'expectedPermission']);
+    if (Object.keys(input).some(field => !allowed.has(field))) throw new Error('模型、预设和工作区请在原生输入框中设置');
+    const before = this.requireEntry(key);
+    if (!before.settings) throw new Error('QQ 会话设置不可用');
+    const currentPermission = (): string | null => {
+      const session = before.currentSessionId ? this.ctx.get('sessions')?.get(SessionId(before.currentSessionId)) : undefined;
+      return session ? this.ctx.get('permissionPresets')?.current(session) ?? this.persistedPermission(session.snapshotEvents()) ?? null : null;
+    };
+    const rawPermission = currentPermission();
+    const session = before.currentSessionId ? this.ctx.get('sessions')?.get(SessionId(before.currentSessionId)) : undefined;
+    const sandbox = permissionSandbox(rawPermission ?? '') ?? (session ? permissionSandbox(this.ctx.get('sandboxPolicy')?.resolve({ session }).mode ?? '') : undefined) ?? before.settings.execution.permission;
+    let settings = { ...before.settings, execution: { ...before.settings.execution, permission: sandbox } };
+    for (const field of ['promptGroup', 'promptDirect'] as const) if (field in input) {
+      const value: unknown = Reflect.get(input, field);
+      if (typeof value !== 'string') throw new Error('补充提示词无效');
+      settings = { ...settings, [field]: value };
+    }
+    if ('toolScope' in input) {
+      const scope = input.toolScope;
+      if (!scope || typeof scope !== 'object' || Array.isArray(scope) || !('kind' in scope)) throw new Error('工具范围无效');
+      if (scope.kind === 'native' && Object.keys(scope).every(field => field === 'kind')) settings.execution = { kind: 'native', permission: sandbox };
+      else if (scope.kind === 'custom' && 'tools' in scope && Array.isArray(scope.tools) && scope.tools.every((id): id is string => typeof id === 'string')
+        && Object.keys(scope).every(field => field === 'kind' || field === 'tools')) settings.execution = { kind: 'custom', permission: sandbox, tools: scope.tools };
+      else throw new Error('工具范围无效');
+    }
+    const selectedPermission = 'permission' in input ? permissionSandbox(typeof input.permission === 'string' ? input.permission : '') : undefined;
+    if ('permission' in input && (!selectedPermission || !('expectedPermission' in input) || input.expectedPermission !== rawPermission)) throw new ConversationConflictError('原生执行权限已变化，请核对后重新保存');
+    let nativePreset: string | undefined;
+    if ('nativePermission' in input) {
+      if ('permission' in input || typeof input.nativePermission !== 'string' || !this.ctx.get('permissionPresets')?.catalog().options.some(option => option.value === input.nativePermission)) throw new Error('该原生权限预设当前不可用');
+      if (!('expectedPermission' in input) || input.expectedPermission !== rawPermission) throw new ConversationConflictError('原生执行权限已变化，请核对后重新保存');
+      nativePreset = input.nativePermission;
+    }
+    if (selectedPermission) settings.execution.permission = selectedPermission;
+    if ('alias' in input && typeof input.alias !== 'string') throw new Error('QQ 备注无效');
+    if ('receiveEnabled' in input && typeof input.receiveEnabled !== 'boolean') throw new Error('接收设置无效');
+    return this.saveSettings(key, expectedVersion, settings,
+      'alias' in input && typeof input.alias === 'string' ? input.alias : before.alias,
+      'receiveEnabled' in input && typeof input.receiveEnabled === 'boolean' ? input.receiveEnabled : before.policy.receiveEnabled !== false,
+      { sessionControls: false, tools: 'toolScope' in input, applyNativePermission: selectedPermission !== undefined || nativePreset !== undefined,
+        ...(nativePreset === undefined ? {} : { nativePreset }),
+        assertCurrent: () => { if (currentPermission() !== rawPermission) throw new ConversationConflictError('原生执行权限已变化，请核对后重新保存'); } });
+  }
+  async saveSettings(key: string, expectedVersion: number, input: unknown, alias: string, receiveEnabled: boolean, options: { sessionControls?: boolean; tools?: boolean; applyNativePermission?: boolean; nativePreset?: string; assertCurrent?: () => void } = {}): Promise<string | undefined> {
     const before = this.requireEntry(key);
     this.assertCommandAuthority(before.scope, before.peerId);
     if (this.busy(key)) throw new Error('会话正在生成，请停止后再保存设置。');
     const settings = validateQQAgentSettings(input);
     const preview = this.store.previewSettings(key, expectedVersion, settings, alias, receiveEnabled);
     const executionChanged = JSON.stringify(before.settings?.execution) !== JSON.stringify(settings.execution);
-    await this.validateAgentSettings(settings);
+    await this.validateAgentSettings(settings, options);
     const changedModel = JSON.stringify(before.settings?.model) !== JSON.stringify(settings.model)
       || (settings.model === null && before.settings?.reasoningEffort !== settings.reasoningEffort);
     const route = changedModel ? await this.manager.validateModelSetting(settings.model ?? {
       ...this.manager.getDefaultModel(), ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
     }) : undefined;
     const record = before.currentSessionId ? await this.manager.restoreExisting(before.scope, before.peerId) : undefined;
+    if (options.nativePreset !== undefined && !record) throw new Error('当前原生会话尚未加载，请重新打开会话后重试');
+    const applyNativePermission = options.applyNativePermission ?? executionChanged;
     if (record?.agent.status === 'running' || record?.agent.inbox?.nextTurn.length || record?.agent.inbox?.nextStep.length) throw new Error('会话正在生成或排队，请停止后再保存');
     if (route && record && !record.agent.model?.select) throw new Error('当前宿主不支持原生模型选择，设置保持不变。');
     const apply = async (): Promise<void> => {
-      if (this.requireEntry(key).policy.version !== expectedVersion) throw new Error('配置已更新，请刷新后重试');
+      options.assertCurrent?.();
+      if (this.requireEntry(key).policy.version !== expectedVersion) throw new ConversationConflictError('配置已更新，请刷新后重试');
       this.store.previewSettings(key, expectedVersion, settings, alias, receiveEnabled);
       const oldRoute = record?.agent.model?.current() ?? record?.modelRoute;
       const oldSandbox = record ? this.sandbox(record) : undefined;
@@ -679,11 +731,20 @@ export class ConversationService {
         ?? this.ctx.get('approval')?.config.policy ?? 'ask' : undefined;
       try {
         if (record && route) { record.agent.model?.select?.(route); record.modelRoute = route; }
-        if (record && executionChanged) this.applyExecutionPolicy(record, preview.policy, true);
+        if (record && applyNativePermission) {
+          if (options.nativePreset !== undefined) {
+            const permissions = this.ctx.get('permissionPresets');
+            if (!permissions?.catalog().options.some(option => option.value === options.nativePreset)) throw new Error('该原生权限预设当前不可用');
+            permissions.set(nativeSession(record), options.nativePreset);
+            const mode = permissionSandbox(this.sandbox(record));
+            if (!mode) throw new Error('原生权限的执行范围无法确认，设置未保存');
+            settings.execution.permission = mode;
+          } else this.applyExecutionPolicy(record, preview.policy, true);
+        }
         this.store.updateSettings(key, expectedVersion, settings, alias, receiveEnabled);
       } catch (error) {
         if (record && route && oldRoute) { record.agent.model?.select?.(oldRoute); record.modelRoute = oldRoute; }
-        if (record && executionChanged) {
+        if (record && applyNativePermission) {
           const session = nativeSession(record);
           const permissions = this.ctx.get('permissionPresets');
           if (oldPermission && oldPermission !== 'custom' && permissions?.catalog().options.some(option => option.value === oldPermission)) permissions.set(session, oldPermission);
@@ -703,9 +764,16 @@ export class ConversationService {
     const nextSession = before.settings?.cwd !== settings.cwd || before.settings?.preset !== settings.preset;
     return [nextSession ? '设置已保存。补充提示词立即生效；工作目录和 Agent 预设将在新会话生效，当前上下文保留。可点击新会话立即应用。' : '', receiveEnabled && !this.admitted(before.scope, before.peerId) ? '此对话仍被全局访问规则阻止。请使用启用对话操作配置访问规则，或在连接设置中允许此 QQ 标识。' : ''].filter(Boolean).join('\n') || undefined;
   }
-  recordModelSetting(scope: ChatScope, peerId: string, model: QQAgentSettings['model']): void {
+  recordModelSetting(scope: ChatScope, peerId: string, model: QQAgentSettings['model'], reset = false): void {
     const entry = this.entry(scope, peerId);
-    if (entry.settings) this.store.updateSettings(entry.key, entry.policy.version, { ...entry.settings, model }, entry.alias, entry.policy.receiveEnabled !== false);
+    if (!entry.settings) return;
+    let settings = { ...entry.settings, model };
+    if (reset) {
+      const defaults = this.store.defaults().settings;
+      const { reasoningEffort: _previous, ...base } = entry.settings;
+      settings = { ...base, model: defaults.model ? model : null, ...(defaults.reasoningEffort ? { reasoningEffort: defaults.reasoningEffort } : {}) };
+    }
+    this.store.updateSettings(entry.key, entry.policy.version, settings, entry.alias, entry.policy.receiveEnabled !== false);
   }
   recordPresetSetting(scope: ChatScope, peerId: string, preset: string): void {
     const entry = this.entry(scope, peerId);
@@ -859,7 +927,18 @@ export class ConversationService {
   private async settleTurn(record: SessionRecord, turn: number): Promise<void> {
     const session = nativeSession(record);
     if (!await this.ctx.get('sessions')?.flush(session)) throw new Error('QQ 轮次尚未确认持久化');
-    const verdict = classifyTurn(session.snapshotEvents(), turn, this.operations.forSession(record.sessionId), this.operations.receiptsForSession(record.sessionId));
+    const events = session.snapshotEvents();
+    const end = events.find(event => event.type === 'turn/end' && event.data.turn === turn);
+    if (end?.type === 'turn/end' && end.data.reason.kind === 'error') {
+      const inputs = classifyTurnInputs(events.filter(event => event.seq < end.seq), turn, this.operations.forSession(record.sessionId), this.operations.receiptsForSession(record.sessionId));
+      if (inputs.kind !== 'qq' || inputs.inputSeq <= (this.activationFloor.get(record.sessionId) ?? -1)) return;
+      const operation = this.operations.lookup(inputs.operationId);
+      if (!operation || !this.authorized(operation)) return;
+      const id = `error-${createHash('sha256').update(`${record.sessionId}:${operation.generation}:${turn}`).digest('hex')}`;
+      await this.deliver(operation.conversationKey, id, '本轮回复失败，未发送未完成的回答。请在 DSH 会话轨迹中查看具体错误，再决定是否重新提问。', operation.target, () => this.authorized(operation), 'qq', { sourceSessionId: record.sessionId, sourceMessageId: operation.message.id, turnId: String(turn), provenance: 'automatic' });
+      return;
+    }
+    const verdict = classifyTurn(events, turn, this.operations.forSession(record.sessionId), this.operations.receiptsForSession(record.sessionId));
     if (verdict.kind !== 'qq' || verdict.inputSeq <= (this.activationFloor.get(record.sessionId) ?? -1)) return;
     const operation = this.operations.lookup(verdict.operationId);
     if (!operation || !this.authorized(operation)) return;
@@ -869,7 +948,7 @@ export class ConversationService {
   async sweepOperationRetention(): Promise<void> {
     await this.operationRetention.sweep(this.ctx.get('sessionPersistence'), this.operations, key => this.operationCutoff(key), operation => this.protectedOperation(operation), this.expiredOperationBodies());
   }
-  private operationCutoff(key: string): number { const days = this.store.get(key)?.recording?.retentionDays ?? 7; return days === 0 ? -Infinity : Date.now() - days * 86_400_000; }
+  private operationCutoff(key: string): number { const days = this.store.get(key)?.recording?.retentionDays ?? 0; return days === 0 ? -Infinity : Date.now() - days * 86_400_000; }
   private expiredOperationBodies(): (operation: QQOperation) => boolean {
     const cache = new Map<string, ReadonlySet<string>>();
     return operation => {

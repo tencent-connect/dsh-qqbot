@@ -13,6 +13,8 @@ import type { DshAgent, SessionRecord } from '../session/types.ts';
 import type { ReplyTarget } from '../types.ts';
 import { wasBotMentioned } from '../gateway/conversation-gate.ts';
 import { UNEXECUTED_TOOL_REQUEST_NOTICE } from '../transport/model-reply.ts';
+import type { SlashCommandHandlerContext } from '@tencent-connect/qqbot-nodejs';
+import { buildCommandList } from '../commands/index.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -71,6 +73,35 @@ function fixture() {
 }
 
 type Fixture = ReturnType<typeof fixture>;
+
+describe('QQ failure notifications', () => {
+  it('reports a verified QQ failure once without exposing provider details or partial output', async () => {
+    const f = fixture(); f.config.access.groupMode = 'open';
+    const input = enqueue(f); begin(f);
+    await observeLast(f); await input.admitted;
+    f.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'private provider diagnostic' } } });
+    await observeLast(f); await observeLast(f);
+    expect(f.sendMarkdown).toHaveBeenCalledExactlyOnceWith(f.record.replyTarget, expect.stringContaining('本轮回复失败'));
+    expect(f.sendMarkdown.mock.calls[0]?.[1]).not.toContain('private provider diagnostic');
+  });
+  it('keeps Web failures private', async () => {
+    const f = fixture(); f.config.access.groupMode = 'open';
+    queueWeb(f); begin(f);
+    f.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'web diagnostic' } } });
+    await observeLast(f);
+    expect(f.sendMarkdown).not.toHaveBeenCalled();
+  });
+  it('does not report an error to QQ after a Web steer changes the turn', async () => {
+    const f = fixture(); f.config.access.groupMode = 'open';
+    const input = enqueue(f); begin(f); await observeLast(f); await input.admitted;
+    const web = queueWeb(f, user('private Web steer'), 'next-step');
+    f.nextStep.shift(); f.session.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] });
+    f.session.append('user/message', web, { surfaceOp: 'append' });
+    f.session.append('turn/end', { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN', message: 'mixed diagnostic' } } });
+    await observeLast(f);
+    expect(f.sendMarkdown).not.toHaveBeenCalled();
+  });
+});
 
 function enqueue(f: Fixture, message = user('QQ question'), messageId = 'incoming-1', cutoff = 0, backgroundRefs: string[] = []) {
   const admitted = f.service.enqueueQQ(f.record, message, { messageId, senderId: 'actor' }, cutoff, backgroundRefs);
@@ -226,10 +257,13 @@ describe('native QQ turn delivery', () => {
   it.each([
     { kind: 'aborted', reason: { kind: 'user' } },
     { kind: 'error', error: { code: 'UNKNOWN', message: 'Failure' } },
-  ] satisfies TurnEndReason[])('does not send a $kind turn', async reason => {
+  ] satisfies TurnEndReason[])('does not send a partial answer for a $kind turn', async reason => {
     const f = fixture(); const pending = enqueue(f); await enter(f, pending);
     answer(f, 'Partial result'); await finish(f, 1, reason);
-    expect(f.sendMarkdown).not.toHaveBeenCalled();
+    if (reason.kind === 'error') {
+      expect(f.sendMarkdown).toHaveBeenCalledExactlyOnceWith(f.record.replyTarget, expect.stringContaining('本轮回复失败'));
+      expect(f.sendMarkdown.mock.calls[0]?.[1]).not.toContain('Partial result');
+    } else expect(f.sendMarkdown).not.toHaveBeenCalled();
   });
 
   it('rejects unconfirmed input without advancing group context or sending', async () => {
@@ -351,6 +385,21 @@ describe('native QQ turn delivery', () => {
 });
 
 describe('channel membership and ownership', () => {
+  it('keeps an active QQ initiator able to answer and approve while denying every slash command', async () => {
+    const f = fixture(); f.config.access.groupMode = 'open';
+    const entry = f.service.requireEntry(f.record.sessionKey);
+    f.service.store.updatePolicy(entry.key, entry.policy.version, { ...entry.policy, approvers: ['actor'] });
+    await enter(f, enqueue(f));
+    expect(f.service.isOwner('actor')).toBe(false);
+    expect(f.service.canAnswer('group', 'g', 'actor')).toBe(true);
+    expect(f.service.canApprove('group', 'g', 'actor')).toBe(true);
+    expect(f.service.canStop('group', 'g', 'actor')).toBe(true);
+    const commands = buildCommandList({ manager: f.manager, config: f.config, logger: f.logger });
+    const input = { message: { kind: 'group', senderId: 'actor', groupOpenid: 'g' }, command: { raw: '' } } as unknown as SlashCommandHandlerContext;
+    for (const command of commands) expect(await command.handler(input)).toBe('斜杠命令仅机器人超管可用。');
+    expect(f.record.agent.cancel).not.toHaveBeenCalled();
+  });
+
   it('keeps group controllers and approvers separate and does not trust other groups', () => {
     const { service } = fixture(); const group = service.entry('group', 'g');
     service.store.updatePolicy(group.key, group.policy.version, { ...group.policy, controllers: ['controller'], approvers: ['approver'] });

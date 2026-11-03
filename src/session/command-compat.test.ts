@@ -5,6 +5,8 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigSchema } from '../config.ts';
 import type { ModelRoute } from '../model/types.ts';
+import type { ConversationService } from '../runtime/conversation-service.ts';
+import { defaultQQAgentSettings, type QQAgentSettings } from '../shared/agent-settings.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { SessionManager } from './session-manager.ts';
 import type { AgentPresetsLike, DshAgent, DshAgentHandle, DshAgentRegistry, SessionEventLike } from './types.ts';
@@ -13,6 +15,7 @@ const state = vi.hoisted(() => ({
   overrides: new Map<string, ModelRoute>(),
   presets: new Map<string, string>(),
   ids: new Map<string, string>(),
+  hostDefaults: new Map<string, ModelRoute>(),
   validate: vi.fn<(route: ModelRoute, current?: ModelRoute) => Promise<ModelRoute>>(),
 }));
 
@@ -20,6 +23,7 @@ vi.mock('../model/model-resolver.ts', () => ({
   ModelResolver: class {
     constructor(_ctx: unknown, private config: { provider?: string; model?: string }) {}
     resolveDefault() { return { provider: this.config.provider || 'host', model: this.config.model || 'default' }; }
+    resolveHostDefault() { return state.hostDefaults.get('route') ?? this.resolveDefault(); }
     getEffectiveRoute(key: string) { return state.overrides.get(key) ?? this.resolveDefault(); }
     getResumeRoute(key: string) { return this.getEffectiveRoute(key); }
     getOverride(key: string) { return state.overrides.get(key); }
@@ -145,13 +149,81 @@ function harness(options: { query?: boolean } = {}) {
 
 beforeEach(() => {
   state.overrides.clear(); state.presets.clear(); state.ids.clear();
+  state.hostDefaults.clear();
   state.validate.mockReset().mockImplementation(async (route) => {
     if (route.model === 'invalid') throw new Error('unknown model');
     return route;
   });
 });
 
+function conversationSettingsFixture(h: ReturnType<typeof harness>, defaults: QQAgentSettings, settings: QQAgentSettings) {
+  const entry: { settings: QQAgentSettings; currentSessionId?: string } = { settings };
+  const service = {
+    store: { get: (key: string) => key === h.key() ? entry : undefined, defaults: () => ({ settings: defaults }) },
+    assertMigrationReady: () => {}, ensure: () => entry, cwd: () => '/offline/qq-workspace',
+    validateSelection: vi.fn(), assertCommandAuthority: () => {}, reset: () => {}, release: () => {},
+    attach: (record: { sessionId: string }) => { entry.currentSessionId = record.sessionId; },
+    recordModelSetting: (_scope: string, _peer: string, model: QQAgentSettings['model']) => { entry.settings = { ...entry.settings, model }; },
+    recordPresetSetting: (_scope: string, _peer: string, preset: string) => { entry.settings = { ...entry.settings, preset }; },
+  } as unknown as ConversationService;
+  h.manager.conversations = service;
+  return { entry, service };
+}
+
 describe('QQ command and Web default compatibility', () => {
+  it('resets a live model to QQ Web defaults rather than Host defaults and restores that selection after restart', async () => {
+    const h = harness({ query: true });
+    const hostDefault = { provider: 'host-a', model: 'model-a' };
+    const qqDefault = { provider: 'qq-b', model: 'model-b' };
+    state.hostDefaults.set('route', hostDefault);
+    const defaults = { ...defaultQQAgentSettings(), model: qqDefault };
+    const f = conversationSettingsFixture(h, defaults, { ...defaults, model: { provider: 'peer-c', model: 'model-c' } });
+    const record = await h.create();
+    await h.manager.clearModelOverride('c2c', 'peer');
+    expect(h.manager.getDefaultModel()).toEqual(hostDefault);
+    expect(record.agent.model?.current()).toEqual(qqDefault);
+    expect(f.entry.settings.model).toEqual(qqDefault);
+    expect(state.overrides.has(h.key())).toBe(false);
+    const sessionId = record.sessionId;
+    await h.manager.disposeAll();
+    const restarted = h.makeManager(); restarted.conversations = f.service;
+    const restored = await restarted.getOrCreate('c2c', 'peer', 'peer', h.target);
+    expect(restored.sessionId).toBe(sessionId);
+    expect(restored.agent.model?.current()).toEqual(qqDefault);
+    expect(restarted.getEffectiveModel('c2c', 'peer')).toEqual(qqDefault);
+    expect(h.agents.create).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an explicit inherited conversation model on Host defaults even when QQ Web defaults differ', () => {
+    const h = harness();
+    const hostDefault = { provider: 'host-a', model: 'model-a' };
+    const qqDefault = { provider: 'qq-b', model: 'model-b' };
+    state.hostDefaults.set('route', hostDefault);
+    const defaults = { ...defaultQQAgentSettings(), model: qqDefault };
+    conversationSettingsFixture(h, defaults, { ...defaults, model: null });
+    expect(h.manager.getQQDefaultModel()).toEqual(qqDefault);
+    expect(h.manager.getEffectiveModel('c2c', 'peer')).toEqual(hostDefault);
+  });
+
+  it('resets a live preset to QQ Web defaults and restores the fresh Session after restart', async () => {
+    const h = harness({ query: true });
+    const defaults = { ...defaultQQAgentSettings(), preset: 'qq-b' };
+    const f = conversationSettingsFixture(h, defaults, { ...defaults, preset: 'minimal' });
+    const original = await h.create();
+    const result = await h.manager.clearPresetOverride('c2c', 'peer');
+    expect(result).toMatchObject({ ok: true, presetId: 'qq-b' });
+    const reset = h.manager.getSessionRecord('c2c', 'peer');
+    expect(reset?.sessionId).not.toBe(original.sessionId);
+    expect(reset?.agentPreset).toBe('qq-b');
+    expect(f.entry.settings.preset).toBe('qq-b');
+    expect(h.manager.getDefaultPreset()).toBe('standard');
+    await h.manager.disposeAll();
+    const restarted = h.makeManager(); restarted.conversations = f.service;
+    const restored = await restarted.getOrCreate('c2c', 'peer', 'peer', h.target);
+    expect(restored.sessionId).toBe(reset?.sessionId);
+    expect(restored.agentPreset).toBe('qq-b');
+    expect(restarted.getEffectivePreset('c2c', 'peer')).toBe('qq-b');
+  });
   it('starts a fresh Session for presets and selects its model without losing the old history', async () => {
     const h = harness(); const record = await h.create(); const oldId = record.sessionId;
     await h.manager.setPresetOverride('c2c', 'peer', 'minimal');

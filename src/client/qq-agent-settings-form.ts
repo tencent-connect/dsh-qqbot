@@ -1,12 +1,11 @@
 import { createElement as h, useState, type ChangeEvent, type ReactNode } from 'react';
-import { Button, Input, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 import { QQ_EXTRA_PROMPT_MAX_CHARS, type QQAgentSettings, type QQExecutionSettings } from '../shared/agent-settings.ts';
-import type { ConversationSandboxMode, SlashCommandDescriptor, ToolCatalogEntry } from '../shared/conversation-protocol.ts';
+import type { ConversationSandboxMode, ToolCatalogEntry } from '../shared/conversation-protocol.ts';
 import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { defaultModelLabel, defaultPresetLabel, findModel, modelChoiceId, modelLabel, presetLabel } from './host-selectors.ts';
 import type { QQAgentCatalog } from './qq-agent-catalog.ts';
 import { QQSelect, WorkspaceCwdSelect, type QQSelectOption } from './qq-controls.ts';
-import { SlashCommandList } from './slash-command-list.ts';
 
 const PERMISSIONS: ReadonlyArray<{ value: ConversationSandboxMode; label: string }> = [
   { value: 'read-only', label: '仅可查看' },
@@ -50,8 +49,6 @@ export interface QQAgentSettingsFormProps {
   readonly askTools?: readonly string[];
   readonly onChange: (settings: QQAgentSettings) => void;
   readonly onRefreshCatalog: () => void;
-  /** Slash-command metadata from the registry (single source of truth); omitted hides the list. */
-  readonly commands?: readonly SlashCommandDescriptor[];
   /** Open the Host directory picker to fill the working directory; omitted hides the browse button. */
   readonly onPickDirectory?: () => Promise<string | null>;
   /** Existing DSH workspaces to offer in the working-directory selector. */
@@ -62,14 +59,14 @@ export interface QQAgentSettingsFormProps {
   readonly defaultWorkspaceName?: string;
   /** QQ default working directory (shown when cwd is empty). */
   readonly defaultCwd?: string;
-  /** Which surface hosts this shared form; only changes tool-area copy. Defaults to 'conversation'. */
+  /** Native session controls own model, preset and workspace; those fields appear only in defaults. */
   readonly scope?: 'defaults' | 'conversation';
   /** The chat scope of the conversation this form edits (group vs c2c); drives which extra-prompt field shows. */
   readonly chatScope?: 'group' | 'c2c';
 }
 
 /** Draft fields only. The parent owns persistence, versions and conflict handling. */
-export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false, askTools = [], commands = [], onPickDirectory, workspaces = [], onCreateWorkspace, defaultWorkspaceName = '默认工作区', defaultCwd, scope = 'conversation', chatScope = 'group', onChange, onRefreshCatalog }: QQAgentSettingsFormProps): ReactNode {
+export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false, askTools = [], onPickDirectory, workspaces = [], onCreateWorkspace, defaultWorkspaceName = '默认工作区', defaultCwd, scope = 'conversation', chatScope = 'group', onChange, onRefreshCatalog }: QQAgentSettingsFormProps): ReactNode {
   const [cwdBusy, setCwdBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -126,14 +123,14 @@ export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false
     else onChange({ ...settings, reasoningEffort: effort as ReasoningEffortId });
   };
   return h('div', { className: 'imqc-agentSettings' },
-    h('div', { className: 'imqc-field' }, h('span', null, '模型'), h(QQSelect, { label: '模型', value: model ? modelChoiceId(model) : 'inherit', options: modelOptions, disabled, onOpen: onRefreshCatalog, onChange: value => {
+    scope === 'defaults' ? h('div', { className: 'imqc-field' }, h('span', null, '模型'), h(QQSelect, { label: '模型', value: model ? modelChoiceId(model) : 'inherit', options: modelOptions, disabled, onOpen: onRefreshCatalog, onChange: value => {
       if (value === 'inherit') { onChange({ ...settings, model: null }); return; }
       const choice = catalog.models?.groups.flatMap(group => group.models).find(candidate => modelChoiceId(candidate) === value);
       if (choice) setModelWithEffort({ provider: choice.provider, model: choice.model });
-    } })),
-    showEffort ? h('div', { className: 'imqc-field' }, h('span', null, '推理强度'), h(QQSelect, { label: '推理强度', value: selectedEffort, options: effortOptions, disabled, onChange: setEffort })) : null,
-    h('div', { className: 'imqc-field' }, h('span', null, 'Agent 预设'), h(QQSelect, { label: 'Agent 预设', value: settings.preset, options: presetOptions, disabled, onOpen: onRefreshCatalog, onChange: preset => onChange({ ...settings, preset }) })),
-    h('p', { className: 'imqc-hint' }, 'Agent 预设决定使用哪个 Agent；执行权限决定该 Agent 可执行的操作。'),
+    } })) : null,
+    scope === 'defaults' && showEffort ? h('div', { className: 'imqc-field' }, h('span', null, '推理强度'), h(QQSelect, { label: '推理强度', value: selectedEffort, options: effortOptions, disabled, onChange: setEffort })) : null,
+    scope === 'defaults' ? h('div', { className: 'imqc-field' }, h('span', null, 'Agent 预设'), h(QQSelect, { label: 'Agent 预设', value: settings.preset, options: presetOptions, disabled, onOpen: onRefreshCatalog, onChange: preset => onChange({ ...settings, preset }) })) : null,
+    scope === 'defaults' ? h('p', { className: 'imqc-hint' }, 'Agent 预设决定使用哪个 Agent；执行权限决定该 Agent 可执行的操作。') : null,
     h('div', { className: 'imqc-field' }, h('span', null, '执行权限'), h(QQSelect, { label: '执行权限', value: execution.kind === 'custom' ? 'custom' : execution.permission, disabled, options: [...PERMISSIONS, { value: 'custom', label: '自定义工具' }], onChange: value => {
       if (value === 'custom') { setExecution({ kind: 'custom', permission: execution.permission, tools: [] }); return; }
       const permission = PERMISSIONS.find(item => item.value === value)?.value;
@@ -143,7 +140,7 @@ export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false
       h('div', { className: 'imqc-fieldsetTitle' }, scope === 'defaults' ? '允许的工具（新对话默认）' : '本对话允许的工具'),
       !toolGuideDismissed ? h('div', { className: 'imqc-toolGuide' }, h('p', null, scope === 'defaults' ? '这里的勾选只决定之后新接入对话的初始工具；已接入的对话各自独立。' : '这里的勾选只对当前这个群/联系人生效，其它群各自独立。'),
         h(Button, { variant: 'ghost', size: 'sm', onClick: () => setToolGuideDismissed(true) }, '知道了')) : null,
-      h('p', { className: 'imqc-hint' }, '只开放下方勾选的工具；基础权限是这些工具之上的上限，文件、命令和网络操作仍受其限制，已有额外审批规则保留。'),
+      h('p', { className: 'imqc-hint' }, '只开放下方勾选的工具；基础权限仍限制这些工具的操作，仍选中的需审批工具继续审批。'),
       h('div', { className: 'imqc-presets' }, h('span', { className: 'imqc-hint' }, '快速模板：'),
         h('div', { className: 'imqc-inline' },
           ...TOOL_PRESETS.map(preset => h(Button, { key: preset.id, variant: 'outline', size: 'sm', disabled,
@@ -196,8 +193,8 @@ export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false
         })) : null))),
       visible.length === 0 ? h('p', { className: 'imqc-hint' }, onlySelected ? '还没有勾选任何工具。' : '没有匹配的工具。') : null,
       h('div', { className: 'imqc-actions imqc-toolPickerFoot' }, h(Button, { variant: 'primary', size: 'sm', onClick: () => setToolsOpen(false) }, '完成选择'))) }) : null),
-    // 工作目录：统一共享选择器（留空默认 → 各 DSH 工作区 → 添加），三处一致。
-    (() => {
+    // 新对话默认目录沿用共享工作区选择器。
+    scope === 'defaults' ? (() => {
       const pickFolder = (): void => {
         if (!onPickDirectory) return;
         setCwdBusy(true);
@@ -212,16 +209,13 @@ export function QQAgentSettingsForm({ settings, tools, catalog, disabled = false
         onAddWorkspace: (onPickDirectory || onCreateWorkspace) ? pickFolder : undefined,
         onChange: path => onChange({ ...settings, cwd: path }),
       });
-    })(),
+    })() : null,
     ((): ReactNode => {
       // 补充提示词按 scope 分离：会话设置只显示当前 scope；新对话默认值两个都显示。
       const field = (key: 'promptGroup' | 'promptDirect', label: string): ReactNode => h('label', { className: 'imqc-field', key }, h('span', null, label), h('textarea', { rows: 4, value: settings[key], disabled, maxLength: QQ_EXTRA_PROMPT_MAX_CHARS, 'aria-label': label, onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ ...settings, [key]: event.target.value }) }));
       return scope === 'defaults' ? [field('promptGroup', '群聊补充提示词'), field('promptDirect', '私聊补充提示词')] : (chatScope === 'group' ? field('promptGroup', '群聊补充提示词') : field('promptDirect', '私聊补充提示词'));
     })(),
-    h('div', { className: 'imqc-inline' }, h('span', null, '斜杠命令'), h(Switch, { label: '斜杠命令', checked: settings.slashCommands, disabled, onChange: slashCommands => onChange({ ...settings, slashCommands }) })),
-    h('p', { className: 'imqc-hint' }, '关闭后，普通用户的 / 命令返回停用提示；机器人所有者仍可使用命令。'),
-    h(SlashCommandList, { commands }),
-    catalog.loading ? h('p', { role: 'status', className: 'imqc-hint' }, '正在读取宿主模型和 Agent 预设目录…') : null,
-    [...catalog.errors, ...(catalog.models?.failures ?? [])].map((error, index) => h('p', { key: index, role: 'alert', className: 'imqc-error' }, error)),
-    catalog.errors.length ? h(Button, { variant: 'ghost', size: 'sm', disabled: disabled || catalog.loading, onClick: onRefreshCatalog }, '重试读取宿主目录') : null);
+    scope === 'defaults' && catalog.loading ? h('p', { role: 'status', className: 'imqc-hint' }, '正在读取宿主模型和 Agent 预设目录…') : null,
+    scope === 'defaults' ? [...catalog.errors, ...(catalog.models?.failures ?? [])].map((error, index) => h('p', { key: index, role: 'alert', className: 'imqc-error' }, error)) : null,
+    scope === 'defaults' && catalog.errors.length ? h(Button, { variant: 'ghost', size: 'sm', disabled: disabled || catalog.loading, onClick: onRefreshCatalog }, '重试读取宿主目录') : null);
 }

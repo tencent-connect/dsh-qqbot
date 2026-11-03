@@ -48,9 +48,10 @@ export function ConversationPanel({ onOpenSettings, store }: ConversationPanelPr
 export function QQAccountOwners({ store, t, bound = true }: { store: QQSessionStore; t?: import('./qq-locale.ts').QQTranslate; bound?: boolean }): ReactNode {
   const title = t ? t('owners.title') : '斜杠命令超管';
   const commands = useQQSessionStore(store).directory?.commands ?? [];
-  return h('section', { className: 'imqc', 'aria-label': title }, h('h3', null, title),
-    h('p', { className: 'imqc-hint' }, t ? t('owners.hint') : '在任何 QQ 会话里都能使用斜杠命令（含 /model、/preset、/permission 等改动类命令）、审批工具调用、回答机器人提问与中止任务。它不开放工具、也不绕过执行权限——工具与权限仍在会话设置里配置。'),
-    h(PairClaimPanel, { purpose: 'owner', title, enabled: bound, hint: '点「添加…」生成一次性配对码，然后在 QQ 里直接给机器人发送这个码；对方点「确认」后即可加入。' }),
+  return h('section', { className: 'imqc', 'aria-label': title },
+    h(PairClaimPanel, { purpose: 'owner', title, enabled: bound,
+      description: t ? t('owners.hint') : '所有 QQ 斜杠命令仅限此名单中的全局超管使用，名单对所有已启用且获准接入的 QQ 对话生效。不开放额外工具，不绕过执行权限。审批和提问按钮仍按原权限处理；DSH 网页斜杠命令不受此名单限制。',
+      hint: '点「添加…」生成一次性配对码，然后在 QQ 里直接给机器人发送这个码；对方点「确认」后即可加入。' }),
     commands.length > 0 ? h(SlashCommandList, { commands }) : null);
 }
 

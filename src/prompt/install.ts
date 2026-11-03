@@ -6,12 +6,15 @@
  * 所有 section.text 都是惰性函数，每步组装时现读 entry —— 改补充词/人设即时生效，无需重注册。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type {} from '@deepseek-ai/dsh-agent';
+import type {} from '@deepseek-ai/dsh-tools';
 import type { QQScope } from './scope.ts';
 import { RULES_SECTION_NAME, RULES_ORDER, RULES_TEXT } from './rules.ts';
 import { SCOPE_SECTION_NAME, SCOPE_ORDER, scopeText } from './scope.ts';
 import { PERSONA_SECTION_NAME, PERSONA_ORDER, selectPersonaText } from './persona.ts';
 import { EXTRA_SECTION_NAME, EXTRA_ORDER, selectExtraPrompt } from './extra.ts';
 import { TURN_META_CONTEXT_NAME, TURN_META_ORDER } from './turn-meta.ts';
+import { TOOL_AVAILABILITY_SECTION_NAME, TOOL_AVAILABILITY_ORDER, toolAvailabilityText } from './tool-availability.ts';
 
 /** Frozen facts from the exact QQ input claimed for the current native turn. */
 export interface QQTurnContext {
@@ -35,18 +38,19 @@ export interface QQPromptHandle {
   dispose(): void;
 }
 
-interface SystemPromptLike {
-  section(section: { name: string; order: number; text: string | ((context: unknown) => string); interpolate?: boolean }): () => void;
-  context(context: { name: string; order: number; text: string | ((context: unknown) => string); interpolate?: boolean }): () => void;
-}
-
 /** 在 agent.ctx 上安装 QQ prompt sections/contexts；返回可更新的句柄。 */
 export function installQQPrompt(agentCtx: Context, entry: QQPromptEntry): QQPromptHandle {
-  const service = agentCtx.get('systemPrompt') as SystemPromptLike | undefined;
+  const service: Context['systemPrompt'] | undefined = agentCtx.get('systemPrompt');
   if (service === undefined) throw new Error('当前宿主缺少 systemPrompt 服务，无法注入 QQ prompt');
 
   const disposers: Array<() => void> = [];
   disposers.push(service.section({ name: RULES_SECTION_NAME, order: RULES_ORDER, text: RULES_TEXT }));
+  disposers.push(service.section({ name: TOOL_AVAILABILITY_SECTION_NAME, order: TOOL_AVAILABILITY_ORDER, interpolate: false, text: ({ agent, toolSet }) => {
+    // Diagnostics and runtime-context refreshes do not carry step admission.
+    if (agent === undefined || toolSet === undefined) return '';
+    const tools: Context['tools'] | undefined = agentCtx.get('tools');
+    return tools === undefined ? '' : toolAvailabilityText(tools.definitions(agent, toolSet).map(tool => tool.name));
+  } }));
   disposers.push(service.section({ name: SCOPE_SECTION_NAME, order: SCOPE_ORDER, text: () => scopeText(entry.scope) }));
   disposers.push(service.section({ name: PERSONA_SECTION_NAME, order: PERSONA_ORDER, text: () => selectPersonaText(entry.personaCard(), entry.scope) }));
   disposers.push(service.section({ name: EXTRA_SECTION_NAME, order: EXTRA_ORDER, text: () => selectExtraPrompt(entry.extraPrompts(), entry.scope) }));

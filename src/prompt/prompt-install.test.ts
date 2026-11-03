@@ -1,20 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
+import type { AssembleContext, PromptContext, PromptSection, SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { installQQPrompt, turnMetaText, type QQPromptEntry, type QQTurnContext } from '../prompt/index.ts';
 import { QQ_EXTRA_PROMPT_MAX_CHARS } from '../shared/agent-settings.ts';
 
-type Sec = { name: string; order: number; text: string | ((c: unknown) => string) };
 function fakeSystemPrompt() {
-  const sections = new Map<string, Sec>();
-  const contexts = new Map<string, Sec>();
+  const sections = new Map<string, PromptSection>();
+  const contexts = new Map<string, PromptContext>();
   const service = {
-    section(s: Sec) { sections.set(s.name, s); return () => sections.delete(s.name); },
-    context(c: Sec) { contexts.set(c.name, c); return () => contexts.delete(c.name); },
-  };
+    section(s: PromptSection) { sections.set(s.name, s); return () => sections.delete(s.name); },
+    context(c: PromptContext) { contexts.set(c.name, c); return () => contexts.delete(c.name); },
+  } satisfies Pick<SystemPrompt, 'section' | 'context'>;
   const ctx = { get: (n: string) => n === 'systemPrompt' ? service : undefined } as unknown as Context;
-  const render = (map: Map<string, Sec>, c: unknown) => [...map.values()].sort((a, b) => a.order - b.order)
+  const render = (map: ReadonlyMap<string, PromptSection | PromptContext>, c: AssembleContext) => [...map.values()].sort((a, b) => a.order - b.order)
     .map((s) => typeof s.text === 'function' ? s.text(c) : s.text).filter((t) => t.length > 0).join('NL');
-  return { ctx, sections, contexts, renderSections: (c: unknown = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: unknown = {}) => render(contexts, c) };
+  return { ctx, sections, contexts, renderSections: (c: AssembleContext = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: AssembleContext = {}) => render(contexts, c) };
 }
 
 const NL = String.fromCharCode(10);
@@ -24,10 +24,10 @@ function entry(o: Partial<QQPromptEntry> = {}): QQPromptEntry {
 }
 
 describe('installQQPrompt (DSH section/context 注册)', () => {
-  it('registers 4 sections + 2 contexts; dispose clears', () => {
+  it('registers 5 sections + 2 contexts; dispose clears', () => {
     const sp = fakeSystemPrompt();
     const h = installQQPrompt(sp.ctx, entry());
-    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules', 'qqbot:scope']);
+    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules', 'qqbot:scope', 'qqbot:tool-availability']);
     expect([...sp.contexts.keys()]).toEqual(['qqbot:turn-meta', 'qqbot:background']);
     h.dispose();
     expect(sp.sections.size).toBe(0); expect(sp.contexts.size).toBe(0);
