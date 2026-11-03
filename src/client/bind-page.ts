@@ -452,15 +452,15 @@ function UnboundView({ state }: { state: Extract<BindStateWire, { phase: 'waitin
 }
 
 /** 依据宿主相位渲染面板主体（可注入共享轮询结果避免双计时器） */
-export function BindPanelBody(props?: {
+export function BindPanelBody(props: {
   state?: BindStateWire | null;
   gone?: boolean;
   recheck?: () => void;
-}): ReactNode {
+} = {}): ReactNode {
   usePanelStyles();
   const injected = props?.state !== undefined;
   const internal = useBindState(!injected);
-  const state = injected ? props.state : internal.state;
+  const state = injected ? (props.state ?? null) : internal.state;
   const gone = injected ? (props.gone ?? false) : internal.gone;
   const recheck = injected ? (props.recheck ?? (() => {})) : internal.recheck;
   // 扫码成功的连接过渡场景需要保留最后一帧二维码：waiting 相位持续记录，

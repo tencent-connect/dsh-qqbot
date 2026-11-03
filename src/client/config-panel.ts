@@ -252,7 +252,7 @@ function shallowEqual(a: unknown, b: unknown): boolean {
  * 保存仅提交变更键（服务端按白名单合并），保存成功后提示
  * HMR 重载语义（进行中的机器人会话将重置）。
  */
-export function ConfigPanel(props?: { bindPhase?: string }): ReactNode {
+export function ConfigPanel(props: { bindPhase?: string } = {}): ReactNode {
   useConfigPanelStyles();
   const [initial, setInitial] = useState<ConfigWire | null>(null);
   const [form, setForm] = useState<ConfigWire | null>(null);
