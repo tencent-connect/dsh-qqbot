@@ -82,4 +82,16 @@ describe('QQ slash-command access modes', () => {
       expect(commands.some(command => command.name === 'bot-me')).toBe(true);
     }
   });
+  it('uses the configured whitelist kind instead of stale member display metadata', () => {
+    const { config, store, service } = fixture();
+    config.access.groupAllow = ['group-id'];
+    config.access.c2cAllow = ['private-id'];
+    store.claimOwner('group-id', { nickname: 'Test group', scene: 'c2c', sceneName: '', claimedAt: 0 });
+    store.claimOwner('private-id', { nickname: 'Test user', scene: 'group', sceneName: '', claimedAt: 0 });
+    Object.assign(service, { pairing: { listClaimed: () => [], listChallenges: () => [] } });
+    const snapshot = service.pairStatus();
+    expect(snapshot.allowGroup[0]?.scene).toBe('group');
+    expect(snapshot.allowC2c[0]?.scene).toBe('c2c');
+  });
+
 });

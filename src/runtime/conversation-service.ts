@@ -26,18 +26,18 @@ export class ConversationService {
   pairStatus(): PairStatusWire {
     const profiles = this.store.memberProfiles();
     const claimed = this.pairing.listClaimed();
-    const toMember = (openid: string, scene: 'group' | 'c2c'): ClaimedMember => {
+    const toMember = (openid: string, scene?: 'group' | 'c2c'): ClaimedMember => {
       const profile = profiles[openid];
       const cached = claimed.find((m) => m.openid === openid);
       return {
         openid,
         nickname: profile?.nickname || cached?.nickname || '',
-        scene: profile?.scene ?? cached?.scene ?? scene,
+        scene: scene ?? profile?.scene ?? cached?.scene ?? 'c2c',
         sceneName: profile?.sceneName || cached?.sceneName || '',
         claimedAt: profile?.claimedAt ?? cached?.claimedAt ?? 0,
       };
     };
-    const owners: ClaimedMember[] = this.store.ownerIds().map((openid) => toMember(openid, 'c2c'));
+    const owners: ClaimedMember[] = this.store.ownerIds().map((openid) => toMember(openid));
     const access = this.config.access;
     const allowC2c: ClaimedMember[] = [...access.c2cAllow].map((openid) => toMember(openid, 'c2c'));
     const allowGroup: ClaimedMember[] = [...access.groupAllow].map((openid) => toMember(openid, 'group'));
