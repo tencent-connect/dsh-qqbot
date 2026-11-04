@@ -22,6 +22,7 @@ import {
   type WebRoute,
 } from './bind-routes.ts';
 import type { BindingService } from './binding-service.ts';
+import { createHostTrust } from './request-trust.ts';
 
 /** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
 const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -432,5 +433,49 @@ describe('bind-routes', () => {
     const resNone = fakeRes();
     await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), resNone);
     expect(resNone.statusCode).toBe(200);
+  });
+});
+
+describe('bind-routes 来源信任围栏注入', () => {
+  it('注入宿主围栏后：DNS rebinding（Host=Origin=攻击域名）被拒', async () => {
+    const { routes } = createHarness({ isTrustedRequest: createHostTrust({ bindHost: '127.0.0.1' }) });
+
+    const resState = fakeRes();
+    await invoke(
+      routes.get(BIND_STATE_PATH),
+      fakeReq('GET', { host: 'evil.example:3080', origin: 'http://evil.example:3080' }),
+      resState,
+    );
+    expect(resState.statusCode).toBe(403);
+
+    const resManual = fakeRes();
+    await invoke(
+      routes.get(BIND_MANUAL_PATH),
+      fakeReq('POST', { host: 'evil.example:3080', origin: 'http://evil.example:3080' }, '{"appId":"a","appSecret":"b"}'),
+      resManual,
+    );
+    expect(resManual.statusCode).toBe(403);
+  });
+
+  it('注入宿主围栏后：loopback 同源请求仍放行', async () => {
+    const { routes } = createHarness({ isTrustedRequest: createHostTrust({ bindHost: '127.0.0.1' }) });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('GET', { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' }),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('未注入围栏：保持历史行为（rebinding 放行，仅旧宿主降级路径）', async () => {
+    const { routes } = createHarness();
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_STATE_PATH),
+      fakeReq('GET', { host: 'evil.example:3080', origin: 'http://evil.example:3080' }),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
   });
 });
