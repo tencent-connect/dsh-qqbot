@@ -69,13 +69,7 @@ function useConfigPanelStyles(): void {
 .imqb2-feedback { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .imqb2-feedback p { flex: 1; min-width: 0; }
 .imqb2-form .imqc-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.imqb2-form .imqc-pair { margin: 4px 0 16px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); }
-.imqb2-form .imqc-pairMembers { list-style: none; padding: 0; margin: 8px 0 0; }
-.imqb2-form .imqc-pairMember { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; border-top: 1px solid var(--dsw-alias-border-l2); }
-.imqb2-form .imqc-pairMemberMain { flex: 1 1 180px; min-width: 0; }
-.imqb2-form .imqc-pairMemberName { display: block; font-weight: 500; }
-.imqb2-form .imqc-pairMemberMeta, .imqb2-form .imqc-hint { color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.imqb2-form .imqc-pairMemberOpenId { color: var(--dsw-alias-label-secondary); }
+.imqb2-form .imqc-hint { color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .imqb2-form .imqc-error { color: var(--dsw-alias-state-error-primary); }
 .imqb2-form .imqc-cmdList { margin: 12px 0; }
 .imqb2-form .imqc-cmdRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -346,11 +340,11 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
       }),
       access.groupMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-group', title: '群白名单', enabled: bindPhase === 'bound', onChange: retry, hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。' }) : null,
       createElement(SegmentedRow, { disabled: busy,
-        label: '斜杠命令', value: access.commandMode ?? 'allowlist', options: MODE_OPTIONS,
+        label: '斜杠命令', value: access.commandMode ?? 'open', options: MODE_OPTIONS,
         help: '仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。',
         onChange: value => { patch('access', { ...access, commandMode: value }); },
       }),
-      (access.commandMode ?? 'allowlist') === 'allowlist' ? createElement(PairClaimPanel, {
+      (access.commandMode ?? 'open') === 'allowlist' ? createElement(PairClaimPanel, {
         purpose: 'owner', title: '命令白名单', enabled: bindPhase === 'bound', onChange: retry,
         hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
       }) : null,

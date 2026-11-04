@@ -118,7 +118,7 @@ export interface ImQQBotConfig {
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
   c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式（默认开放）'),
-  commandMode: Schema.union(['open', 'allowlist', 'disabled']).default('allowlist').description('斜杠命令模式（所有人／白名单／关闭）'),
+  commandMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('斜杠命令模式（所有人／白名单／关闭）'),
   c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单（QQ OpenID）'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),

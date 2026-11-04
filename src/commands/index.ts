@@ -56,7 +56,7 @@ export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
       aliases: names.slice(1),
       description: command.description ?? '',
       category: command.category,
-      scope: deps.config.access.commandMode === 'open' ? 'all' : deps.config.access.commandMode === 'disabled' ? 'disabled' : 'owner',
+      scope: (deps.config.access.commandMode ?? 'open') === 'open' ? 'all' : deps.config.access.commandMode === 'disabled' ? 'disabled' : 'owner',
       ...(command.hidden === true ? { hidden: true } : {}),
     };
   }).filter((descriptor) => descriptor.name !== '');

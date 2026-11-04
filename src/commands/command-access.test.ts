@@ -27,11 +27,19 @@ function fixture() {
 }
 
 describe('QQ slash-command access modes', () => {
-  it('defaults to allowlist and rejects missing identities and unknown modes', () => {
+  it('defaults to open and rejects missing identities and unknown modes', () => {
     expect(commandAccessError(undefined, 'member', true)).toBeUndefined();
-    expect(commandAccessError(undefined, 'outsider', false)).toContain('白名单');
+    expect(commandAccessError(undefined, 'outsider', false)).toBeUndefined();
+    expect(commandAccessError(undefined, undefined, false)).toContain('身份');
     expect(commandAccessError('open', undefined, true)).toContain('身份');
     expect(commandAccessError('unexpected', 'member', true)).toBeDefined();
+  });
+
+  it('allows a non-listed sender through the default registered command handler and catalog', async () => {
+    const { deps, context } = fixture();
+    const ping = buildCommandList(deps).find(command => command.name === 'bot-ping')!;
+    expect(await ping.handler(context('outsider'))).toContain('pong');
+    expect(describeCommands(deps).every(command => command.scope === 'all')).toBe(true);
   });
 
   it.each(['c2c', 'group'] as const)('checks %s query/help/mutation handlers before execution', async kind => {
@@ -52,6 +60,7 @@ describe('QQ slash-command access modes', () => {
   it('rechecks the current policy for an existing handler after mode changes and revocation', async () => {
     const { deps, config, context, store } = fixture();
     const ping = buildCommandList(deps).find(command => command.name === 'bot-ping')!;
+    config.access.commandMode = 'allowlist';
     expect(await ping.handler(context('outsider'))).toContain('白名单');
     config.access.commandMode = 'open';
     expect(await ping.handler(context('outsider'))).toContain('pong');
