@@ -62,6 +62,19 @@ describe('resolveReplyTarget', () => {
     expect(result.msgId).toBeUndefined();
   });
 
+  it('forceProactive skips cached msgId and eventId', () => {
+    const limiter = new ReplyLimiter({ limit: 4 });
+    cacheMsgId('c2c', 'peer-5', 'still-fresh');
+    cacheEventId('c2c', 'peer-5', 'evt-5');
+    const result = resolveReplyTarget(
+      { scope: 'c2c', targetId: 'peer-5', msgId: 'still-fresh', forceProactive: true },
+      limiter,
+      true,
+    );
+    expect(result).toEqual({ scope: 'c2c', targetId: 'peer-5' });
+    expect(limiter.checkLimit('still-fresh').remaining).toBe(4);
+  });
+
   it('returns eventId when allowEvent is true', () => {
     const limiter = new ReplyLimiter({ limit: 4 });
     cacheEventId('c2c', 'peer-4', 'evt-2');

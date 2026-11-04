@@ -104,7 +104,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `directPrompt` | string | - | 私聊额外 system prompt |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
 | `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
-| `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟 |
+| `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟；`<=0` 表示不回收 |
 | `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
 | `maxQueue` | number | `20` | 并发队列最大长度 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
@@ -120,6 +120,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.c2cAllow` | string[] | `[]` | 私聊白名单（user openid） |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | 群聊访问模式 |
 | `access.groupAllow` | string[] | `[]` | 群聊白名单（group openid） |
+
+### 主动推送（proactiveDelivery）
+
+QQ 入站触发的回合始终被动回复；定时任务等服务回合始终主动推送到 QQ。下表只控制「非 QQ 输入（如桌面续聊 QQ 会话）」的回合：
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` 不推送；`c2c` 仅推送私聊；`all` 私聊和群聊都推送 |
 
 ### 富媒体理解（media）
 
@@ -222,13 +230,15 @@ sessionKey: `qqbot:${appId}:${scope}:${peerId}`，新会话铸造 UUID 会话 id
 
 解析策略：进程内复用 → 持久化恢复 → 全新创建。
 
+QQ 群聊和私聊的补充提示词按当前 Agent 作用域加载，恢复会话时继续使用对应场景的配置。
+
 ## 设计原则
 
 - **纯 Cordis 插件** — 遵循 dsh "Plugins, not loop changes" 原则
 - **声明式依赖** — `inject = ['agents']`，不直接耦合其他插件
 - **会话隔离** — 每个 QQ 私聊用户/群聊各一个独立 Agent
 - **Preset 支持** — 可通过 `agent-presets` 服务挂载预设（工具集、prompt 等）
-- **闲置回收** — 超时自动 dispose Agent，防止内存泄漏
+- **闲置回收** — 超时自动 dispose Agent，防止内存泄漏（回收后仍可按会话映射主动推送）
 - **Markdown 输出** — 回复以 Markdown 格式发送，支持代码块/表格感知切分
 - **图片理解** — 支持 `qqbot_describe_image` 视觉理解，可分析用户发送的图片
 - **附件发送** — 支持 `qqbot_send_file` 将本地文件发送给用户（默认启用路径白名单）

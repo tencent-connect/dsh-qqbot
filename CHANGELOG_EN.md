@@ -6,6 +6,22 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### New Features
+
+- **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
+- **Turns that did not start in QQ are pushed to QQ**: continuing a bound session from the desktop, or a turn the host starts itself (a schedule, injected context, and the like), delivers the reply to the matching DM or group. It no longer spends the passive-reply quota of the previous QQ message, and it does not attach to that old message. Messages that arrive in QQ stay passive replies, and streaming is unchanged. Proactive messages must be enabled on the QQ Open Platform, or the send fails.
+- **Idle eviction can be disabled**: setting `sessionIdleTimeout` to `0` stops proactive eviction (the default stays 30 minutes).
+
+### ⚠️ Behavior Changes
+
+- **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
+
+### Fixed
+
+- **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
+
 ## [0.5.5] - 2026-10-30
 
 ### Fixed

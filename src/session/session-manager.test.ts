@@ -168,6 +168,39 @@ afterEach(async () => {
   rmSync(env.home, { recursive: true, force: true });
 });
 
+describe('deliveryAddress', () => {
+  it('内存里没有会话时，只按 prefs 返回 QQ 地址，不唤醒 agent', () => {
+    const sessionId = 'session-live';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+
+    const address = createManager(registry).deliveryAddress(sessionId);
+
+    expect(address).toEqual({ scope: 'c2c', targetId: PEER });
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(registry.get).not.toHaveBeenCalled();
+  });
+
+  it('未知 session 返回 undefined', () => {
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+
+    expect(createManager(registry).deliveryAddress('session-dead')).toBeUndefined();
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('对端已经换成另一条活会话时，不为旧 id 返回地址', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const manager = createManager(registry);
+    const live = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    new PrefsStore().setSessionId(KEY, 'session-old');
+
+    expect(manager.deliveryAddress('session-old')).toBeUndefined();
+    expect(manager.deliveryAddress(live.sessionId)).toEqual(REPLY);
+  });
+});
+
 describe('getOrCreate — 对照组（迁移主路径行为正确）', () => {
   it('全新用户：legacy 不存在 → 铸造 session- 前缀 id 创建并落盘', async () => {
     const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
@@ -426,5 +459,126 @@ describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () =>
     expect(record.sessionId).toBe('session-current');
     await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith('session-current'));
     expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot');
+  });
+});
+
+describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用重装）', () => {
+  /**
+   * 带 systemPrompt 替身的 agent：section/context 注册进 Map，disposer 从 Map 删除，
+   * 用于观察 QQ prompt sections/contexts 的安装与释放。
+   */
+  function promptAgent(id: string, opts: { failSection?: boolean } = {}) {
+    const sections = new Map<string, { name: string }>();
+    const contexts = new Map<string, { name: string }>();
+    const service = {
+      section: (s: { name: string }) => {
+        if (opts.failSection) throw new Error('boom: section registration rejected');
+        sections.set(s.name, s);
+        return () => { sections.delete(s.name); };
+      },
+      context: (c: { name: string }) => {
+        contexts.set(c.name, c);
+        return () => { contexts.delete(c.name); };
+      },
+    };
+    const agent = {
+      ...fakeAgent(id),
+      ctx: { get: (name: string) => (name === 'systemPrompt' ? service : undefined) },
+    } as unknown as DshAgent;
+    return { agent, sections, contexts };
+  }
+
+  /** registry：create 产出带 prompt 替身的 agent，并让后续 get() 能复用它（live 路径） */
+  function promptRegistry(opts: { failSection?: boolean } = {}) {
+    let live: DshAgent | undefined;
+    const created: Array<{ agent: DshAgent; sections: Map<string, unknown>; contexts: Map<string, unknown> }> = [];
+    const registry = {
+      get: vi.fn(() => live),
+      resume: vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => { throw notFound(resumeSessionId); }),
+      create: vi.fn(async (options: { sessionId: string }) => {
+        const { agent, sections, contexts } = promptAgent(options.sessionId, opts);
+        created.push({ agent, sections, contexts });
+        live = agent;
+        return { agent, dispose: vi.fn(async () => {}) } as DshAgentHandle;
+      }),
+    };
+    return { registry, created };
+  }
+
+  it('会话建立即注册 4 个 section + 2 个 context；remove() 全部释放', async () => {
+    const { registry, created } = promptRegistry();
+    const manager = createManager(registry);
+
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(created).toHaveLength(1);
+    expect([...created[0].sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
+    expect([...created[0].contexts.keys()].sort()).toEqual(['qqbot:background', 'qqbot:turn-meta']);
+
+    await manager.remove('c2c', PEER);
+    expect(created[0].sections.size).toBe(0);
+    expect(created[0].contexts.size).toBe(0);
+  });
+
+  it('extra section 惰性读取 config：改 directPrompt 即时生效，无需重装', async () => {
+    const { registry, created } = promptRegistry();
+    const config = ConfigSchema({
+      appId: APP_ID, appSecret: 'secret', provider: 'p', model: 'm',
+      cwd: join(env.home, 'workspace'), sessionIdleTimeout: 0,
+      groupPrompt: 'OLD_GROUP', directPrompt: 'OLD_DIRECT',
+    } as ImQQBotConfig);
+    const manager = new SessionManager(absentCtx(), registry as unknown as DshAgentRegistry, config, createLogger());
+    managers.push(manager);
+
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const extra = created[0].sections.get('qqbot:extra') as { text: () => string };
+    expect(extra.text()).toBe('OLD_DIRECT'); // c2c 会话读 directPrompt
+
+    config.directPrompt = 'NEW_DIRECT'; // 热更新配置（Schema 代理可写）
+    expect(extra.text()).toBe('NEW_DIRECT');
+  });
+
+  it('live 复用：释放后的 agent 再次被 get() 命中时重新安装 prompt（WeakSet 实现下会永久丢失）', async () => {
+    const { registry, created } = promptRegistry();
+    const manager = createManager(registry);
+
+    // 第一次建立：create 产出 agent A 并注册 prompt
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const agent = created[0].agent;
+
+    // 回收（releasePrompt 释放注册，但 registry 中 agent A 仍存活——宿主未必同步销毁）
+    await manager.remove('c2c', PEER);
+    expect(created[0].sections.size).toBe(0);
+
+    // 第二次 getOrCreate：prefs 指向 remove 时铸造的新 id，registry.get 命中 A → live 复用
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(record.agent).toBe(agent);
+    expect(registry.create).toHaveBeenCalledTimes(1); // 未重建 agent，纯复用
+    // 关键回归：prompt 必须重新注册，而不是因"已安装"标记被跳过
+    expect(created[0].sections.size).toBe(3);
+    expect(created[0].contexts.size).toBe(2);
+  });
+
+  it('disposeAll 同样释放 prompt 注册项', async () => {
+    const { registry, created } = promptRegistry();
+    const manager = createManager(registry);
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    await manager.disposeAll();
+    expect(created[0].sections.size).toBe(0);
+    expect(created[0].contexts.size).toBe(0);
+  });
+
+  it('注册失败 fail-soft：会话仍可用，warn 留痕，下次同 agent 重试', async () => {
+    const { registry, created } = promptRegistry({ failSection: true });
+    const logger = createLogger();
+    const manager = createManagerWithCtx(registry, absentCtx(), logger);
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(record.agent).toBeDefined(); // 安装失败不阻断会话建立
+    expect(allLogText(logger)).toContain('qq prompt install failed');
+
+    // 失败不入表：同 agent 再次触发安装时重试（此处模拟再次 remove→复用）
+    expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
+    expect(created[0].sections.size).toBe(0);
   });
 });

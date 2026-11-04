@@ -193,7 +193,7 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
 export interface ConfigPanelProps { bindPhase?: string; selectorSource?: SelectorSource; t?: Translate<QQBotKey> }
 
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
-export function ConfigPanel({ bindPhase }: ConfigPanelProps): ReactNode {
+export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
   useConfigPanelStyles();
   const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
   const [commandsError, setCommandsError] = useState<string | null>(null);

@@ -10,6 +10,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import type { QqInputRegistry } from './qq-input-origin.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -90,6 +91,7 @@ export async function handleInbound(
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
+  inputs: QqInputRegistry,
 ): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
@@ -134,6 +136,9 @@ export async function handleInbound(
     source: { kind: 'user' as const },
   });
 
+  // 按宿主保证跨边界不变的 Message.id 登记 QQ 入站，出站据此认领回合归属
+  //（不在 source 上写非契约字段，也不在 SessionRecord 上抢标记）。
+  inputs.register(String(message.id));
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 

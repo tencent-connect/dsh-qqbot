@@ -5,9 +5,8 @@ import { join } from 'node:path';
 import { DeliverablesDeliverer } from './deliverables.ts';
 import type { MediaSenderLike } from '../media/send-media.ts';
 import type { QQBotSender } from './outbound-buffer.ts';
-import type { SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 
 const logger: Logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -32,9 +31,7 @@ function createConfig(cwd: string): ImQQBotConfig {
   } as unknown as ImQQBotConfig;
 }
 
-function createRecord(): SessionRecord {
-  return { sessionKey: 'k', sessionId: 's', replyTarget: { scope: 'c2c', targetId: 'u' } } as unknown as SessionRecord;
-}
+const TARGET: ReplyTarget = { scope: 'c2c', targetId: 'u' };
 
 describe('DeliverablesDeliverer', () => {
   it('存在的文件按扩展名分发发送', async () => {
@@ -48,7 +45,7 @@ describe('DeliverablesDeliverer', () => {
     const sender = createSender();
     const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
 
-    await deliverer.deliver(createRecord(), [{ path: png }, { path: md, description: '文档' }]);
+    await deliverer.deliver(TARGET, [{ path: png }, { path: md, description: '文档' }]);
 
     expect(mediaBot.sendImage).toHaveBeenCalledTimes(1);
     expect(mediaBot.sendFile).toHaveBeenCalledTimes(1);
@@ -64,7 +61,7 @@ describe('DeliverablesDeliverer', () => {
     const sender = createSender();
     const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
 
-    await deliverer.deliver(createRecord(), [{ path: ok }, { path: join(dir, 'gone.txt') }]);
+    await deliverer.deliver(TARGET, [{ path: ok }, { path: join(dir, 'gone.txt') }]);
 
     expect(mediaBot.sendFile).toHaveBeenCalledTimes(1); // 存在的那个已发送
     expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
@@ -82,7 +79,7 @@ describe('DeliverablesDeliverer', () => {
     const sender = createSender();
     const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
 
-    await deliverer.deliver(createRecord(), [{ path: outside }]);
+    await deliverer.deliver(TARGET, [{ path: outside }]);
 
     expect(mediaBot.sendFile).not.toHaveBeenCalled();
     const text = (sender.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
@@ -103,7 +100,7 @@ describe('DeliverablesDeliverer', () => {
     (config as { sendFile: { maxFiles: number } }).sendFile.maxFiles = 2;
     const deliverer = new DeliverablesDeliverer(sender, mediaBot, config, logger);
 
-    await deliverer.deliver(createRecord(), files);
+    await deliverer.deliver(TARGET, files);
 
     expect(mediaBot.sendFile).toHaveBeenCalledTimes(2);
     const text = (sender.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;

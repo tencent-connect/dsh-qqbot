@@ -455,7 +455,7 @@ interface BindPanelBodyProps {
   error?: string | null;
 }
 
-export function BindPanelBody(props: BindPanelBodyProps): ReactNode {
+export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
   usePanelStyles();
   const injected = props.state !== undefined;
   const internal = useBindState(!injected);
