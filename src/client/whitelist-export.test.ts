@@ -1,14 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { whitelistCsv, whitelistOpenIds } from './whitelist-export.ts';
+import { whitelistCsv, whitelistEntries } from './whitelist-export.ts';
 import type { ClaimedMember } from '../shared/pairing-protocol.ts';
 
 const member = (openid: string, nickname = '小明'): ClaimedMember =>
   ({ openid, nickname, scene: 'c2c', sceneName: '私聊', claimedAt: 0 });
 
 describe('whitelist export', () => {
-  it('copies exact full IDs one per line in list order, without duplicates', () => {
-    expect(whitelistOpenIds([member('full-id-a'), member('full-id-b'), member('full-id-a')])).toBe('full-id-a\nfull-id-b');
-    expect(whitelistOpenIds([])).toBe('');
+  it('copies ID:name entries one per line, keeping spaces in names and omitting empty names', () => {
+    expect(whitelistEntries([
+      member('ABCD1234EFGH', ''), member('WXYZ5678', '小明'), member('IJKL0000', 'Alice Zhang'),
+    ])).toBe('ABCD1234EFGH\nWXYZ5678:小明\nIJKL0000:Alice Zhang');
+  });
+
+  it('preserves list order without duplicate IDs or empty nickname suffixes', () => {
+    expect(whitelistEntries([member('a', '  小明  '), member('b', '   '), member('a', 'other')]))
+      .toBe('a:小明\nb');
+    expect(whitelistEntries([])).toBe('');
   });
 
   it.each(['owner', 'allow-c2c', 'allow-group'] as const)('exports %s with a typed header and escaped names', purpose => {

@@ -7,6 +7,7 @@ import { ConversationStore } from '../conversations/index.ts';
 import { ConversationService } from './conversation-service.ts';
 import { PairingService } from './pairing-service.ts';
 import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
+import { whitelistEntries } from '../client/whitelist-export.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
@@ -23,6 +24,40 @@ function fixture() {
 }
 
 describe('membership persistence and pairing scope', () => {
+  it.each(['owner', 'allow-c2c', 'allow-group'] as const)('can reimport copied %s entries with nicknames using lines or commas', purpose => {
+    const { service } = fixture();
+    for (const separator of ['\n', ',']) {
+      expect(service.addManualMember(purpose, ['ABCD1234EFGH', 'WXYZ5678:小明', 'IJKL0000:Alice Zhang'].join(separator)))
+        .toMatchObject({ ok: true, added: 3 });
+      const status = service.pairStatus();
+      const members = purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
+      expect(whitelistEntries(members)).toBe('ABCD1234EFGH\nWXYZ5678:小明\nIJKL0000:Alice Zhang');
+    }
+  });
+  it.each([undefined, '', '   '])('reuses a saved nickname when the QQ message has no nickname (%s)', senderName => {
+    const { service } = fixture();
+    service.renameMember('sender', 'Saved Nickname');
+    const code = service.issuePairCode('allow-c2c');
+    const result = service.beginClaimFromMessage('c2c', 'sender', code.code, 'sender', senderName);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('Saved Nickname');
+    expect(fixture().service.pairStatus().allowC2c[0]?.nickname).toBe('Saved Nickname');
+  });
+
+  it('does not erase a saved nickname when adding the same OpenID without a new name', () => {
+    const { service } = fixture();
+    service.addManualMember('allow-c2c', 'sender:Saved Nickname');
+    service.addManualMember('allow-c2c', 'sender');
+    expect(fixture().service.pairStatus().allowC2c[0]?.nickname).toBe('Saved Nickname');
+  });
+
+  it('addresses an unnamed private sender directly without inventing a nickname', () => {
+    const { service } = fixture();
+    const code = service.issuePairCode('allow-c2c');
+    const result = service.beginClaimFromMessage('c2c', 'sender', code.code, 'sender');
+    expect(result.message).toBe('✅ 已将你加入私聊白名单。');
+    expect(fixture().service.pairStatus().allowC2c[0]?.nickname).toBe('');
+  });
   it('retains manually added names and scenes after the service and store reopen', () => {
     const { service, store } = fixture();
     expect(service.addManualMember('allow-c2c', 'alice:Alice').ok).toBe(true);

@@ -26,6 +26,7 @@ import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
+import { messageSenderName } from '../shared/message-sender-name.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
@@ -38,6 +39,33 @@ export function setupMiddlewares(
 
   // 2. 消息过滤：bot 回声 + 消息去重
   bot.use(messageFilter({ skipSelfEcho: false }));
+
+  const mention = mentionGate({ requireMentionInGroup: config.requireMention });
+  const limit = rateLimiter();
+
+  // 有效网页邀请是加白入口，必须先于访问控制；普通消息仍走下方策略。
+  bot.use(async (ctx, next) => {
+    const service = manager.conversations;
+    const content = ctx.message.content
+      .replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
+    if (!service || !content || content.length > 32 || !service.isActivePairCode(content)) {
+      await next();
+      return;
+    }
+    await mention(ctx, async () => limit(ctx, async () => {
+      try {
+        const result = service.beginClaimFromMessage(
+          ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
+          ctx.message.senderId, messageSenderName(ctx.message),
+        );
+        await ctx.bot.sendText(ctx.replyTarget, result.message);
+      } catch (err) {
+        logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
+        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
+      }
+      ctx.stop('claim-result');
+    }));
+  });
 
   // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
   bot.use(accessPolicy({
@@ -70,9 +98,7 @@ export function setupMiddlewares(
   }));
 
   // 5. 群聊 @bot 门控
-  bot.use(mentionGate({
-    requireMentionInGroup: config.requireMention,
-  }));
+  bot.use(mention);
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
@@ -80,7 +106,7 @@ export function setupMiddlewares(
   }));
 
   // 7. 三层限流（sender / group / global）
-  bot.use(rateLimiter());
+  bot.use(limit);
 
   bot.use(async (ctx, next) => {
     const service = manager.conversations;
@@ -110,26 +136,6 @@ export function setupMiddlewares(
     }
     await next();
   });
-  // 裸 token 认领：仅当消息文本恰好是"当前正在生成、未过期的配对码"时才拦截；否则原样放行给 agent。
-  bot.use(async (ctx, next) => {
-    const service = manager.conversations;
-    const content = ctx.message.content.trim();
-    if (service && content.length > 0 && content.length <= 32 && service.isActivePairCode(content)) {
-      // 认领处理失败绝不能冒泡中断中间件链（否则 SDK 重连、消息丢失）。
-      try {
-        const result = service.beginClaimFromMessage(ctx.replyTarget.scope, ctx.replyTarget.targetId, content, ctx.message.senderId, ctx.message.senderName);
-        await ctx.bot.sendText(ctx.replyTarget, result.message);
-      } catch (err) {
-        logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
-        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
-      }
-      ctx.stop('claim-result'); return;
-    }
-    await next();
-  });
-
-
-
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
   bot.use(questionAnswer(manager));
 

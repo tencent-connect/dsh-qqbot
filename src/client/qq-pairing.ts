@@ -7,7 +7,7 @@
 import { createElement as h, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Input, Modal, IconCopyOutlineRegular, IconDownloadOutlineRegular, IconPlusOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import { usePairingStyles } from './qq-pairing-styles.ts';
-import { downloadWhitelist, whitelistOpenIds } from './whitelist-export.ts';
+import { downloadWhitelist, whitelistEntries } from './whitelist-export.ts';
 import { fetchJson } from './http.ts';
 import {
   PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH,
@@ -58,11 +58,11 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     catch { /* 剪贴板不可用时静默：码本身可见可手抄 */ }
   }, []);
 
-  const copyOpenIds = async (value: string): Promise<void> => {
+  const copyOpenIds = async (value: string, message = 'OpenID 已复制。'): Promise<void> => {
     try {
       if (!globalThis.navigator?.clipboard?.writeText) throw new Error('剪贴板不可用，请选择 OpenID 手动复制。');
       await globalThis.navigator.clipboard.writeText(value);
-      setMsg('OpenID 已复制。');
+      setMsg(message);
     } catch (error) {
       setMsg(error instanceof Error ? error.message : '复制失败，请选择 OpenID 手动复制。');
     }
@@ -127,7 +127,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       h('div', { className: 'imqq-pairTitle' }, h('strong', null, title), status ? h('span', { className: 'imqq-pairCount' }, `(${members.length})`) : null),
       h('div', { className: 'imqq-pairToolbar' },
       h(Button, { variant: 'outline', size: 'sm', icon: h(IconPlusOutlineRegular, { size: 14 }), disabled: busy, onClick: openAdd }, '添加'),
-      h(Button, { variant: 'outline', size: 'sm', icon: h(IconCopyOutlineRegular, { size: 14 }), 'aria-label': `复制${title}全部 OpenID`, disabled: members.length === 0 || status === null || error !== null, onClick: () => { void copyOpenIds(whitelistOpenIds(members)); } }, '复制全部'),
+      h(Button, { variant: 'outline', size: 'sm', icon: h(IconCopyOutlineRegular, { size: 14 }), 'aria-label': `复制${title}全部 OpenID 和昵称`, title: '每行一个 OpenID:昵称，可直接粘贴到批量添加', disabled: members.length === 0 || status === null || error !== null, onClick: () => { void copyOpenIds(whitelistEntries(members), '名单已复制（OpenID:昵称，每行一个）。'); } }, '复制全部'),
       h(Button, { variant: 'outline', size: 'sm', icon: h(IconDownloadOutlineRegular, { size: 14 }), disabled: members.length === 0 || status === null || error !== null, onClick: () => {
         try { downloadWhitelist(members, purpose); }
         catch (error) { setMsg(error instanceof Error ? error.message : '导出失败'); }

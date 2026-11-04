@@ -46,6 +46,7 @@ export class ConversationService {
 
   /** 把（openid + 展示资料）写入指定名单（超管 / 私聊白名单 / 群白名单）。返回是否成功。 */
   private applyMember(purpose: PairPurpose, openid: string, nickname: string, scene: 'group' | 'c2c', sceneName: string): { ok: boolean; message: string } {
+    nickname = nickname.trim() || this.store.memberProfiles()[openid]?.nickname || '';
     const member: ClaimedMember = { openid, nickname, scene, sceneName, claimedAt: Date.now() };
     if (purpose === 'owner') {
       this.store.claimOwner(openid, { nickname, scene, sceneName, claimedAt: member.claimedAt });
@@ -57,11 +58,11 @@ export class ConversationService {
       : { ...access, c2cMode: 'allowlist' as const, c2cAllow: [...new Set([...access.c2cAllow, openid])] };
     const persisted = updateProfileConfig({ access: nextAccess }, getProfileDir() ?? undefined, this.logger);
     if (persisted) this.config.access = nextAccess;
-    const label = purpose === 'allow-group' ? `群「${nickname || '本群'}」` : `「${nickname || '该用户'}」`;
+    const label = purpose === 'allow-group' ? `群「${nickname || '本群'}」` : nickname ? `「${nickname}」` : '你';
     if (!persisted) return { ok: false, message: `⚠️ 已匹配 ${label}，但写入 profile 失败（源码直载？）。请手动加入白名单。` };
     this.store.setMemberProfile(openid, { nickname, scene, sceneName, claimedAt: member.claimedAt });
     this.pairing.recordClaimed(member);
-    return { ok: true, message: `✅ 已把 ${label} 加入${purpose === 'allow-group' ? '群' : '私聊'}白名单。` };
+    return { ok: true, message: `✅ 已将${label}加入${purpose === 'allow-group' ? '群' : '私聊'}白名单。` };
   }
 
   /**
@@ -82,11 +83,12 @@ export class ConversationService {
     const entry = this.entry(scope, peerId);
     // 群白名单是对「群」加白：身份用群 openID（peerId），昵称用群名；其余用发送者 openID。
     const isGroupAllow = purpose === 'allow-group';
+    const savedName = this.store.memberProfiles()[isGroupAllow ? peerId : senderId]?.nickname;
     const actor: PendingActor = {
       openid: isGroupAllow ? peerId : senderId,
       nickname: isGroupAllow
-        ? (entry.name || entry.alias || '本群')
-        : (senderName ?? (scope === 'c2c' ? (entry.alias || entry.name) : '') ?? ''),
+        ? (entry.alias || savedName || entry.name || '')
+        : (senderName?.trim() || savedName || (scope === 'c2c' ? (entry.alias || entry.name) : '') || ''),
       scope: scope === 'group' ? 'group' : 'c2c',
       sceneName: scope === 'group' ? (entry.name || entry.alias || '本群') : (entry.alias || entry.name || '私聊'),
     };

@@ -1,8 +1,14 @@
 import type { ClaimedMember, PairPurpose } from '../shared/pairing-protocol.ts';
 import { PAIR_PURPOSE_LABEL } from '../shared/pairing-protocol.ts';
 
-export function whitelistOpenIds(members: readonly ClaimedMember[]): string {
-  return [...new Set(members.map(member => member.openid))].join('\n');
+export function whitelistEntries(members: readonly ClaimedMember[]): string {
+  const entries = new Map<string, string>();
+  for (const { openid, nickname } of members) {
+    if (entries.has(openid)) continue;
+    const name = nickname.trim();
+    entries.set(openid, name ? `${openid}:${name}` : openid);
+  }
+  return [...entries.values()].join('\n');
 }
 
 /** Quote CSV fields and neutralize spreadsheet formulas in editable display names. */
