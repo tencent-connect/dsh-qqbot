@@ -24,6 +24,7 @@ export class StreamingWriter {
   private fullText = '';
   private session: StreamSessionLike | null = null;
   private sentChunkCount = 0;
+  private updateAttempted = false;
   private failed = false;
   private finished = false;
   private aborted = false;
@@ -38,7 +39,7 @@ export class StreamingWriter {
 
   /** 是否应降级为静态发送：从未成功发送过任何分片 */
   public get shouldFallback(): boolean {
-    return this.sentChunkCount === 0;
+    return this.sentChunkCount === 0 && !this.updateAttempted;
   }
 
   /** 累积全文（降级静态发送时使用） */
@@ -113,6 +114,7 @@ export class StreamingWriter {
     // 串行 complete（排在 pending update 之后），关闭已打开的流式会话
     this.chain = this.chain.then(async () => {
       if (this.session) {
+        if (this.session.cancel) { this.session.cancel(); return; }
         try {
           await this.session.complete();
         } catch (err) {
@@ -148,9 +150,11 @@ export class StreamingWriter {
     }
 
     try {
+      this.updateAttempted = true;
       await this.session.update(this.fullText);
       this.sentChunkCount++;
     } catch (err) {
+      this.failed = true;
       // update 失败：不标记 failed（session 已打开，finish 会 complete 关闭）
       this.deps.logger.warn(
         `im-qqbot: stream update failed: ${err instanceof Error ? err.message : String(err)}`,

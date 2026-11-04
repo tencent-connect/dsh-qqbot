@@ -9,14 +9,14 @@ function payload(frame: unknown, agentId = 'sess-qq'): unknown {
 describe('parseStreamFrame', () => {
   it('start 帧归一化为 attempt-start', () => {
     expect(parseStreamFrame(payload({ type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 })))
-      .toEqual({ agentId: 'sess-qq', delta: { kind: 'attempt-start', attemptId: 'a1' } });
+      .toEqual({ agentId: 'sess-qq', delta: { kind: 'attempt-start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } });
   });
 
   it('text-delta chunk 归一化为 text-delta', () => {
     expect(parseStreamFrame(payload({
       type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 1,
       chunk: { type: 'text-delta', index: 0, text: 'hi' },
-    }))).toEqual({ agentId: 'sess-qq', delta: { kind: 'text-delta', attemptId: 'a1', text: 'hi' } });
+    }))).toEqual({ agentId: 'sess-qq', delta: { kind: 'text-delta', attemptId: 'a1', text: 'hi', revision: 1, index: 0 } });
   });
 
   it.each([
