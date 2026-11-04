@@ -1,4 +1,8 @@
 /** Same-origin JSON requests with bounded waiting and actionable HTTP errors. */
+export class HttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 export async function fetchJson<T>(path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<T> {
   const controller = new AbortController();
   const callerSignal = init.signal;
@@ -16,7 +20,7 @@ export async function fetchJson<T>(path: string, init: RequestInit = {}, timeout
     const response = await fetch(path, { ...init, signal: controller.signal });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as { error?: string } | null;
-      throw new Error(body?.error ?? `请求失败（HTTP ${response.status}）`);
+      throw new HttpError(response.status, body?.error ?? `请求失败（HTTP ${response.status}）`);
     }
     return await response.json() as T;
   } catch (error) {

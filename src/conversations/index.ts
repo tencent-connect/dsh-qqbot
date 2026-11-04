@@ -110,11 +110,17 @@ export class ConversationStore {
     const owners = validateOwnerIds(ids);
     const profiles = { ...(this.catalog.memberProfiles ?? {}) };
     // 删除已不在名单里的 profile，避免残留展示资料。
-    for (const id of Object.keys(profiles)) if (!owners.includes(id)) delete profiles[id];
+    for (const id of this.catalog.owners) if (!owners.includes(id)) delete profiles[id];
     this.commit({ ...this.catalog, owners, memberProfiles: profiles });
   }
   /** 全部认领成员资料（openid -> profile）。 */
   public memberProfiles(): Record<string, MemberProfile> { return clone(this.catalog.memberProfiles ?? {}); }
+  public setMemberProfile(openid: string, profile: MemberProfile): void {
+    this.assertWritable();
+    const [id] = strings([openid]);
+    if (id === undefined) throw new TypeError('QQ 用户标识无效');
+    this.commit({ ...this.catalog, memberProfiles: { ...this.catalog.memberProfiles, [id]: clone(profile) } });
+  }
   /** 更新某成员的展示昵称（不改 openid 身份）。 */
   public setMemberNickname(openid: string, nickname: string): void {
     this.assertWritable();

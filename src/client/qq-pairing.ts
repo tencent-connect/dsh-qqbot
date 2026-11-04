@@ -68,7 +68,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     }
   };
 
-  // 该码"曾在轮询中出现过、之后又消失"才算认领成功（否则刚生成的瞬间会被误判）。
+  // 配对码消失也可能是服务重载，不能据此认定已加入名单。
   const codeSeen = useRef(false);
   useEffect(() => {
     if (code === null || status === null) { codeSeen.current = false; return; }
@@ -79,7 +79,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       const expired = Date.now() > code.expiresAt;
       setCode(null);
       if (expired) { setMsg('配对码已过期，请重新生成'); }
-      else { setMsg('该配对码已被认领 ✔'); setAddOpen(false); onChange?.(); }
+      else { setMsg('配对码已结束，请核对名单；未加入时请重新生成。'); onChange?.(); }
     }
   }, [status, code, onChange]);
 
@@ -116,7 +116,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
     void fetchJson<{ message?: string; added?: number }>(PAIR_MANUAL_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
-      .then((r) => { setManualOpenid(''); setMsg(r.message ?? '已添加 ✔'); reload(); onChange?.(); })
+      .then((r) => { setManualOpenid(''); setCode(null); codeSeen.current = false; setMsg(r.message ?? '已添加 ✔'); reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '添加失败'))
       .finally(() => setBusy(false));
   };
@@ -172,7 +172,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
           h('div', { className: 'imqq-pairCodeActions' },
             h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => { void copyPairCode(code.code); } }, copied ? '已复制' : '复制'),
             h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '重新生成')))
-          : h('p', { className: 'imqq-pairHint' }, '正在生成配对码…'),
+          : h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '生成配对码'),
         h('h4', { className: 'imqq-pairSectionTitle' }, '方式二 · 直接按 openID 添加'),
         h('p', { className: 'imqq-pairHint' }, '每行一个（也支持用逗号分隔）。格式：openID 或 openID:昵称。例如：'),
         h('pre', { className: 'imqq-pairExample' }, 'ABCD1234EFGH\nWXYZ5678:小明\nIJKL0000:Alice Zhang'),

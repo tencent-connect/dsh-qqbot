@@ -17,6 +17,9 @@ import {
   persistCredentialsToProfile,
   removeCredentialsFromProfile,
   updateProfileConfig,
+  readProfileAccess,
+  accessRevision,
+  AccessConfigConflict,
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
@@ -391,7 +394,12 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     const current = options.currentConfig?.() ?? {};
     // Never return secrets or configuration belonging to the retired memory backend.
     const { appSecret: _s, memory: _retired, ...safe } = current;
-    sendJson(res, 200, { config: safe });
+    try {
+      const access = readProfileAccess(current.access, getProfileDir() ?? undefined);
+      sendJson(res, 200, { config: { ...safe, access, accessRevision: accessRevision(access) } });
+    } catch {
+      sendJson(res, 503, { error: '无法读取访问设置，请检查 profile 配置文件。' });
+    }
     return;
   }
 
@@ -410,7 +418,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   // 白名单与凭据/只读字段拦截
   for (const key of Object.keys(submitted)) {
-    if (!EDITABLE_CONFIG_KEYS.has(key)) {
+    if (key !== 'accessRevision' && !EDITABLE_CONFIG_KEYS.has(key)) {
       const reason = key === 'appId' || key === 'appSecret'
         ? '凭据请使用绑定/更换/解绑功能'
         : key === 'cwd'
@@ -424,7 +432,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
   // 逐键 Schema 校验（非法值拒绝，返回首个错误）
   let validated: Record<string, unknown> = {};
   try {
-    validated = Object.fromEntries(Object.entries(submitted).map(([key, value]) => {
+    validated = Object.fromEntries(Object.entries(submitted).filter(([key]) => key !== 'accessRevision').map(([key, value]) => {
       const check = EDITABLE_CONFIG_SCHEMAS[key];
       if (check === undefined) throw new TypeError(`不支持的字段: ${key}`);
       return [key, check(value)];
@@ -434,9 +442,23 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     return;
   }
 
-  const persisted = options.onUpdateConfig === undefined
-    ? updateProfileConfig(validated, getProfileDir() ?? undefined, undefined)
-    : options.onUpdateConfig(validated);
+  let persisted: boolean;
+  try {
+    const fallback = options.currentConfig?.().access;
+    const current = readProfileAccess(fallback, getProfileDir() ?? undefined);
+    if (validated.access !== undefined && submitted.accessRevision !== accessRevision(current)) {
+      sendJson(res, 409, { ok: false, error: new AccessConfigConflict().message });
+      return;
+    }
+    persisted = options.onUpdateConfig === undefined
+      ? updateProfileConfig(validated, getProfileDir() ?? undefined, undefined,
+        validated.access === undefined ? undefined : { revision: accessRevision(current), fallback })
+      : options.onUpdateConfig(validated);
+  } catch (error) {
+    sendJson(res, error instanceof AccessConfigConflict ? 409 : 500,
+      { ok: false, error: error instanceof AccessConfigConflict ? error.message : '无法读取或保存配置，请检查 profile 配置文件。' });
+    return;
+  }
   if (!persisted) {
     sendJson(res, 500, { ok: false, error: '无法定位 profile 目录或写入失败' });
     return;

@@ -9,6 +9,7 @@ export interface AccessControlWire {
 
 /** Credential secrets are never included in the browser settings response. */
 export interface ConfigWire {
+  accessRevision?: string;
   appId?: string;
   requireMention?: boolean;
   streaming?: boolean;
@@ -23,11 +24,12 @@ export interface ConfigWire {
   cwd?: string;
 }
 
-const EDITABLE_KEYS = ['access'] as const;
+const EDITABLE_KEYS = ['access', 'requireMention', 'streaming', 'showToolResults', 'debug',
+  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt'] as const;
 const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
 export const DEFAULT_ACCESS: AccessControlWire = {
-  c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'open',
+  c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'open',
 };
 
 function equal(a: unknown, b: unknown): boolean {
@@ -84,6 +86,7 @@ export function configDraft(baseline: ConfigWire, form: ConfigWire): ConfigDraft
   const pick = (source: ConfigWire): ConfigWire => {
     const value: ConfigWire = {};
     if (source.appId !== undefined) value.appId = source.appId;
+    if (source.accessRevision !== undefined) value.accessRevision = source.accessRevision;
     for (const key of EDITABLE_KEYS) {
       if (source[key] !== undefined) Object.assign(value, { [key]: source[key] });
     }
@@ -97,7 +100,7 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
   const validConfig = (candidate: unknown): candidate is ConfigWire => {
     if (candidate === null || typeof candidate !== 'object') return false;
     const fields = candidate as Record<string, unknown>;
-    for (const key of ['appId', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
+    for (const key of ['appId', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'string') return false;
     }
     for (const key of ['requireMention', 'streaming', 'showToolResults', 'debug']) {

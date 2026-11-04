@@ -24,6 +24,7 @@ import {
 import type { BindingService } from './binding-service.ts';
 import { RUNTIME_STATE_PATH } from '../shared/runtime-protocol.ts';
 import { RuntimeState } from '../runtime/state.ts';
+import { accessRevision, readProfileAccess, updateProfileConfig } from './persist.ts';
 
 /** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
 const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -339,7 +340,8 @@ describe('bind-routes', () => {
     const res = fakeRes();
     await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
     expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ config: { appId: '102120114', requireMention: true, cwd: '/tmp/w' } });
+    expect(json(res)).toMatchObject({ config: { appId: '102120114', requireMention: true, cwd: '/tmp/w', accessRevision: expect.any(String) } });
+    expect(res.body).not.toMatch(/SECRET|retired.example/);
   });
 
   it('POST config：白名单内合法值通过并触发合并写入', async () => {
@@ -348,7 +350,8 @@ describe('bind-routes', () => {
     await invoke(
       routes.get(BIND_CONFIG_PATH),
       fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
-        '{"requireMention":false,"access":{"c2cMode":"allowlist","c2cAllow":["u1"],"groupMode":"open","groupAllow":[]}}'),
+        JSON.stringify({ requireMention: false, accessRevision: accessRevision(readProfileAccess(undefined)),
+          access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] } })),
       res,
     );
     expect(res.statusCode).toBe(200);
@@ -360,10 +363,49 @@ describe('bind-routes', () => {
     const { routes } = createHarness({ onUpdateConfig });
     const res = fakeRes();
     await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({
+      accessRevision: accessRevision(readProfileAccess(undefined)),
       access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: ['group'], commandMode },
     })), res);
     expect(res.statusCode).toBe(200);
     expect(onUpdateConfig).toHaveBeenCalledWith(expect.objectContaining({ access: expect.objectContaining({ commandMode, groupAllow: ['group'] }) }));
+  });
+
+  it.each(['c2cAllow', 'groupAllow'] as const)('rejects a stale %s snapshot after revocation and accepts a refreshed mode change', async list => {
+    profileDirState.dir = mkdtempSync(join(tmpdir(), 'qq-access-revoke-'));
+    const initial = readProfileAccess(undefined);
+    initial[list] = ['revoked-peer'];
+    updateProfileConfig({ access: initial }, profileDirState.dir);
+    const { routes } = createHarness({ currentConfig: () => ({ access: initial }) });
+    const read = async () => {
+      const res = fakeRes();
+      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: 'localhost' }), res);
+      return JSON.parse(res.body).config;
+    };
+    const old = await read();
+    updateProfileConfig({ access: { ...initial, [list]: [] } }, profileDirState.dir);
+    const fresh = await read();
+    expect(fresh.access[list]).toEqual([]);
+    const staleSave = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+      access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
+    })), staleSave);
+    expect(staleSave.statusCode).toBe(409);
+    expect(readProfileAccess(initial, profileDirState.dir)[list]).toEqual([]);
+    const save = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+      access: { ...fresh.access, commandMode: 'disabled' }, accessRevision: fresh.accessRevision,
+    })), save);
+    expect(save.statusCode).toBe(200);
+    expect(readProfileAccess(initial, profileDirState.dir)).toMatchObject({ [list]: [], commandMode: 'disabled' });
+  });
+
+  it('rejects access writes without a revision instead of trusting an old browser', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({ access: readProfileAccess(undefined) })), res);
+    expect(res.statusCode).toBe(409);
+    expect(onUpdateConfig).not.toHaveBeenCalled();
   });
 
   it('rejects unknown command modes before writing the profile', async () => {

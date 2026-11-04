@@ -7,13 +7,13 @@
  * 已由宿主剔除）→ 表单编辑 → dirty diff → POST 仅提交变更键 →
  * 宿主白名单 + Schema 校验 → 最小写入 profile patch → HMR 重载生效。
  *
- * 这里只维护账号访问范围；Agent 默认设置通过独立的版本化接口保存。
+ * 保留上游的回复、模型与提示词设置，并管理账号访问范围。
  */
 import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
-import { fetchJson } from './http.ts';
+import { fetchJson, HttpError } from './http.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
 import type { SelectorSource } from './host-selectors.ts';
 import { SlashCommandList } from './slash-command-list.ts';
@@ -72,7 +72,11 @@ function useConfigPanelStyles(): void {
 .imqb2-form .imqc-hint { color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .imqb2-form .imqc-error { color: var(--dsw-alias-state-error-primary); }
 .imqb2-form .imqc-cmdList { margin: 12px 0; }
-.imqb2-form .imqc-cmdRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.imqb2-form .imqc-cmdContent { padding: 4px 0 4px 22px; font-size: 13px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
+.imqb2-form .imqc-cmdGroup + .imqc-cmdGroup { margin-top: 16px; }
+.imqb2-form .imqc-cmdGroup > strong { font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
+.imqb2-form .imqc-cmdRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; overflow-wrap: anywhere; }
+.imqb2-form .imqc-cmdRow code { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 12px; }
 .imqb2-details { margin-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .imqb2-summary { padding: 16px 0; font-size: 13px; font-weight: 500; cursor: pointer; }
 .imqb2-summary::marker { color: var(--dsw-alias-label-tertiary); }
@@ -243,8 +247,8 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
         replaceDraft({ baseline: config, form });
         setDraftNotice(hadDraft && isConfigDirty(config, form) ? '已保留未保存的修改，其余配置已更新。' : null);
         setLoadError(null);
-        if (expected !== null) setResult(matchesSavedConfig(config, expected) && !isConfigDirty(config, form)
-          ? { kind: 'confirmed', message: '配置已保存并生效。' } : null);
+        setResult(expected !== null && matchesSavedConfig(config, expected) && !isConfigDirty(config, form)
+          ? { kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' } : null);
       })
       .catch((error: unknown) => {
         if (!stopped) setLoadError(error instanceof Error ? error.message : String(error));
@@ -276,7 +280,8 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
     setBusy(true);
     setResult(null);
     void fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(changed), signal: controller.signal,
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...changed, ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }) }), signal: controller.signal,
     })
       .then(async (body) => {
         if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
@@ -291,13 +296,15 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
         if (config !== undefined) {
           pendingConfirmation.current = null;
           replaceDraft({ baseline: config, form: config });
-          setResult({ kind: 'confirmed', message: '配置已保存并生效。' });
+          setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
         } else {
           setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
         }
       })
       .catch((error: unknown) => {
-        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。` });
+        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: error instanceof HttpError && error.status === 409
+          ? `${error.message}草稿已保留，请先刷新配置。`
+          : `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。` });
       })
       .finally(() => {
         if (saveController.current === controller) {
@@ -350,9 +357,32 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
       }) : null,
       commandsError ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
       createElement(SlashCommandList, { commands }),
-
-
-
+      createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
+      ...([
+        ['requireMention', '群聊仅回复 @机器人的消息'],
+        ['streaming', '流式输出'],
+        ['showToolResults', '显示工具调用结果'],
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+        createElement('div', { className: 'imqb2-head' },
+          createElement('span', { className: 'imqb2-label' }, label),
+          createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
+            onChange: (value: boolean) => patch(key, value) })))),
+      createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
+      ...([
+        ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
+        createElement(Input, { id: `imqq-${key}`, value: form[key] ?? '', placeholder: '留空继承 DSH 默认',
+          onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch(key, event.target.value) }))),
+      ...([
+        ['groupPrompt', '群聊补充提示词'], ['directPrompt', '私聊补充提示词'],
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
+        createElement('textarea', { id: `imqq-${key}`, className: 'imqb2-textarea', value: form[key] ?? '', rows: 3,
+          onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => patch(key, event.target.value) }))),
+      form.cwd === undefined ? null : createElement('div', { className: 'imqb2-field' },
+        createElement('span', { className: 'imqb2-label' }, 'Agent 工作目录（只读）'),
+        createElement('p', { className: 'imqb2-readonly' }, form.cwd)),
     ),
     createElement('div', { className: 'imqb2-footer' },
       createElement('p', { className: `imqb2-note${result === null ? '' : result.kind === 'failed' ? ' imqb2-note--error' : ' imqb2-note--ok'}`, role: result?.kind === 'failed' ? 'alert' : 'status', 'aria-live': 'polite' }, message),

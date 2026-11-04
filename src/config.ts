@@ -10,7 +10,7 @@ export interface AccessControlConfig {
   c2cAllow: string[];
   /** 群聊访问模式 */
   groupMode: 'open' | 'allowlist' | 'disabled';
-  /** QQ 斜杠命令模式，缺省仅命令白名单可用 */
+  /** QQ 斜杠命令模式，缺省所有获准接入的发送者可用 */
   commandMode?: 'open' | 'allowlist' | 'disabled';
   /** 群聊白名单（group openid） */
   groupAllow: string[];

@@ -13,9 +13,35 @@
  *    验证本插件条目正确、其他条目集合不变，失败则回滚原内容。
  */
 import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { parseDocument, isMap, isSeq, isScalar, YAMLMap, type Document, type YAMLSeq } from 'yaml';
 import type { Logger } from '../types.ts';
+import { AccessControlSchema, type AccessControlConfig } from '../config.ts';
+
+export class AccessConfigConflict extends Error {
+  constructor() { super('访问设置或白名单已更新，请刷新配置后确认并保存。'); }
+}
+
+export function accessRevision(access: AccessControlConfig): string {
+  return createHash('sha256').update(JSON.stringify([
+    access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? 'open',
+  ])).digest('hex');
+}
+
+function savedAccess(config: YAMLMap | undefined, fallback: unknown): AccessControlConfig {
+  const base = AccessControlSchema((fallback ?? {}) as never);
+  const node = config?.get('access', true);
+  if (node === undefined) return base;
+  if (!isMap(node)) throw new PatchFormatError('access 必须是映射');
+  return AccessControlSchema({ ...base, ...node.toJSON() });
+}
+
+/** Read persisted membership even while the old plugin fiber is still serving requests. */
+export function readProfileAccess(fallback: unknown, profileDir?: string): AccessControlConfig {
+  const path = profileDir && resolve(profileDir, 'cordis.patch.yml');
+  return savedAccess(path && existsSync(path) ? findEntryConfig(parseProfilePatch(readFileSync(path, 'utf8'))) : undefined, fallback);
+}
 
 /** 凭据结果 */
 export interface SetupCredentials {
@@ -355,6 +381,7 @@ export function updateProfileConfig(
   configPatch: Record<string, unknown>,
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
+  accessCondition?: { revision: string; fallback: unknown },
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) {
@@ -367,6 +394,9 @@ export function updateProfileConfig(
     const ok = editProfilePatch(
       profileDir,
       ({ config, attached, appendEntry }) => {
+        if (accessCondition && accessRevision(savedAccess(config, accessCondition.fallback)) !== accessCondition.revision) {
+          throw new AccessConfigConflict();
+        }
         for (const [key, value] of Object.entries(configPatch)) {
           if (key === 'appId' || key === 'appSecret') continue;
           config.set(key, value);
@@ -384,6 +414,7 @@ export function updateProfileConfig(
     }
     return ok;
   } catch (err) {
+    if (err instanceof AccessConfigConflict) throw err;
     if (err instanceof PatchFormatError) {
       log.warn(`拒绝写入 cordis.patch.yml: ${err.message}（原文件保留）`);
       return false;

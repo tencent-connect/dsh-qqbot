@@ -6,7 +6,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import { updateProfileConfig } from '../setup/persist.ts';
+import { updateProfileConfig, readProfileAccess } from '../setup/persist.ts';
 export class ConversationService {
   readonly store: ConversationStore;
   readonly pairing = new PairingService();
@@ -38,7 +38,7 @@ export class ConversationService {
       };
     };
     const owners: ClaimedMember[] = this.store.ownerIds().map((openid) => toMember(openid));
-    const access = this.config.access;
+    const access = readProfileAccess(this.config.access, getProfileDir() ?? undefined);
     const allowC2c: ClaimedMember[] = [...access.c2cAllow].map((openid) => toMember(openid, 'c2c'));
     const allowGroup: ClaimedMember[] = [...access.groupAllow].map((openid) => toMember(openid, 'group'));
     return { challenges: this.pairing.listChallenges(), owners, allowC2c, allowGroup };
@@ -47,12 +47,11 @@ export class ConversationService {
   /** 把（openid + 展示资料）写入指定名单（超管 / 私聊白名单 / 群白名单）。返回是否成功。 */
   private applyMember(purpose: PairPurpose, openid: string, nickname: string, scene: 'group' | 'c2c', sceneName: string): { ok: boolean; message: string } {
     const member: ClaimedMember = { openid, nickname, scene, sceneName, claimedAt: Date.now() };
-    this.pairing.recordClaimed(member);
     if (purpose === 'owner') {
       this.store.claimOwner(openid, { nickname, scene, sceneName, claimedAt: member.claimedAt });
       return { ok: true, message: `✅ 已把「${nickname || openidTail(openid)}」加入斜杠命令白名单。` };
     }
-    const access = this.config.access;
+    const access = readProfileAccess(this.config.access, getProfileDir() ?? undefined);
     const nextAccess = purpose === 'allow-group'
       ? { ...access, groupMode: 'allowlist' as const, groupAllow: [...new Set([...access.groupAllow, openid])] }
       : { ...access, c2cMode: 'allowlist' as const, c2cAllow: [...new Set([...access.c2cAllow, openid])] };
@@ -60,6 +59,8 @@ export class ConversationService {
     if (persisted) this.config.access = nextAccess;
     const label = purpose === 'allow-group' ? `群「${nickname || '本群'}」` : `「${nickname || '该用户'}」`;
     if (!persisted) return { ok: false, message: `⚠️ 已匹配 ${label}，但写入 profile 失败（源码直载？）。请手动加入白名单。` };
+    this.store.setMemberProfile(openid, { nickname, scene, sceneName, claimedAt: member.claimedAt });
+    this.pairing.recordClaimed(member);
     return { ok: true, message: `✅ 已把 ${label} 加入${purpose === 'allow-group' ? '群' : '私聊'}白名单。` };
   }
 
@@ -72,8 +73,13 @@ export class ConversationService {
 
   /** 由 QQ 侧发起认领（群里/私聊直接发送配对码）：解析 actor + startClaim。 */
   beginClaimFromMessage(scope: ChatScope, peerId: string, code: string, senderId: string, senderName?: string): { ok: boolean; message: string } {
-    const entry = this.entry(scope, peerId);
     const purpose = this.pairing.peekPurpose(code);
+    if ((purpose === 'allow-group' && scope !== 'group') || (purpose === 'allow-c2c' && scope !== 'c2c')) {
+      return { ok: false, message: purpose === 'allow-group'
+        ? '请在目标群聊中 @机器人发送此配对码；配对码仍然有效。'
+        : '请在私聊中发送此配对码；配对码仍然有效。' };
+    }
+    const entry = this.entry(scope, peerId);
     // 群白名单是对「群」加白：身份用群 openID（peerId），昵称用群名；其余用发送者 openID。
     const isGroupAllow = purpose === 'allow-group';
     const actor: PendingActor = {
@@ -175,7 +181,7 @@ export class ConversationService {
   revokePair(openid: string, purpose: PairPurpose): { ok: boolean; message: string } {
     this.pairing.forget(openid);
     if (purpose === 'owner') { this.store.revokeOwner(openid); return { ok: true, message: '已从命令白名单移除' }; }
-    const access = this.config.access;
+    const access = readProfileAccess(this.config.access, getProfileDir() ?? undefined);
     const nextAccess = purpose === 'allow-group'
       ? { ...access, groupAllow: access.groupAllow.filter((id) => id !== openid) }
       : { ...access, c2cAllow: access.c2cAllow.filter((id) => id !== openid) };

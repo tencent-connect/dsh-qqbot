@@ -7,6 +7,7 @@ import {
   persistCredentialsToProfile,
   removeCredentialsFromProfile,
   updateProfileConfig,
+  readProfileAccess, accessRevision, AccessConfigConflict,
 } from './persist.ts';
 
 const credentials = { appId: 'test-app', appSecret: 'test-secret' };
@@ -45,6 +46,17 @@ const SHARED_PATCH = [
 ].join('\n');
 
 describe('persistCredentialsToProfile', () => {
+  it('checks membership revision again inside the profile write transaction', () => {
+    const original = readProfileAccess(undefined);
+    original.c2cAllow = ['removed'];
+    updateProfileConfig({ access: original }, dir, log);
+    const revision = accessRevision(original);
+    updateProfileConfig({ access: { ...original, c2cAllow: [] } }, dir, log);
+    const bytes = readFileSync(patchPath, 'utf8');
+    expect(() => updateProfileConfig({ access: original }, dir, log, { revision, fallback: original }))
+      .toThrow(AccessConfigConflict);
+    expect(readFileSync(patchPath, 'utf8')).toBe(bytes);
+  });
   it('更新凭据并完整保留其他插件条目、insert 行与注释', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
 
