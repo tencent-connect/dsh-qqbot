@@ -14,7 +14,7 @@
  * 运行时仅依赖 react（dsh 客户端平台种子表提供）；宿主通信走同源 fetch，
  * Desktop 下由壳的 IPC 桥自动附加 Host 认证转发。
  */
-import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createElement, useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import {
   BIND_MANUAL_PATH,
   BIND_REFRESH_PATH,
@@ -67,6 +67,10 @@ export function installPanelStyles(): void {
 .imqb-pageTitle { margin: 0 0 12px; font-size: 20px; line-height: 1.5; font-weight: 600; }
 .imqb-pageDescription { margin: 0 0 16px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .imqb-form { display: flex; flex-direction: column; gap: 12px; width: min(320px, 100%); box-sizing: border-box; }
+.imqb-credentialsModal { width: min(440px, 100%); max-height: 100%; overflow-y: auto; }
+.imqb-form--credentials { width: 100%; gap: 16px; }
+.imqb-form--credentials .imqb-field { gap: 6px; line-height: 1.5; }
+.imqb-form--credentials .imqb-field > span { box-sizing: border-box; }
 .imqb-field { display: flex; flex-direction: column; gap: 5px; text-align: left; font-size: 13px; }
 .imqb-error { margin: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; color: var(--dsw-alias-state-error-primary); }
 /* 紧凑状态视图（已绑定 / 过渡态）：设置行风格，无居中大卡留白 */
@@ -234,7 +238,8 @@ export async function submitManualCredentials(appId: string, appSecret: string):
  * appSecret 永不回显（占位符提示），提交成功后展示保存结果；
  * 宿主写入 profile patch 并经 HMR 重载，状态轮询随后收敛为 bound。
  */
-function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck: () => void }): ReactNode {
+function ManualForm({ initialAppId, recheck, onCancel }: { initialAppId?: string; recheck: () => void; onCancel?: () => void }): ReactNode {
+  const formId = useId();
   const [appId, setAppId] = useState(initialAppId ?? '');
   const [appSecret, setAppSecret] = useState('');
   const [busy, setBusy] = useState(false);
@@ -246,7 +251,7 @@ function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck:
     const trimmedId = appId.trim();
     const trimmedSecret = appSecret.trim();
     if (trimmedId.length === 0 || trimmedSecret.length === 0) {
-      setResult({ ok: false, error: 'appId 与 appSecret 均为必填' });
+      setResult({ ok: false, error: '请填写 AppID 和 AppSecret。' });
       return;
     }
     setBusy(true);
@@ -261,8 +266,13 @@ function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck:
     });
   }, [appId, appSecret, busy, recheck]);
 
-  if (result !== null && result.ok) {
-    return createElement('div', { className: 'imqb-status' },
+  const saveButton = createElement(Button, {
+    key: 'save', variant: 'primary', size: 'sm', type: 'submit', form: formId,
+    disabled: busy || !appId.trim() || !appSecret.trim(),
+  }, busy ? '正在保存…' : onCancel ? '保存凭据' : '保存');
+
+  const content = result !== null && result.ok
+    ? createElement('div', { className: 'imqb-status', role: 'status' },
       createElement('div', { className: 'imqb-status-row' },
         createElement('div', { className: 'imqb-status-icon' }, '✅'),
         createElement('div', { className: 'imqb-status-meta' },
@@ -271,17 +281,18 @@ function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck:
         ),
         createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: recheck }, '刷新状态'),
       ),
-    );
-  }
-
-  return createElement('form', { className: 'imqb-form', onSubmit: submit },
+    )
+    : createElement('form', {
+      id: formId, className: `imqb-form${onCancel ? ' imqb-form--credentials' : ''}`,
+      onSubmit: submit, 'aria-busy': busy,
+    },
     createElement('label', { className: 'imqb-field' },
       'AppID',
       createElement(Input, {
         value: appId, placeholder: 'QQ 机器人 AppID',
         disabled: busy,
         onChange: (event) => { setAppId(event.currentTarget.value); },
-        autoComplete: 'off', spellCheck: false,
+        autoComplete: 'off', spellCheck: false, required: true,
       }),
     ),
     createElement('label', { className: 'imqb-field' },
@@ -289,17 +300,32 @@ function ManualForm({ initialAppId, recheck }: { initialAppId?: string; recheck:
       createElement(Input, {
         type: 'password', value: appSecret,
         disabled: busy,
-        placeholder: initialAppId === undefined ? 'QQ 机器人 AppSecret' : '输入新的 AppSecret（不回显）',
+        placeholder: initialAppId === undefined ? 'QQ 机器人 AppSecret' : '输入新的 AppSecret',
         onChange: (event) => { setAppSecret(event.currentTarget.value); },
-        autoComplete: 'new-password',
+        autoComplete: 'new-password', required: true,
+        ...(onCancel ? { 'data-modal-autofocus': true } : {}),
       }),
     ),
     result !== null && !result.ok
       ? createElement('p', { className: 'imqb-error', role: 'alert' }, result.error)
       : null,
-    createElement(Button, { variant: 'primary', size: 'sm', type: 'submit', disabled: busy },
-      busy ? '正在保存…' : '保存'),
+    onCancel ? null : saveButton,
   );
+
+  if (!onCancel) return content;
+  return createElement(Modal, {
+    open: true, title: '更换凭据', closeLabel: '关闭更换凭据',
+    className: 'imqb-credentialsModal',
+    description: '填写 QQ 机器人凭据，保存后将重新连接。已有 AppSecret 不会回显。',
+    onClose: () => { if (!busy) onCancel(); },
+    children: content,
+    footer: result?.ok
+      ? createElement(Button, { type: 'button', variant: 'primary', size: 'sm', onClick: onCancel }, '完成')
+      : [
+        createElement(Button, { key: 'cancel', type: 'button', variant: 'outline', size: 'sm', disabled: busy, onClick: onCancel }, '取消'),
+        saveButton,
+      ],
+  });
 }
 
 /** QQ 机器人 logo 路径（assets/icons/qqbot_logo.svg，内嵌以保持 bundle 自包含） */
@@ -358,17 +384,6 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
     );
   }
 
-  if (editing) {
-    return createElement('div', { className: 'imqb-status' },
-      createElement('div', { className: 'imqb-status-row' },
-        createElement('div', { className: 'imqb-status-meta' },
-          createElement('p', { className: 'imqb-status-title' }, '更换凭据'),
-        ),
-        createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => { setEditing(false); } }, '返回'),
-      ),
-      createElement(ManualForm, { initialAppId: appId, recheck }),
-    );
-  }
   return createElement('div', { className: 'imqb-status' },
     createElement('div', { className: 'imqb-account' },
       createElement('div', { className: 'imqb-status-row' },
@@ -385,6 +400,7 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
     ),
     unbindResult !== null && !unbindResult.ok
       ? createElement('p', { className: 'imqb-error', role: 'alert' }, unbindResult.message) : null,
+    editing ? createElement(ManualForm, { initialAppId: appId, recheck, onCancel: () => setEditing(false) }) : null,
     createElement(Modal, { open: confirmUnbind, onClose: () => setConfirmUnbind(false), title: '解绑 QQ 机器人', closeLabel: '关闭', description: '清除本机保存的 QQ 凭据并重载连接，随后进入扫码绑定。会话历史保留；此操作不会移出 QQ 群或删除平台侧关系。', footer: createElement('div', { className: 'imqb-row' }, createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => setConfirmUnbind(false) }, '取消'), createElement(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: unbind }, '确认解绑')) }),
   );
 }
