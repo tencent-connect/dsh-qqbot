@@ -104,8 +104,9 @@ export class ConversationStore {
   public get(key: string): ConversationEntry | undefined { const entry = this.find(key); return entry ? clone(entry) : undefined; }
   public errors(): string[] { return [...this.storageErrors.values()]; }
   public legacyMigrationBlocked(): boolean { return this.prefsMigrationBlocked; }
-  public ownerIds(): string[] { return [...this.catalog.owners]; }
+  public ownerIds(): string[] { this.catalog = this.load(); return [...this.catalog.owners]; }
   public setOwnerIds(ids: string[]): void {
+    this.catalog = this.load();
     this.assertWritable();
     const owners = validateOwnerIds(ids);
     const profiles = { ...(this.catalog.memberProfiles ?? {}) };
@@ -114,8 +115,9 @@ export class ConversationStore {
     this.commit({ ...this.catalog, owners, memberProfiles: profiles });
   }
   /** 全部认领成员资料（openid -> profile）。 */
-  public memberProfiles(): Record<string, MemberProfile> { return clone(this.catalog.memberProfiles ?? {}); }
+  public memberProfiles(): Record<string, MemberProfile> { this.catalog = this.load(); return clone(this.catalog.memberProfiles ?? {}); }
   public setMemberProfile(openid: string, profile: MemberProfile): void {
+    this.catalog = this.load();
     this.assertWritable();
     const [id] = strings([openid]);
     if (id === undefined) throw new TypeError('QQ 用户标识无效');
@@ -123,6 +125,7 @@ export class ConversationStore {
   }
   /** 更新某成员的展示昵称（不改 openid 身份）。 */
   public setMemberNickname(openid: string, nickname: string): void {
+    this.catalog = this.load();
     this.assertWritable();
     const profiles = { ...(this.catalog.memberProfiles ?? {}) };
     const prev = profiles[openid];
@@ -131,6 +134,7 @@ export class ConversationStore {
   }
   /** 认领：把 openid 加入 owners 并记录展示资料（幂等，重复认领更新资料/时间）。 */
   public claimOwner(openid: string, profile: MemberProfile): void {
+    this.catalog = this.load();
     this.assertWritable();
     const [id] = strings([openid]);
     if (id === undefined) throw new TypeError('QQ 用户标识无效');
@@ -141,6 +145,7 @@ export class ConversationStore {
   }
   /** 撤销超管：从 owners 移除并删展示资料。 */
   public revokeOwner(openid: string): void {
+    this.catalog = this.load();
     this.assertWritable();
     const owners = this.catalog.owners.filter((id) => id !== openid);
     const profiles = { ...(this.catalog.memberProfiles ?? {}) };
@@ -149,6 +154,7 @@ export class ConversationStore {
   }
 
   public ensure(scope: ConversationEntry['scope'], peerId: string, options: EnsureOptions = {}): ConversationEntry {
+    this.catalog = this.load();
     const key = this.key(scope, peerId);
     const existing = this.find(key);
     if (this.prefsMigrationBlocked && existing) return clone(existing);

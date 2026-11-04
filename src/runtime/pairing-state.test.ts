@@ -38,4 +38,37 @@ describe('persistent pairing batches', () => {
     expect(() => new PairingService({ stateFile: path })).toThrow('配对码格式无效');
     expect(readFileSync(path, 'utf8')).toBe(broken);
   });
+  it('loads existing version-one batches and persists revocations without exposing them as claim receipts', () => {
+    const path = stateFile();
+    writeFileSync(path, JSON.stringify({ version: 1, challenges: [
+      { code: 'ABCDEF', purpose: 'allow-c2c', createdAt: 1000, expiresAt: 601000, claims: [] },
+    ] }));
+    const service = new PairingService({ stateFile: path, now: () => 1000 });
+    expect(service.isRevoked('ABCDEF', 'one')).toBe(false);
+    service.revokeIdentity('allow-c2c', 'one');
+    const reloaded = new PairingService({ stateFile: path, now: () => 1000 });
+    expect(reloaded.isRevoked('ABCDEF', 'one')).toBe(true);
+    expect(reloaded.listChallenges()[0]?.claims).toEqual([]);
+    expect(reloaded.listChallenges()[0]).not.toHaveProperty('revokedOpenids');
+  });
+  it('scopes a revocation to its purpose, preserves other members and allows a freshly issued code even at the same clock tick', () => {
+    const path = stateFile(); const service = new PairingService({ stateFile: path, now: () => 1000 });
+    const old = service.issue('allow-c2c'); const group = service.issue('allow-group'); const owner = service.issue('owner');
+    service.revokeIdentity('allow-c2c', 'one');
+    expect(service.isRevoked(old.code, 'one')).toBe(true);
+    expect(service.isRevoked(old.code, 'two')).toBe(false);
+    expect(service.isRevoked(group.code, 'one')).toBe(false);
+    expect(service.isRevoked(owner.code, 'one')).toBe(false);
+    const fresh = service.issue('allow-c2c');
+    expect(service.isRevoked(fresh.code, 'one')).toBe(false);
+    expect(service.hasActiveCode(old.code)).toBe(true);
+    expect(service.listChallenges().every(batch => batch.claims.length === 0)).toBe(true);
+  });
+  it.each([null, 'not-an-array', [42], [''], ['x'.repeat(1025)]])('rejects an invalid revocation list (%j)', revokedOpenids => {
+    const path = stateFile();
+    writeFileSync(path, JSON.stringify({ version: 1, challenges: [
+      { code: 'ABCDEF', purpose: 'allow-c2c', createdAt: 1000, expiresAt: 601000, claims: [], revokedOpenids },
+    ] }));
+    expect(() => new PairingService({ stateFile: path })).toThrow();
+  });
 });

@@ -8,15 +8,18 @@ import type { ConversationService } from './conversation-service.ts';
 
 export function registerConversationRoutes(ctx: Context, service: ConversationService, commands: () => unknown): void {
   ctx.inject(['webServer'], scoped => {
+    let active = true;
     const server = scoped.get('webServer') as WebServerLike;
     const disposers = [server.register({kind:'exact', path: CONVERSATIONS_PATH, handler: async (_req, res) => json(res,200,{ commands: commands() })})];
     const pairHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       try {
+        if (!active) return json(res, 503, { error: 'QQ 插件已重载，请刷新后重试' });
         if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: '跨来源请求被拒绝' });
         const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
         if (pathname === PAIR_STATUS_PATH) return json(res, 200, service.pairStatus());
         if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
         const body = await readBody(req);
+        if (!active) return json(res, 503, { error: 'QQ 插件已重载，请刷新后重试' });
         if (pathname === PAIR_ISSUE_PATH) {
           const purpose = body.purpose;
           if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
@@ -60,7 +63,7 @@ export function registerConversationRoutes(ctx: Context, service: ConversationSe
     disposers.push(server.register({ kind: 'exact', path: PAIR_REVOKE_PATH, handler: pairHandler }));
     disposers.push(server.register({ kind: 'exact', path: PAIR_MANUAL_PATH, handler: pairHandler }));
     disposers.push(server.register({ kind: 'exact', path: PAIR_RENAME_PATH, handler: pairHandler }));
-    scoped.effect(() => () => { for (const dispose of disposers) dispose(); }, 'im-qqbot.conversations');
+    scoped.effect(() => () => { active = false; for (const dispose of disposers) dispose(); }, 'im-qqbot.conversations');
   });
 }
 function field(body: Record<string, unknown>, name: string, empty = false): string {

@@ -8,10 +8,11 @@ import { ConversationService } from './conversation-service.ts';
 import { PairingService } from './pairing-service.ts';
 import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { whitelistEntries } from '../client/whitelist-export.ts';
+import * as files from '../conversations/files.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
-afterEach(() => { if (profile.dir) rmSync(profile.dir, { recursive: true, force: true }); profile.dir = undefined; });
+afterEach(() => { vi.restoreAllMocks(); if (profile.dir) rmSync(profile.dir, { recursive: true, force: true }); profile.dir = undefined; });
 
 function fixture() {
   profile.dir ??= mkdtempSync(join(tmpdir(), 'qq-membership-'));
@@ -48,6 +49,71 @@ describe('membership persistence and pairing scope', () => {
     const reloaded = fixture().service;
     expect(reloaded.beginClaimFromMessage(scope, 'peer', code, 'sender', '小明')).toMatchObject({ ok: false });
     expect(reloaded.pairStatus().challenges[0]?.claims[0]?.state).toBe('revoked');
+  });
+  it.each(['owner', 'allow-c2c', 'allow-group'] as const)('blocks all pre-revocation codes for a manually added %s member, but permits a new invitation', purpose => {
+    const { service } = fixture();
+    const first = service.issuePairCode(purpose).code;
+    const second = service.issuePairCode(purpose).code;
+    const scope = purpose === 'allow-group' ? 'group' : 'c2c';
+    const id = purpose === 'allow-group' ? 'peer' : 'sender';
+    expect(service.addManualMember(purpose, `${id}:Test`).ok).toBe(true);
+    expect(service.revokePair(id, purpose).ok).toBe(true);
+    const reloaded = fixture().service;
+    for (const code of [first, second]) {
+      expect(reloaded.beginClaimFromMessage(scope, 'peer', code, 'sender', 'Test').ok).toBe(false);
+      expect(reloaded.isActivePairCode(code)).toBe(true);
+    }
+    expect(reloaded.beginClaimFromMessage(scope, 'another-peer', first, 'another-sender', 'Another').ok).toBe(true);
+    const fresh = reloaded.issuePairCode(purpose).code;
+    expect(reloaded.beginClaimFromMessage(scope, 'peer', fresh, 'sender', 'Test').ok).toBe(true);
+    expect(reloaded.beginClaimFromMessage(scope, 'peer', first, 'sender', 'Test').ok).toBe(false);
+  });
+  it.each(['owner', 'allow-c2c', 'allow-group'] as const)('rejects another pre-existing %s code after a successful claim is revoked', purpose => {
+    const { service } = fixture();
+    const first = service.issuePairCode(purpose).code;
+    const second = service.issuePairCode(purpose).code;
+    const scope = purpose === 'allow-group' ? 'group' : 'c2c';
+    const id = purpose === 'allow-group' ? 'peer' : 'sender';
+    expect(service.beginClaimFromMessage(scope, 'peer', first, 'sender', 'Test').ok).toBe(true);
+    expect(service.revokePair(id, purpose).ok).toBe(true);
+    expect(fixture().service.beginClaimFromMessage(scope, 'peer', second, 'sender', 'Test').ok).toBe(false);
+  });
+  it('keeps revocation authoritative when a prior successful membership write lost its receipt', () => {
+    const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
+    vi.spyOn(service.pairing, 'recordResult').mockImplementationOnce(() => { throw new Error('receipt write failed'); });
+    expect(() => service.beginClaimFromMessage('c2c', 'peer', code, 'sender', 'Test')).toThrow('receipt write failed');
+    expect(service.pairStatus().allowC2c.map(member => member.openid)).toContain('sender');
+    expect(service.revokePair('sender', 'allow-c2c').ok).toBe(true);
+    expect(fixture().service.beginClaimFromMessage('c2c', 'peer', code, 'sender', 'Test').ok).toBe(false);
+  });
+  it('reads current command members and preserves removal when a stale store renames or discovers another identity', () => {
+    const first = fixture().service; first.addManualMember('owner', 'alice:Alice');
+    const stale = fixture().service;
+    expect(first.revokePair('alice', 'owner').ok).toBe(true);
+    expect(stale.isOwner('alice')).toBe(false);
+    stale.renameMember('bob', 'Bob');
+    stale.entry('c2c', 'bob');
+    expect(fixture().service.isOwner('alice')).toBe(false);
+  });
+  it.each(['rename', 'discovery'])('does not restore revoked command members during a stale %s mutation', mutation => {
+    const first = fixture().service; first.addManualMember('owner', 'alice:Alice');
+    const stale = fixture().service;
+    first.revokePair('alice', 'owner');
+    if (mutation === 'rename') stale.renameMember('bob', 'Bob');
+    else stale.entry('c2c', 'bob');
+    expect(fixture().service.isOwner('alice')).toBe(false);
+  });
+  it('does not report removal or change membership if the revocation fence cannot be persisted', () => {
+    const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
+    service.addManualMember('allow-c2c', 'sender:Test');
+    const write = files.atomicWrite;
+    vi.spyOn(files, 'atomicWrite').mockImplementation((path, data) => {
+      if (path === join(profile.dir!, 'pairing.json')) throw new Error('revocation write failed');
+      write(path, data);
+    });
+    expect(() => service.revokePair('sender', 'allow-c2c')).toThrow('revocation write failed');
+    expect(fixture().service.pairStatus().allowC2c.map(member => member.openid)).toContain('sender');
+    expect(service.pairing.isRevoked(code, 'sender')).toBe(false);
   });
   it('keeps partial manual failures available and returns confirmed identities with saved nicknames', () => {
     const { service } = fixture(); service.renameMember('saved', '已保存昵称');

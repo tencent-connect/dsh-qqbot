@@ -9,7 +9,7 @@
  * 授权真相仍是 store 里的 owners / access 白名单；本服务只是配对过程与展示缓存。
  */
 import { generatePairCode, normalizePairCode, type ClaimedMember, type PairChallenge, type PairClaimResult, type PairPurpose } from '../shared/pairing-protocol.ts';
-import { readPairingState, writePairingState } from './pairing-state.ts';
+import { readPairingState, writePairingState, type StoredPairChallenge } from './pairing-state.ts';
 
 /** 配对码有效期（毫秒）。 */
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -26,7 +26,7 @@ export type ConsumeResult =
   | { ok: false; reason: 'unknown' | 'expired' | 'used' };
 
 export class PairingService {
-  private readonly pending = new Map<string, PairChallenge>();
+  private readonly pending = new Map<string, StoredPairChallenge>();
   private readonly claimed: ClaimedMember[] = [];
   private readonly now: () => number;
   private readonly random: () => number;
@@ -53,14 +53,14 @@ export class PairingService {
       if (previous && previous.purpose !== purpose) throw new Error('配对用途不匹配');
       this.pending.delete(normalizePairCode(previousCode));
     }
-    const entry: PairChallenge = { code, purpose, expiresAt: at + CODE_TTL_MS, createdAt: at, claims: [] };
+    const entry: StoredPairChallenge = { code, purpose, expiresAt: at + CODE_TTL_MS, createdAt: at, claims: [], revokedOpenids: [] };
     this.pending.set(code, entry);
     if (this.pending.size > MAX_PENDING) {
       const oldest = [...this.pending.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
       if (oldest) this.pending.delete(oldest[0]);
     }
     this.save();
-    return structuredClone(entry);
+    return this.challenge(entry);
   }
 
   /** 验证限时批次；成功不会消耗配对码。 */
@@ -84,6 +84,23 @@ export class PairingService {
   claimResult(rawCode: string, openid: string): PairClaimResult | undefined {
     this.refresh();
     return this.pending.get(normalizePairCode(rawCode))?.claims.find(member => member.openid === openid);
+  }
+
+  /** Existing invitations cannot undo a later removal; fresh invitations start without this fence. */
+  revokeIdentity(purpose: PairPurpose, openid: string): void {
+    if (!openid || openid.length > 1024) throw new Error('OpenID 无效');
+    this.refresh(); this.sweep();
+    for (const [code, batch] of this.pending) {
+      if (batch.purpose === purpose && !batch.revokedOpenids.includes(openid)) {
+        this.pending.set(code, { ...batch, revokedOpenids: [...batch.revokedOpenids, openid] });
+      }
+    }
+    this.save();
+  }
+
+  isRevoked(rawCode: string, openid: string): boolean {
+    this.refresh();
+    return this.pending.get(normalizePairCode(rawCode))?.revokedOpenids.includes(openid) ?? false;
   }
 
   recordResult(rawCode: string, member: PairClaimResult): void {
@@ -166,8 +183,10 @@ export class PairingService {
     const before = this.pending.size;
     this.sweep();
     if (before !== this.pending.size) this.save();
-    return structuredClone([...this.pending.values()].sort((a, b) => b.createdAt - a.createdAt));
+    return [...this.pending.values()].sort((a, b) => b.createdAt - a.createdAt).map(batch => this.challenge(batch));
   }
+
+  private challenge({ revokedOpenids: _revoked, ...batch }: StoredPairChallenge): PairChallenge { return structuredClone(batch); }
 
   private refresh(): void {
     if (this.stateFile) {

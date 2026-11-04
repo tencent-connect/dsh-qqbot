@@ -110,6 +110,7 @@ export class ConversationService {
     if (!consumed.ok) {
       return { ok: false, message: consumed.reason === 'expired' ? '❌ 配对码已过期，请在网页重新生成。' : '❌ 配对码无效或已被使用，请核对后在网页重新生成。' };
     }
+    if (this.pairing.isRevoked(code, actor.openid)) return { ok: false, message: '该身份已被移出白名单，请使用新的配对码。' };
     const status = this.pairStatus();
     const members = consumed.purpose === 'owner' ? status.owners : consumed.purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
     const existing = members.find(member => member.openid === actor.openid);
@@ -210,6 +211,8 @@ export class ConversationService {
 
   /** Web：撤销一个已认领身份（超管 / 白名单）。 */
   revokePair(openid: string, purpose: PairPurpose): { ok: boolean; message: string } {
+    // Persist the fence first: a failed fence must not report a successful removal.
+    this.pairing.revokeIdentity(purpose, openid);
     this.pairing.forget(openid);
     if (purpose === 'owner') { this.store.revokeOwner(openid); return { ok: true, message: '已从命令白名单移除' }; }
     const access = readProfileAccess(this.config.access, getProfileDir() ?? undefined);
