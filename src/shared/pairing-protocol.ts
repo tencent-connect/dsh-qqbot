@@ -24,7 +24,7 @@ export const PAIR_RENAME_PATH = '/qqbot/im-qqbot/pair/rename';
 export type PairPurpose = 'owner' | 'allow-c2c' | 'allow-group';
 
 export const PAIR_PURPOSE_LABEL: Record<PairPurpose, string> = {
-  owner: '斜杠命令超管',
+  owner: '斜杠命令白名单',
   'allow-c2c': '私聊白名单',
   'allow-group': '群白名单',
 };
@@ -40,7 +40,7 @@ export interface PairChallenge {
   readonly claimed?: ClaimedMember;
 }
 
-/** 已认领的成员（展示用；openid 只露尾号）。 */
+/** 已认领的成员（用于页面展示和导出；openid 保留完整值）。 */
 export interface ClaimedMember {
   readonly openid: string;
   readonly nickname: string;

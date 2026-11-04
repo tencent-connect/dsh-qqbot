@@ -355,6 +355,28 @@ describe('bind-routes', () => {
     expect(json(res)).toEqual({ ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
   });
 
+  it.each(['open', 'allowlist', 'disabled'])('saves command mode %s through the existing config route', async commandMode => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({
+      access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: ['group'], commandMode },
+    })), res);
+    expect(res.statusCode).toBe(200);
+    expect(onUpdateConfig).toHaveBeenCalledWith(expect.objectContaining({ access: expect.objectContaining({ commandMode, groupAllow: ['group'] }) }));
+  });
+
+  it('rejects unknown command modes before writing the profile', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({
+      access: { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'unexpected' },
+    })), res);
+    expect(res.statusCode).toBe(400);
+    expect(onUpdateConfig).not.toHaveBeenCalled();
+  });
+
   it('POST config：凭据字段被拒绝并引导绑定功能', async () => {
     const { routes } = createHarness();
     const res = fakeRes();

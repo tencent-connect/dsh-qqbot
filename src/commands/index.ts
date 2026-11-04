@@ -40,7 +40,11 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   for (const command of commands) {
     delete command.authorized;
     const original = command.handler;
-    command.handler = ctx => deps.manager.conversations?.isOwner(ctx.message.senderId) ? original(ctx) : Promise.resolve('斜杠命令仅机器人超管可用。');
+    command.handler = ctx => {
+      const service = deps.manager.conversations;
+      const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
+      return error ? Promise.resolve(error) : original(ctx);
+    };
   }
   return commands;
 }
@@ -52,7 +56,7 @@ export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
       aliases: names.slice(1),
       description: command.description ?? '',
       category: command.category,
-      scope: 'owner',
+      scope: deps.config.access.commandMode === 'open' ? 'all' : deps.config.access.commandMode === 'disabled' ? 'disabled' : 'owner',
       ...(command.hidden === true ? { hidden: true } : {}),
     };
   }).filter((descriptor) => descriptor.name !== '');

@@ -2,6 +2,7 @@
 export interface AccessControlWire {
   c2cMode: 'open' | 'allowlist' | 'disabled';
   c2cAllow: string[];
+  commandMode?: 'open' | 'allowlist' | 'disabled';
   groupMode: 'open' | 'allowlist' | 'disabled';
   groupAllow: string[];
 }
@@ -23,10 +24,10 @@ export interface ConfigWire {
 }
 
 const EDITABLE_KEYS = ['access'] as const;
-const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow'] as const;
+const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
 export const DEFAULT_ACCESS: AccessControlWire = {
-  c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [],
+  c2cMode: 'allowlist', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'allowlist',
 };
 
 function equal(a: unknown, b: unknown): boolean {
@@ -108,6 +109,7 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
       for (const key of ['c2cMode', 'groupMode']) {
         if (!['open', 'allowlist', 'disabled'].includes(String(access[key]))) return false;
       }
+      if (access.commandMode !== undefined && (typeof access.commandMode !== 'string' || !['open', 'allowlist', 'disabled'].includes(access.commandMode))) return false;
       for (const key of ['c2cAllow', 'groupAllow']) {
         if (!Array.isArray(access[key]) || !access[key].every((entry: unknown) => typeof entry === 'string')) return false;
       }

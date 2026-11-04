@@ -1,3 +1,4 @@
+import { commandAccessError } from '../commands/auth.ts';
 import { ConversationStore } from '../conversations/index.ts';
 import { PairingService, type PendingActor } from './pairing-service.ts';
 import { openidTail, type ClaimedMember, type PairPurpose, type PairStatusWire } from '../shared/pairing-protocol.ts';
@@ -49,7 +50,7 @@ export class ConversationService {
     this.pairing.recordClaimed(member);
     if (purpose === 'owner') {
       this.store.claimOwner(openid, { nickname, scene, sceneName, claimedAt: member.claimedAt });
-      return { ok: true, message: `✅ 已把「${nickname || openidTail(openid)}」设为斜杠命令超管。` };
+      return { ok: true, message: `✅ 已把「${nickname || openidTail(openid)}」加入斜杠命令白名单。` };
     }
     const access = this.config.access;
     const nextAccess = purpose === 'allow-group'
@@ -98,7 +99,7 @@ export class ConversationService {
       return { ok: false, message: result.reason === 'expired' ? '❌ 配对码已过期，请在网页重新生成。' : '❌ 配对码无效或已被使用，请核对后在网页重新生成。' };
     }
     const nonce = this.pairing.beginConfirm(result.purpose, actor);
-    const label = result.purpose === 'owner' ? '斜杠命令超管' : result.purpose === 'allow-group' ? '群白名单' : '私聊白名单';
+    const label = result.purpose === 'owner' ? '斜杠命令白名单' : result.purpose === 'allow-group' ? '群白名单' : '私聊白名单';
     // 群白名单是对「群」加白——只显示群名，不显示 openID；其余显示昵称（同样不显示 openID）。
     const who = result.purpose === 'allow-group'
       ? `群「${actor.sceneName || actor.nickname || '本群'}」`
@@ -173,7 +174,7 @@ export class ConversationService {
   /** Web：撤销一个已认领身份（超管 / 白名单）。 */
   revokePair(openid: string, purpose: PairPurpose): { ok: boolean; message: string } {
     this.pairing.forget(openid);
-    if (purpose === 'owner') { this.store.revokeOwner(openid); return { ok: true, message: '已移除超管' }; }
+    if (purpose === 'owner') { this.store.revokeOwner(openid); return { ok: true, message: '已从命令白名单移除' }; }
     const access = this.config.access;
     const nextAccess = purpose === 'allow-group'
       ? { ...access, groupAllow: access.groupAllow.filter((id) => id !== openid) }
@@ -183,6 +184,9 @@ export class ConversationService {
       this.config.access = nextAccess;
     }
     return { ok: persisted, message: persisted ? '已从白名单移除' : '写入失败，请手动移除' };
+  }
+  commandAccessError(actor?: string): string | undefined {
+    return commandAccessError(this.config.access.commandMode, actor, this.isOwner(actor));
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }
 }

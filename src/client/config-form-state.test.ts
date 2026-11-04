@@ -71,3 +71,16 @@ describe('config form draft reconciliation', () => {
     expect(parseConfigDraft(configDraft(baseline(), { ...baseline(), model: 'draft' }))?.form.model).toBeUndefined();
   });
 });
+
+describe('command-mode drafts', () => {
+  it('preserves a local command edit when the group list refreshes', () => {
+    const base = baseline();
+    const form = { ...base, access: { ...base.access!, commandMode: 'disabled' as const } };
+    const incoming = { ...base, access: { ...base.access!, groupAllow: ['new-group'] } };
+    const updated = rebaseConfig(base, form, incoming);
+    expect(updated.access?.commandMode).toBe('disabled');
+    expect(updated.access?.groupAllow).toEqual(['new-group']);
+    expect(parseConfigDraft({ baseline: base, form: updated })).toBeDefined();
+    expect(parseConfigDraft({ baseline: base, form: { ...updated, access: { ...updated.access, commandMode: 'unexpected' } } })).toBeUndefined();
+  });
+});

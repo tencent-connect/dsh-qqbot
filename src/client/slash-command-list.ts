@@ -1,7 +1,7 @@
 import { createElement as h, type ReactNode } from 'react';
 import type { SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
 
-/** 全局超管面板中的命令清单，内容来自服务端注册表。 */
+/** 命令访问面板中的命令清单，内容来自服务端注册表。 */
 export function SlashCommandList({ commands }: { commands: readonly SlashCommandDescriptor[] }): ReactNode {
   const visible = commands.filter((command) => command.hidden !== true);
   return h('details', { className: 'imqc-cmdList' },
@@ -15,7 +15,8 @@ export function SlashCommandList({ commands }: { commands: readonly SlashCommand
         ...items.map((command) => h('div', { className: 'imqc-cmdRow', key: command.name },
           h('code', null, `/${command.name}`),
           command.aliases.length ? h('span', { className: 'imqc-hint' }, `（别名 /${command.aliases.join('、/')}）`) : null,
-          command.scope === 'owner' ? h('span', { className: 'imqc-hint' }, '仅超管') : null,
+          command.scope === 'owner' ? h('span', { className: 'imqc-hint' }, '仅命令白名单') : null,
+          command.scope === 'disabled' ? h('span', { className: 'imqc-hint' }, '已关闭') : null,
           h('span', { className: 'imqc-hint' }, command.description))));
     }));
 }

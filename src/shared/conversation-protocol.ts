@@ -95,7 +95,7 @@ export type TimelineEntry =
 export interface TimelineQuery { before?: number; snapshot?: number; after?: number; query?: string; limit?: number }
 export interface TimelinePage { items: TimelineEntry[]; snapshot: number; hasMore: boolean; nextBefore?: number; nextAfter?: number }
 /** UI-facing slash-command metadata derived from the command registry (no handlers). */
-export interface SlashCommandDescriptor { name: string; aliases: string[]; description: string; category: 'agent' | 'qqbot'; scope: 'owner'; hidden?: boolean }
+export interface SlashCommandDescriptor { name: string; aliases: string[]; description: string; category: 'agent' | 'qqbot'; scope: 'owner' | 'all' | 'disabled'; hidden?: boolean }
 export interface ConversationSnapshot { conversations: ConversationView[]; tools: ToolCatalogEntry[]; ownerIds: string[]; defaults?: QQDefaults; commands?: SlashCommandDescriptor[]; /** QQ default working directory used when a conversation leaves cwd empty. */ defaultCwd?: string; errors?: string[] }
 export interface QQPeerSettingsPatch {
   alias?: string;

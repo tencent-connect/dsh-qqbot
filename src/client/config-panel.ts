@@ -16,6 +16,8 @@ import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 import { fetchJson } from './http.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
 import type { SelectorSource } from './host-selectors.ts';
+import { SlashCommandList } from './slash-command-list.ts';
+import { CONVERSATIONS_PATH, type SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
 import type { QQBotKey } from './qq-locale.ts';
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots';
@@ -66,6 +68,17 @@ function useConfigPanelStyles(): void {
 .imqb2-footer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .imqb2-feedback { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
 .imqb2-feedback p { flex: 1; min-width: 0; }
+.imqb2-form .imqc-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.imqb2-form .imqc-pair { margin: 4px 0 16px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); }
+.imqb2-form .imqc-pairMembers { list-style: none; padding: 0; margin: 8px 0 0; }
+.imqb2-form .imqc-pairMember { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; border-top: 1px solid var(--dsw-alias-border-l2); }
+.imqb2-form .imqc-pairMemberMain { flex: 1 1 180px; min-width: 0; }
+.imqb2-form .imqc-pairMemberName { display: block; font-weight: 500; }
+.imqb2-form .imqc-pairMemberMeta, .imqb2-form .imqc-hint { color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.imqb2-form .imqc-pairMemberOpenId { color: var(--dsw-alias-label-secondary); }
+.imqb2-form .imqc-error { color: var(--dsw-alias-state-error-primary); }
+.imqb2-form .imqc-cmdList { margin: 12px 0; }
+.imqb2-form .imqc-cmdRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .imqb2-details { margin-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .imqb2-summary { padding: 16px 0; font-size: 13px; font-weight: 500; cursor: pointer; }
 .imqb2-summary::marker { color: var(--dsw-alias-label-tertiary); }
@@ -107,7 +120,7 @@ type AccessMode = AccessControlWire['c2cMode'];
 const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
-  { value: 'disabled', label: '禁用' },
+  { value: 'disabled', label: '关闭' },
 ];
 
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
@@ -182,6 +195,16 @@ export interface ConfigPanelProps { bindPhase?: string; selectorSource?: Selecto
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
 export function ConfigPanel({ bindPhase }: ConfigPanelProps): ReactNode {
   useConfigPanelStyles();
+  const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
+  const [commandsError, setCommandsError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    if (bindPhase !== 'bound') return;
+    void fetchJson<{ commands: SlashCommandDescriptor[] }>(CONVERSATIONS_PATH, { signal: controller.signal })
+      .then(result => { setCommands(result.commands); setCommandsError(null); })
+      .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
+    return () => controller.abort();
+  }, [bindPhase]);
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const draftRef = useRef<ConfigDraft | null>(null);
   const mounted = useRef(true);
@@ -310,19 +333,30 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps): ReactNode {
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
-    createElement('p', { className: 'imqb2-hint', role: 'note' }, '本版 QQ 仅发送最终正文。旧配置中的流式回复、工具过程与文件发送不生效；需要这些能力时请暂用旧版，升级限制见插件说明。'),
     createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
       createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
       createElement(SegmentedRow, { disabled: busy,
         label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
         onChange: (value) => { patch('access', { ...access, c2cMode: value }); },
       }),
-      access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-c2c', title: '私聊白名单', enabled: bindPhase === 'bound', hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。' }) : null,
+      access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-c2c', title: '私聊白名单', enabled: bindPhase === 'bound', onChange: retry, hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。' }) : null,
       createElement(SegmentedRow, { disabled: busy,
         label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
         onChange: (value) => { patch('access', { ...access, groupMode: value }); },
       }),
-      access.groupMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-group', title: '群白名单', enabled: bindPhase === 'bound', hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。' }) : null,
+      access.groupMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-group', title: '群白名单', enabled: bindPhase === 'bound', onChange: retry, hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。' }) : null,
+      createElement(SegmentedRow, { disabled: busy,
+        label: '斜杠命令', value: access.commandMode ?? 'allowlist', options: MODE_OPTIONS,
+        help: '仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。',
+        onChange: value => { patch('access', { ...access, commandMode: value }); },
+      }),
+      (access.commandMode ?? 'allowlist') === 'allowlist' ? createElement(PairClaimPanel, {
+        purpose: 'owner', title: '命令白名单', enabled: bindPhase === 'bound', onChange: retry,
+        hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
+      }) : null,
+      commandsError ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
+      createElement(SlashCommandList, { commands }),
+
 
 
     ),

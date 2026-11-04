@@ -84,9 +84,13 @@ export function setupMiddlewares(
 
   bot.use(async (ctx, next) => {
     const service = manager.conversations;
-    if (ctx.message.content.trim().startsWith('/') && !service?.isOwner(ctx.message.senderId)) {
-      await ctx.bot.sendText(ctx.replyTarget, '斜杠命令仅机器人超管可用。');
-      ctx.stop('slash-command-owner-required'); return;
+    if (ctx.message.content.trim().startsWith('/')) {
+      const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
+      if (error) {
+        await ctx.bot.sendText(ctx.replyTarget, error);
+        ctx.stop('slash-command-access-denied');
+        return;
+      }
     }
     await next();
   });

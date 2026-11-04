@@ -6,6 +6,7 @@
  */
 import { createElement as h, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
+import { downloadWhitelist, whitelistOpenIds } from './whitelist-export.ts';
 import { fetchJson } from './http.ts';
 import {
   PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH,
@@ -38,8 +39,8 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
 }
 
 /** 单个用途的认领面板：生成码 / 展示进行中的码 / 已认领成员列表（可撤销）。 */
-export function PairClaimPanel({ purpose, title, description, hint, enabled = true }: {
-  purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean;
+export function PairClaimPanel({ purpose, title, description, hint, enabled = true, onChange }: {
+  purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean; onChange?: () => void;
 }): ReactNode {
   const { status, error, reload } = usePairStatus(enabled);
   const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
@@ -55,6 +56,16 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     catch { /* 剪贴板不可用时静默：码本身可见可手抄 */ }
   }, []);
 
+  const copyOpenIds = async (value: string): Promise<void> => {
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error('剪贴板不可用，请选择 OpenID 手动复制。');
+      await globalThis.navigator.clipboard.writeText(value);
+      setMsg('OpenID 已复制。');
+    } catch (error) {
+      setMsg(error instanceof Error ? error.message : '复制失败，请选择 OpenID 手动复制。');
+    }
+  };
+
   // 该码"曾在轮询中出现过、之后又消失"才算认领成功（否则刚生成的瞬间会被误判）。
   const codeSeen = useRef(false);
   useEffect(() => {
@@ -66,9 +77,9 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       const expired = Date.now() > code.expiresAt;
       setCode(null);
       if (expired) { setMsg('配对码已过期，请重新生成'); }
-      else { setMsg('该配对码已被认领 ✔'); setAddOpen(false); }
+      else { setMsg('该配对码已被认领 ✔'); setAddOpen(false); onChange?.(); }
     }
-  }, [status, code]);
+  }, [status, code, onChange]);
 
   // 所有 hooks 之后再按绑定态短路，避免 hook 数量不一致（React #310）。
   if (!enabled) return h('div', { className: 'imqc-pair' }, h('div', { className: 'imqc-inline' }, h('strong', null, title)),
@@ -86,7 +97,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     if (busy) return;
     setBusy(true); setMsg(null);
     void fetchJson(PAIR_REVOKE_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
-      .then(() => reload())
+      .then(() => { reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '移除失败'))
       .finally(() => setBusy(false));
   };
@@ -95,7 +106,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     if (busy) return;
     setBusy(true); setMsg(null);
     void fetchJson(PAIR_RENAME_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
-      .then(() => { setEditing(null); reload(); })
+      .then(() => { setEditing(null); reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '修改失败'))
       .finally(() => setBusy(false));
   };
@@ -103,14 +114,19 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
     void fetchJson<{ message?: string; added?: number }>(PAIR_MANUAL_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
-      .then((r) => { setManualOpenid(''); setMsg(r.message ?? '已添加 ✔'); reload(); })
+      .then((r) => { setManualOpenid(''); setMsg(r.message ?? '已添加 ✔'); reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '添加失败'))
       .finally(() => setBusy(false));
   };
   const secs = code ? Math.max(0, Math.round((code.expiresAt - Date.now()) / 1000)) : 0;
   const openAdd = (): void => { setAddOpen(true); setMsg(null); if (code === null) issue(); };
   return h('div', { className: 'imqc-pair' },
-    h('div', { className: 'imqc-inline' }, h('strong', null, title), h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: openAdd }, '添加…')),
+    h('div', { className: 'imqc-inline' }, h('strong', null, title), h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: openAdd }, '添加…'),
+      h(Button, { variant: 'ghost', size: 'sm', disabled: members.length === 0 || status === null || error !== null, onClick: () => { void copyOpenIds(whitelistOpenIds(members)); } }, '复制全部 OpenID'),
+      h(Button, { variant: 'ghost', size: 'sm', disabled: members.length === 0 || status === null || error !== null, onClick: () => {
+        try { downloadWhitelist(members, purpose); }
+        catch (error) { setMsg(error instanceof Error ? error.message : '导出失败'); }
+      } }, '导出 CSV')),
     description ? h('p', { className: 'imqc-hint' }, description) : null,
     hint ? h('p', { className: 'imqc-hint' }, hint) : null,
     msg ? h('p', { className: 'imqc-hint', role: 'status' }, msg) : null,
@@ -123,13 +139,15 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
             h('div', { className: 'imqc-pairMemberMain' },
               h('span', { className: 'imqc-pairMemberName' }, m.nickname || '（未命名）'),
               h('span', { className: 'imqc-pairMemberMeta' },
-                m.scene === 'group' ? '群' : `私聊${m.sceneName ? `「${m.sceneName}」` : ''}`)),
+                m.scene === 'group' ? '群' : `私聊${m.sceneName ? `「${m.sceneName}」` : ''}`),
+              h('code', { className: 'imqc-pairMemberOpenId', style: { display: 'block', overflowWrap: 'anywhere', userSelect: 'text', fontSize: '12px' } }, m.openid)),
             isEditing
               ? h('div', { className: 'imqc-inline imqc-pairMemberEdit' },
                   h(Input, { value: editing.nickname, disabled: busy, placeholder: '昵称', 'aria-label': '修改昵称', onChange: (e: { currentTarget: { value: string } }) => setEditing({ openid: m.openid, nickname: e.currentTarget.value }) }),
                   h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: () => saveRename(m.openid, editing.nickname) }, '保存'),
                   h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setEditing(null) }, '取消'))
               : h('div', { className: 'imqc-inline imqc-pairMemberActions' },
+                  h(Button, { variant: 'ghost', size: 'sm', disabled: busy, 'aria-label': `复制 ${m.nickname || m.openid} 的 OpenID`, onClick: () => { void copyOpenIds(m.openid); } }, '复制 OpenID'),
                   h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setEditing({ openid: m.openid, nickname: m.nickname }) }, '改名'),
                   h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => revoke(m.openid) }, '移除')));
         })),
