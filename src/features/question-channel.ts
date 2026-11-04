@@ -15,6 +15,7 @@ import { parseAnswer } from './answer-parser.ts';
 import { buildKeyboard, formatQuestion } from './question-renderer.ts';
 import { decodeButtonData } from './button-utils.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
+import { continueDelivery } from '../transport/delivery-context.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -280,7 +281,10 @@ export class QuestionChannel {
       const next = entry.request.questions[entry.index]!;
       this.resetTimer(entry, key);
       // 用户刚在 QQ 作答：后续题被动回复其作答（replyTarget 携带最新 msgId 候选）
-      void this.sendQuestion(entry.record, entry.record.replyTarget, next).catch((err) => {
+      const sessionId = entry.request.agent?.id;
+      const source = this.targets && sessionId ? this.targets.targetFor(sessionId) : entry.record.replyTarget;
+      const target = source && continueDelivery(source, entry.record.replyTarget);
+      void (target ? this.sendQuestion(entry.record, target, next) : Promise.reject(new Error('QQ question source is no longer authorized'))).catch((err) => {
         this.pending.delete(key);
         this.clearTimer(entry);
         this.removeAbort(entry);

@@ -8,6 +8,7 @@ import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { StreamingWriter } from './streaming-writer.ts';
+import { deliveryPart } from './delivery-context.ts';
 
 /** 流式输出节流间隔(ms)：连续 chunk 累积后停顿该间隔才推送 */
 const STREAM_THROTTLE_MS = 200;
@@ -16,10 +17,12 @@ const STREAM_THROTTLE_MS = 200;
 export interface StreamSessionLike {
   update(content: string): Promise<unknown>;
   complete(): Promise<unknown>;
+  cancel?(): void;
 }
 
 /** QQ Bot 发送接口 */
 export interface QQBotSender {
+  sendText?(target: ReplyTarget, content: string, limit: number): Promise<void>;
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
 }
@@ -80,10 +83,7 @@ export class OutboundBuffer {
       }
 
       // 降级：静态发送（writer 不存在 or 流式失败）
-      const chunks = chunkMarkdownText(this.buffer, this.limit);
-      for (const chunk of chunks) {
-        await this.bot.sendMarkdown(this.target, chunk);
-      }
+      await sendText(this.bot, this.target, this.buffer, this.limit);
     } catch (err) {
       this.logger.error(`im-qqbot: flush failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -96,5 +96,12 @@ export class OutboundBuffer {
   public cancel(): void {
     this.writer?.abort();
     this.buffer = '';
+  }
+}
+
+export async function sendText(sender: QQBotSender, target: ReplyTarget, content: string, limit: number): Promise<void> {
+  if (sender.sendText) return sender.sendText(target, content, limit);
+  for (const [index, chunk] of chunkMarkdownText(content, limit).entries()) {
+    await sender.sendMarkdown(deliveryPart(target, 'segment', index), chunk);
   }
 }

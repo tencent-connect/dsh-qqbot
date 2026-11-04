@@ -4,6 +4,7 @@
  * 将 QQ 消息平台作为 dsh 前端协议驱动：入站消息 → handleInbound → dsh agent，
  * dsh session/event → createOutboundHandler → QQ 出站。
  */
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
@@ -19,9 +20,13 @@ import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
-import { buildUserAgent } from '../shared/index.ts';
+import { buildUserAgent, getProfileDir } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
+import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
+import { guardSender, guardMedia } from '../transport/delivery-context.ts';
+import { PLUGIN_HOME } from '../shared/dirs.ts';
+import { readProfileAccess } from '../setup/persist.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { registerAccountRoutes } from '../runtime/account-routes.ts';
 import { describeCommands } from '../commands/index.ts';
@@ -57,8 +62,21 @@ export async function bootstrapGateway(
   manager.accountAccess = new AccountAccessService(config, logger);
   registerAccountRoutes(ctx, manager.accountAccess, () => describeCommands({manager, config, logger}));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
-  const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs) });
-  const turnTracker = createTurnTracker(manager, config, logger, qqInputs);
+  const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
+  let active = true;
+  const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
+  const turnTracker = createTurnTracker(manager, config, logger, qqInputs, target => {
+    if (!active) return false;
+    try {
+      const access = readProfileAccess(config.access, getProfileDir() ?? undefined);
+      const mode = target.scope === 'group' ? access.groupMode : access.c2cMode;
+      const allow = target.scope === 'group' ? access.groupAllow : access.c2cAllow;
+      return mode === 'open' || (mode === 'allowlist' && allow.includes(target.targetId));
+    } catch {
+      logger.warn('im-qqbot: access settings unavailable; QQ delivery denied');
+      return false;
+    }
+  });
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -99,7 +117,7 @@ export async function bootstrapGateway(
   // 发送适配器：将 QQBot 实例适配为 QQBotSender（openStream 参数形态不同）。
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
-  const sender: QQBotSender = {
+  const sender: QQBotSender = guardSender({
     sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),
     openStream: (target) => bot.openStream({
       target: {
@@ -108,17 +126,17 @@ export async function bootstrapGateway(
         msgId: target.msgId as string,
       },
     }),
-  };
+  }, ledger);
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender: MediaSenderLike = {
+  const mediaSender: MediaSenderLike = guardMedia({
     sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
     sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
     sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
-  };
+  }, ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
@@ -198,7 +216,7 @@ export async function bootstrapGateway(
   registerDescribeImageTool(ctx, config.vision, logger);
 
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker);
+  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker, () => active);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
@@ -209,6 +227,8 @@ export async function bootstrapGateway(
       });
 
       return async () => {
+        active = false;
+        outbound.dispose();
         logger.info('Shutting down');
         await manager.disposeAll();
         bot.stop();

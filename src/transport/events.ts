@@ -159,8 +159,8 @@ export function extractTurnError(reason: TurnEndReason): { code: string; message
  * 归一化后的流式增量（`agent/assistant-stream` 瞬态帧，chunk 不进 session log）。
  */
 export type StreamDelta =
-  | { kind: 'attempt-start'; attemptId: string }
-  | { kind: 'text-delta'; attemptId: string; text: string };
+  | { kind: 'attempt-start'; attemptId: string; turn?: number; step?: number; revision?: number }
+  | { kind: 'text-delta'; attemptId: string; text: string; revision?: number; index?: number };
 
 /**
  * 解析 `agent/assistant-stream` 的 payload（对齐 @deepseek-ai/dsh-agent 的
@@ -181,12 +181,21 @@ export function parseStreamFrame(raw: unknown): { agentId: string; delta: Stream
   if (typeof attemptId !== 'string' || !attemptId) return undefined;
 
   if (type === 'start') {
-    return { agentId, delta: { kind: 'attempt-start', attemptId } };
+    const identity = frame as { turn?: unknown; step?: unknown; revision?: unknown };
+    return { agentId, delta: { kind: 'attempt-start', attemptId,
+      ...(typeof identity.turn === 'number' ? { turn: identity.turn } : {}),
+      ...(typeof identity.step === 'number' ? { step: identity.step } : {}),
+      ...(typeof identity.revision === 'number' ? { revision: identity.revision } : {}),
+    } };
   }
   if (type === 'chunk') {
     const chunk = (frame as { chunk?: { type?: unknown; text?: unknown } | null }).chunk;
     if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string' || !chunk.text) return undefined;
-    return { agentId, delta: { kind: 'text-delta', attemptId, text: chunk.text } };
+    const identity = frame as { revision?: unknown; index?: unknown };
+    return { agentId, delta: { kind: 'text-delta', attemptId, text: chunk.text,
+      ...(typeof identity.revision === 'number' ? { revision: identity.revision } : {}),
+      ...(typeof identity.index === 'number' ? { index: identity.index } : {}),
+    } };
   }
   return undefined;
 }

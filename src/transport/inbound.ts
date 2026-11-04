@@ -11,6 +11,7 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { QqInputRegistry } from './qq-input-origin.ts';
+import { deliveryKey } from './delivery-ledger.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -99,6 +100,14 @@ export async function handleInbound(
 
   const scope: ChatScope = msg.kind === 'group' ? 'group' : 'c2c';
   const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
+  const inputKey = deliveryKey('input', scope, peerId, msg.messageId);
+  if (inputs.ledger) {
+    if (!msg.messageId || !msg.senderId || (scope === 'group' && !msg.groupOpenid)) {
+      logger.warn('im-qqbot: QQ input has no verifiable platform identity');
+      return;
+    }
+    if (inputs.ledger.hasInput(inputKey)) return;
+  }
 
   const replyTarget: ReplyTarget = {
     scope,
@@ -138,6 +147,14 @@ export async function handleInbound(
 
   // 按宿主保证跨边界不变的 Message.id 登记 QQ 入站，出站据此认领回合归属
   //（不在 source 上写非契约字段，也不在 SessionRecord 上抢标记）。
+  if (inputs.ledger && !inputs.ledger.registerInput({
+    key: inputKey,
+    messageId: String(message.id), sessionId: record.sessionId,
+    senderId: msg.senderId, target: replyTarget, contentHash: deliveryKey(message.content),
+  })) {
+    logger.info('im-qqbot: duplicate QQ input ignored');
+    return;
+  }
   inputs.register(String(message.id));
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
