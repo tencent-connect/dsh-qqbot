@@ -1,17 +1,18 @@
 /**
- * 配对码认领 UI —— Web 侧生成一次性码、展示已认领成员、撤销。
+ * 配对码认领 UI —— 有效期内连续添加，在窗口内展示本次结果。
  *
  * 流程：Web 生成码 → 用户在 QQ 直接发送该码 → 机器人识别并写名单。
  * 本组件只负责 Web 端的码展示与已认领列表；真正的 openid 绑定在服务端完成。
  */
 import { createElement as h, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Button, Input, Modal, IconCopyOutlineRegular, IconDownloadOutlineRegular, IconPlusOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, DisclosureRow, Input, Modal, IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconCopyOutlineRegular, IconDownloadOutlineRegular, IconPlusOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import { usePairingStyles } from './qq-pairing-styles.ts';
 import { downloadWhitelist, whitelistEntries } from './whitelist-export.ts';
 import { fetchJson } from './http.ts';
+import { mergePairResults } from './pairing-results.ts';
 import {
-  PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH,
-  type ClaimedMember, type PairPurpose, type PairStatusWire,
+  PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH,
+  type ClaimedMember, type ManualPairResult, type PairChallenge, type PairClaimResult, type PairPurpose, type PairStatusWire,
 } from '../shared/pairing-protocol.ts';
 
 /** 配对状态轮询间隔（进行中的码需要实时反映"已认领"）。 */
@@ -51,6 +52,10 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const [msg, setMsg] = useState<string | null>(null);
   const [manualOpenid, setManualOpenid] = useState('');
   const [addOpen, setAddOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [results, setResults] = useState<PairClaimResult[]>([]);
+  const [windowCodes, setWindowCodes] = useState<string[]>([]);
+  const [codeEnded, setCodeEnded] = useState(false);
   const [editing, setEditing] = useState<{ openid: string; nickname: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const copyPairCode = useCallback(async (value: string): Promise<void> => {
@@ -72,16 +77,18 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const codeSeen = useRef(false);
   useEffect(() => {
     if (code === null || status === null) { codeSeen.current = false; return; }
+    const incoming = status.challenges.filter(challenge => windowCodes.includes(challenge.code)).flatMap(challenge => challenge.claims);
+    if (incoming.length) setResults(previous => mergePairResults(previous, incoming));
     const present = status.challenges.some((c) => c.code === code.code);
     if (present) { codeSeen.current = true; return; }
     if (codeSeen.current) {
       codeSeen.current = false;
       const expired = Date.now() > code.expiresAt;
-      setCode(null);
+      setCodeEnded(true);
       if (expired) { setMsg('配对码已过期，请重新生成'); }
       else { setMsg('配对码已结束，请核对名单；未加入时请重新生成。'); onChange?.(); }
     }
-  }, [status, code, onChange]);
+  }, [status, code, windowCodes, onChange]);
 
   // 所有 hooks 之后再按绑定态短路，避免 hook 数量不一致（React #310）。
   if (!enabled) return h('div', { className: 'imqq-pair' }, h('div', { className: 'imqq-pairToolbar' }, h('strong', null, title)),
@@ -90,8 +97,12 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const issue = (): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson<{ code: string; expiresAt: number }>(PAIR_ISSUE_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose }) })
-      .then((r) => { setCode({ code: r.code, expiresAt: r.expiresAt }); reload(); })
+    void fetchJson<PairChallenge & { previousClaims: PairClaimResult[] }>(PAIR_ISSUE_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, previousCode: code?.code }) })
+      .then((r) => {
+        setResults(previous => mergePairResults(previous, r.previousClaims));
+        setCode({ code: r.code, expiresAt: r.expiresAt }); setCodeEnded(false); codeSeen.current = false;
+        setWindowCodes(previous => [...previous, r.code]); reload();
+      })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '生成配对码失败'))
       .finally(() => setBusy(false));
   };
@@ -115,13 +126,27 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const addManual = (): void => {
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
-    void fetchJson<{ message?: string; added?: number }>(PAIR_MANUAL_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
-      .then((r) => { setManualOpenid(''); setCode(null); codeSeen.current = false; setMsg(r.message ?? '已添加 ✔'); reload(); onChange?.(); })
+    void fetchJson<ManualPairResult>(PAIR_MANUAL_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
+      .then((r) => {
+        setManualOpenid(r.errors.map(error => error.input).join('\n'));
+        setResults(previous => mergePairResults(previous, r.results));
+        setMsg(r.errors.length ? r.errors.map(error => `${error.input}：${error.message}`).join('\n') : null);
+        reload(); onChange?.();
+      })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '添加失败'))
       .finally(() => setBusy(false));
   };
   const secs = code ? Math.max(0, Math.round((code.expiresAt - Date.now()) / 1000)) : 0;
-  const openAdd = (): void => { setAddOpen(true); setMsg(null); if (code === null) issue(); };
+  const openAdd = (): void => { setAddOpen(true); setMsg(null); setResults([]); setWindowCodes([]); setManualOpenid(''); setManualOpen(false); issue(); };
+  const finish = (): void => {
+    if (busy) return;
+    if (code === null) { setAddOpen(false); return; }
+    setBusy(true); setMsg(null);
+    void fetchJson(PAIR_END_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, code: code.code }) })
+      .then(() => { setAddOpen(false); setCode(null); codeSeen.current = false; reload(); onChange?.(); })
+      .catch((error: unknown) => setMsg(error instanceof Error ? error.message : '结束配对失败，请重试'))
+      .finally(() => setBusy(false));
+  };
   return h('div', { className: 'imqq-pair' },
     h('div', { className: 'imqq-pairHeader' },
       h('div', { className: 'imqq-pairTitle' }, h('strong', null, title), status ? h('span', { className: 'imqq-pairCount' }, `(${members.length})`) : null),
@@ -158,29 +183,40 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
                   h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => revoke(m.openid) }, '移除')));
         })),
     addOpen ? h(Modal, {
-      open: true, title: `添加${title}`, closeLabel: '关闭', onClose: () => setAddOpen(false), className: 'imqq-pairModal',
+      open: true, title: `添加${title}`, closeLabel: '关闭并停止配对', onClose: finish, className: 'imqq-pairModal',
+      footer: h('div', { className: 'imqq-pairFooter' },
+        h('span', { className: 'imqq-pairHint' }, '完成后配对码失效，已添加的成员保留。'),
+        h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: finish }, '完成')),
       children: h('div', { className: 'imqq-pairDialog' },
-        h('h4', { className: 'imqq-pairSectionTitle' }, '方式一 · 让对方在 QQ 认领（推荐）'),
-        h('ol', { className: 'imqq-pairSteps' },
-          h('li', null, '下面生成一次性配对码；'),
-          h('li', null, `让对方在${purpose === 'allow-group' ? '群里 @ 机器人后' : '私聊里'}直接发送这个码：`),
-          h('li', null, '机器人核对配对码后直接加入名单，并在 QQ 中回复结果。')),
+        h('p', { className: 'imqq-pairHint' }, purpose === 'allow-group'
+          ? '在需要添加的群里 @机器人后发送此码，有效期内可连续添加多个群。'
+          : '让需要添加的用户在私聊里发送此码，有效期内可连续添加多人。'),
         code ? h('div', { className: 'imqq-pairCodeCard' },
           h('div', { className: 'imqq-pairCodeMain' },
             h('code', { className: 'imqq-pairCodeValue' }, code.code),
-            h('span', { className: 'imqq-pairCodeMeta' }, `${secs}s 内有效`)),
+            h('span', { className: 'imqq-pairCodeMeta' }, codeEnded || secs === 0 ? '已结束，请重新生成' : `剩余 ${Math.floor(secs / 60).toString().padStart(2, '0')}:${(secs % 60).toString().padStart(2, '0')}`)),
           h('div', { className: 'imqq-pairCodeActions' },
-            h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => { void copyPairCode(code.code); } }, copied ? '已复制' : '复制'),
+            h(Button, { variant: 'outline', size: 'sm', disabled: busy || codeEnded || secs === 0, onClick: () => { void copyPairCode(code.code); } }, copied ? '已复制' : '复制配对码'),
             h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '重新生成')))
           : h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '生成配对码'),
-        h('h4', { className: 'imqq-pairSectionTitle' }, '方式二 · 直接按 openID 添加'),
-        h('p', { className: 'imqq-pairHint' }, '每行一个（也支持用逗号分隔）。格式：openID 或 openID:昵称。例如：'),
-        h('pre', { className: 'imqq-pairExample' }, 'ABCD1234EFGH\nWXYZ5678:小明\nIJKL0000:Alice Zhang'),
-        h('textarea', { className: 'imqq-pairTextarea', rows: 4, value: manualOpenid, disabled: busy, 'aria-label': `${title} openID 列表`, placeholder: 'openID 或 openID:昵称，每行一个', onChange: (e: { currentTarget: { value: string } }) => setManualOpenid(e.currentTarget.value) }),
+        h(DisclosureRow, { title: `通过 OpenID 批量添加（非${purpose === 'allow-group' ? '群号' : ' QQ 号'}）`, icon: h(IconChevronDownOutlineRegular), open: manualOpen, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: () => setManualOpen(value => !value) },
+        h('div', { className: 'imqq-pairManual' },
+        h('p', { className: 'imqq-pairHint' }, '用户 OpenID 不是 QQ 号，群 OpenID 也不是群号，不能直接填写 QQ 号或群号。请使用当前机器人对应的 OpenID；没有 OpenID 时，请使用上方配对码添加。'),
+        h('p', { className: 'imqq-pairHint' }, '每行一个（也支持用逗号分隔）。格式：OpenID 或 OpenID:昵称。例如：'),
+        h('pre', { className: 'imqq-pairExample' }, 'ABCD1234EFGH:小明\nWXYZ5678:Alice Zhang'),
+        h('textarea', { className: 'imqq-pairTextarea', rows: 4, value: manualOpenid, disabled: busy, 'aria-label': `${title} openID 列表`, placeholder: 'OpenID 或 OpenID:昵称，每行一个；不能填写 QQ 号或群号', onChange: (e: { currentTarget: { value: string } }) => setManualOpenid(e.currentTarget.value) }),
         h('div', { className: 'imqq-pairToolbar' }, h(Button, { variant: 'outline', size: 'sm', disabled: busy || manualOpenid.trim() === '', onClick: () => { addManual(); } }, '添加'),
-          h('span', { className: 'imqq-pairHint' }, 'openID:昵称 的昵称会记入成员展示。')),
+          h('span', { className: 'imqq-pairHint' }, '添加后可继续填写，配对码保持有效。')))),
+        h('section', { className: 'imqq-pairResults', 'aria-label': '本次添加结果' },
+          h('h4', { className: 'imqq-pairSectionTitle' }, `本次添加结果（${results.filter(result => result.state === 'added').length} 项新增）`),
+          results.length === 0 ? h('p', { className: 'imqq-pairHint' }, '等待认领，成功结果会显示在这里。') : null,
+          h('ul', { className: 'imqq-pairResultList', 'aria-live': 'polite' }, ...results.map(result => h('li', { className: 'imqq-pairResult', key: `${result.scene}:${result.openid}` },
+            h('div', { className: 'imqq-pairResultTitle' },
+              h('span', { className: 'imqq-pairMemberName' }, result.nickname || (result.scene === 'group' ? '未命名群聊' : '未命名用户')),
+              h('span', { className: 'imqq-pairResultState' }, result.state !== 'revoked' ? h(IconCheckOutlineRegular, { size: 14 }) : null, result.state === 'added' ? '已添加' : result.state === 'existing' ? '已在名单中' : '已移除')),
+            h('div', { className: 'imqq-pairIdentity' }, h('code', { className: 'imqq-pairMemberOpenId' }, result.openid),
+              h(Button, { variant: 'ghost', size: 'sm', className: 'imqq-pairCopy', 'aria-label': `复制 ${result.nickname || result.openid} 的 OpenID`, onClick: () => { void copyOpenIds(result.openid); } }, h(IconCopyOutlineRegular, { size: 14 }))))))),
         msg ? h('p', { className: 'imqq-pairHint', role: 'status' }, msg) : null,
-        error ? h('p', { className: 'imqq-pairError', role: 'alert' }, error) : null,
-        h('div', { className: 'imqq-pairToolbar' }, h(Button, { variant: 'primary', size: 'sm', onClick: () => setAddOpen(false) }, '完成'))),
+        error ? h('p', { className: 'imqq-pairError', role: 'alert' }, error) : null),
     }) : null);
 }

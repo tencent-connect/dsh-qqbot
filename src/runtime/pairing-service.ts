@@ -1,14 +1,15 @@
 /**
- * 配对码运行期状态 —— 内存态（TTL + 单次），不落盘敏感信息。
+ * 配对批次：有效期内支持多人／多群认领；关闭或替换后失效。
  *
  * 两个使用面：
  *  - Web 侧：issue(code) 生成、list() 展示、revoke() 移除。
- *  - QQ 侧：consume(code) 核销（校验 TTL/单次），成功后由调用方写名单。
+ *  - QQ 侧：consume(code) 校验有效期，成功后由调用方写名单及认领结果。
  *
  * 认领成功记录只存「已认领成员」（openid + 昵称 + 场景 + 时间），供 UI 展示。
  * 授权真相仍是 store 里的 owners / access 白名单；本服务只是配对过程与展示缓存。
  */
-import { generatePairCode, normalizePairCode, type ClaimedMember, type PairChallenge, type PairPurpose } from '../shared/pairing-protocol.ts';
+import { generatePairCode, normalizePairCode, type ClaimedMember, type PairChallenge, type PairClaimResult, type PairPurpose } from '../shared/pairing-protocol.ts';
+import { readPairingState, writePairingState } from './pairing-state.ts';
 
 /** 配对码有效期（毫秒）。 */
 const CODE_TTL_MS = 10 * 60 * 1000;
@@ -25,40 +26,74 @@ export type ConsumeResult =
   | { ok: false; reason: 'unknown' | 'expired' | 'used' };
 
 export class PairingService {
-  private readonly pending = new Map<string, { purpose: PairPurpose; expiresAt: number; createdAt: number }>();
+  private readonly pending = new Map<string, PairChallenge>();
   private readonly claimed: ClaimedMember[] = [];
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly stateFile: string | undefined;
 
-  constructor(options: { now?: () => number; random?: () => number } = {}) {
+  constructor(options: { now?: () => number; random?: () => number; stateFile?: string } = {}) {
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
+    this.stateFile = options.stateFile;
+    this.refresh();
   }
 
   /** 生成一个新码（清理过期项；超上限淘汰最旧）。 */
-  issue(purpose: PairPurpose): PairChallenge {
+  issue(purpose: PairPurpose, previousCode?: string): PairChallenge {
+    this.refresh();
     this.sweep();
     const at = this.now();
     let code = generatePairCode(this.random);
     let guard = 0;
     while (this.pending.has(code) && guard < 50) { code = generatePairCode(this.random); guard += 1; }
-    const entry = { purpose, expiresAt: at + CODE_TTL_MS, createdAt: at };
+    if (this.pending.has(code)) throw new Error('配对码生成失败，请重试');
+    if (previousCode) {
+      const previous = this.pending.get(normalizePairCode(previousCode));
+      if (previous && previous.purpose !== purpose) throw new Error('配对用途不匹配');
+      this.pending.delete(normalizePairCode(previousCode));
+    }
+    const entry: PairChallenge = { code, purpose, expiresAt: at + CODE_TTL_MS, createdAt: at, claims: [] };
     this.pending.set(code, entry);
     if (this.pending.size > MAX_PENDING) {
       const oldest = [...this.pending.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
       if (oldest) this.pending.delete(oldest[0]);
     }
-    return { code, purpose, expiresAt: entry.expiresAt, createdAt: at };
+    this.save();
+    return structuredClone(entry);
   }
 
-  /** 核销：成功即删除（单次）；返回用途供调用方写对应名单。失败返回原因，不抛。 */
+  /** 验证限时批次；成功不会消耗配对码。 */
   consume(rawCode: string): ConsumeResult {
+    this.refresh();
     const code = normalizePairCode(rawCode);
     const entry = this.pending.get(code);
     if (entry === undefined) return { ok: false, reason: 'unknown' };
-    this.pending.delete(code);
-    if (this.now() > entry.expiresAt) return { ok: false, reason: 'expired' };
+    if (this.now() >= entry.expiresAt) return { ok: false, reason: 'expired' };
     return { ok: true, purpose: entry.purpose };
+  }
+
+  end(rawCode: string, purpose: PairPurpose): void {
+    this.refresh();
+    const code = normalizePairCode(rawCode);
+    const challenge = this.pending.get(code);
+    if (challenge && challenge.purpose !== purpose) throw new Error('配对用途不匹配');
+    this.pending.delete(code); this.save();
+  }
+
+  claimResult(rawCode: string, openid: string): PairClaimResult | undefined {
+    this.refresh();
+    return this.pending.get(normalizePairCode(rawCode))?.claims.find(member => member.openid === openid);
+  }
+
+  recordResult(rawCode: string, member: PairClaimResult): void {
+    this.refresh();
+    const entry = this.pending.get(normalizePairCode(rawCode));
+    if (!entry || this.now() >= entry.expiresAt) throw new Error('配对码已结束');
+    if (!entry.claims.some(claim => claim.openid === member.openid)) {
+      this.pending.set(entry.code, { ...entry, claims: [...entry.claims, member] });
+      this.save();
+    }
   }
 
   /** 记录认领成功（同一 openid+场景只保留一条，更新时间/昵称）。 */
@@ -81,26 +116,28 @@ export class PairingService {
   }
 
   // ── 待确认（QQ 输码后、用户点"确认"前）──
-  private readonly pendingConfirms = new Map<string, { purpose: PairPurpose; actor: PendingActor; expiresAt: number }>();
+  private readonly pendingConfirms = new Map<string, { purpose: PairPurpose; actor: PendingActor; expiresAt: number; code?: string }>();
 
   /** 是否存在一个未过期的进行中配对码（用于裸 token 拦截判断，不核销）。 */
   hasActiveCode(rawCode: string): boolean {
+    this.refresh();
     const code = normalizePairCode(rawCode);
     const entry = this.pending.get(code);
-    return entry !== undefined && this.now() <= entry.expiresAt;
+    return entry !== undefined && this.now() < entry.expiresAt;
   }
 
   /** 查看某码的用途（不核销）；不存在/过期返回 undefined。 */
   peekPurpose(rawCode: string): PairPurpose | undefined {
+    this.refresh();
     const code = normalizePairCode(rawCode);
     const entry = this.pending.get(code);
-    return entry !== undefined && this.now() <= entry.expiresAt ? entry.purpose : undefined;
+    return entry !== undefined && this.now() < entry.expiresAt ? entry.purpose : undefined;
   }
 
   /** 记录一个待确认认领，返回 nonce（按钮回调携带）。 */
-  beginConfirm(purpose: PairPurpose, actor: PendingActor): string {
+  beginConfirm(purpose: PairPurpose, actor: PendingActor, code?: string): string {
     const nonce = generatePairCode(this.random) + generatePairCode(this.random);
-    this.pendingConfirms.set(nonce, { purpose, actor, expiresAt: this.now() + CONFIRM_TTL_MS });
+    this.pendingConfirms.set(nonce, { purpose, actor, expiresAt: this.now() + CONFIRM_TTL_MS, code });
     // 清理过期
     for (const [k, v] of this.pendingConfirms) if (this.now() > v.expiresAt) this.pendingConfirms.delete(k);
     return nonce;
@@ -115,25 +152,36 @@ export class PairingService {
   }
 
   /** 取出并删除待确认（点按钮时核销；过期/未知返回 undefined）。 */
-  takeConfirm(nonce: string): { purpose: PairPurpose; actor: PendingActor } | undefined {
+  takeConfirm(nonce: string): { purpose: PairPurpose; actor: PendingActor; code?: string } | undefined {
     const entry = this.pendingConfirms.get(nonce);
     if (entry === undefined) return undefined;
     this.pendingConfirms.delete(nonce);
     if (this.now() > entry.expiresAt) return undefined;
-    return { purpose: entry.purpose, actor: entry.actor };
+    return { purpose: entry.purpose, actor: entry.actor, code: entry.code };
   }
 
   /** 展示进行中的码（未过期的）。 */
   listChallenges(): PairChallenge[] {
+    this.refresh();
+    const before = this.pending.size;
     this.sweep();
-    const at = this.now();
-    return [...this.pending.entries()].map(([code, e]) => ({ code, purpose: e.purpose, expiresAt: e.expiresAt, createdAt: e.createdAt }))
-      .filter((c) => c.expiresAt > at)
-      .sort((a, b) => b.createdAt - a.createdAt);
+    if (before !== this.pending.size) this.save();
+    return structuredClone([...this.pending.values()].sort((a, b) => b.createdAt - a.createdAt));
+  }
+
+  private refresh(): void {
+    if (this.stateFile) {
+      const rows = readPairingState(this.stateFile);
+      this.pending.clear();
+      for (const row of rows) this.pending.set(row.code, row);
+    }
+  }
+  private save(): void {
+    if (this.stateFile) writePairingState(this.stateFile, [...this.pending.values()]);
   }
 
   private sweep(): void {
     const at = this.now();
-    for (const [code, e] of this.pending) if (at > e.expiresAt) this.pending.delete(code);
+    for (const [code, e] of this.pending) if (at >= e.expiresAt) this.pending.delete(code);
   }
 }

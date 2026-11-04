@@ -35,18 +35,19 @@ function fixture() {
   const send = vi.spyOn(bot, 'sendText').mockResolvedValue({ id: 'reply', timestamp: '' });
   setupMiddlewares(bot, config, manager, logger);
   const agent = vi.fn();
-  async function receive(content: string, options: { group?: boolean; mentioned?: boolean; id?: string; name?: string } = {}) {
+  async function receive(content: string, options: { group?: boolean; mentioned?: boolean; id?: string; name?: string; senderId?: string; groupId?: string } = {}) {
     const group = options.group ?? false;
+    const senderId = options.senderId ?? 'sender'; const groupId = options.groupId ?? 'team';
     const timestamp = new Date(now).toISOString();
     const message: QQBotInboundMessage = {
-      kind: group ? 'group' : 'c2c', senderId: 'sender', senderName: options.name,
+      kind: group ? 'group' : 'c2c', senderId, senderName: options.name,
       content, messageId: options.id ?? crypto.randomUUID(), timestamp,
       rawEventType: group ? options.mentioned ? 'GROUP_AT_MESSAGE_CREATE' : 'GROUP_MESSAGE_CREATE' : 'C2C_MESSAGE_CREATE',
-      groupOpenid: group ? 'team' : undefined,
-      replyTarget: { scope: group ? 'group' : 'c2c', targetId: group ? 'team' : 'sender' },
+      groupOpenid: group ? groupId : undefined,
+      replyTarget: { scope: group ? 'group' : 'c2c', targetId: group ? groupId : senderId },
       raw: group
-        ? { id: 'event', content, timestamp, author: { member_openid: 'sender' }, group_openid: 'team' }
-        : { id: 'event', content, timestamp, author: { user_openid: 'sender' } },
+        ? { id: 'event', content, timestamp, author: { member_openid: senderId }, group_openid: groupId }
+        : { id: 'event', content, timestamp, author: { user_openid: senderId } },
     };
     let stopped = false;
     let stopReason: string | undefined;
@@ -66,6 +67,17 @@ function fixture() {
 }
 
 describe('pairing before conversation admission', () => {
+  it.each([false, true])('admits two previously unknown identities with the same code (group=%s) without running an Agent', async group => {
+    const f = fixture(); const code = f.service.issuePairCode(group ? 'allow-group' : 'allow-c2c').code;
+    await f.receive(code, { group, mentioned: group, senderId: 'first', groupId: 'first-group', name: '小明' });
+    await f.receive(code, { group, mentioned: group, senderId: 'second', groupId: 'second-group', name: 'Alice' });
+    const access = readProfileAccess(undefined, profile.dir);
+    expect(group ? access.groupAllow : access.c2cAllow).toEqual(group ? ['first-group', 'second-group'] : ['first', 'second']);
+    expect(f.service.pairStatus().challenges[0]?.claims).toHaveLength(2);
+    expect(f.service.isActivePairCode(code)).toBe(true);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.agent).not.toHaveBeenCalled();
+  });
   it('allows a current private invitation through an empty whitelist without starting an Agent', async () => {
     const f = fixture();
     const code = f.service.issuePairCode('allow-c2c').code;

@@ -17,6 +17,7 @@ export function usePairingStyles(): void {
 .imqq-pairCount, .imqq-pairHint, .imqq-pairMemberMeta { font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .imqq-pairToolbar { margin-left: auto; }
 .imqq-pairHint { margin: 0; overflow-wrap: anywhere; }
+.imqq-pairHint[role="status"] { white-space: pre-line; }
 .imqq-pairError { margin: 0; color: var(--dsw-alias-state-error-primary); }
 .imqq-pairMembers { list-style: none; padding: 0; margin: 0; }
 .imqq-pairMember { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 0 2px; border-top: 1px solid var(--dsw-alias-border-l2); }
@@ -34,7 +35,15 @@ export function usePairingStyles(): void {
 .imqq-pairExample { margin: 0; padding: 8px 10px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2); white-space: pre-wrap; font-size: 12px; }
 .imqq-pairTextarea { box-sizing: border-box; width: 100%; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; resize: vertical; }
 .imqq-pairTextarea:focus-visible { outline: 2px solid var(--dsw-focus-ring-color); outline-offset: 2px; }
-.imqq-pairModal { width: min(560px, calc(100vw - 32px)); }
+.imqq-pairModal { width: min(560px, calc(100vw - 32px)); max-height: 100%; overflow: auto; }
+.imqq-pairManual { display: grid; gap: 10px; padding: 8px 0; }
+.imqq-pairResults { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--dsw-alias-border-l2); }
+.imqq-pairResultList { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+.imqq-pairResult { display: grid; gap: 4px; padding: 10px 0; }
+.imqq-pairResult + .imqq-pairResult { border-top: 1px solid var(--dsw-alias-border-l2); }
+.imqq-pairResultTitle, .imqq-pairFooter { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.imqq-pairResultState { display: inline-flex; flex: none; align-items: center; gap: 4px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.imqq-pairFooter { flex-wrap: wrap; }
 .imqq-pairCodeCard { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2); }
 .imqq-pairCodeMain, .imqq-pairCodeActions { display: flex; align-items: center; gap: 8px; }
 .imqq-pairCodeValue { font-size: 24px; letter-spacing: 4px; font-weight: 600; }

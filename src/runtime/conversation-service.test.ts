@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigSchema } from '../config.ts';
@@ -19,11 +19,60 @@ function fixture() {
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const store = new ConversationStore(join(profile.dir, 'data'), config.appId);
   const service = Object.assign(Object.create(ConversationService.prototype) as ConversationService,
-    { config, logger, store, pairing: new PairingService() });
+    { config, logger, store, pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }) });
   return { service, store };
 }
 
 describe('membership persistence and pairing scope', () => {
+  it.each(['owner', 'allow-c2c', 'allow-group'] as const)('adds two identities with one %s code across a service reload', purpose => {
+    const first = fixture().service; const code = first.issuePairCode(purpose).code;
+    const scope = purpose === 'allow-group' ? 'group' : 'c2c';
+    first.renameMember('one', '一号群'); first.renameMember('two', '二号群');
+    expect(first.beginClaimFromMessage(scope, 'one', code, 'sender-one', '小明').ok).toBe(true);
+    const reloaded = fixture().service;
+    expect(reloaded.beginClaimFromMessage(scope, 'two', code, 'sender-two', 'Alice').ok).toBe(true);
+    expect(reloaded.pairStatus().challenges[0]?.claims).toMatchObject([
+      { openid: purpose === 'allow-group' ? 'one' : 'sender-one', nickname: purpose === 'allow-group' ? '一号群' : '小明', state: 'added' },
+      { openid: purpose === 'allow-group' ? 'two' : 'sender-two', nickname: purpose === 'allow-group' ? '二号群' : 'Alice', state: 'added' },
+    ]);
+    expect(reloaded.beginClaimFromMessage(scope, 'one', code, 'sender-one', '小明').message).toContain('已在白名单');
+    expect(reloaded.pairStatus().challenges[0]?.claims).toHaveLength(2);
+    reloaded.endPairCode(code, purpose);
+    expect(first.isActivePairCode(code)).toBe(false);
+  });
+  it.each(['owner', 'allow-c2c', 'allow-group'] as const)('does not re-add a revoked %s identity with the same code', purpose => {
+    const { service } = fixture(); const code = service.issuePairCode(purpose).code;
+    const scope = purpose === 'allow-group' ? 'group' : 'c2c';
+    expect(service.beginClaimFromMessage(scope, 'peer', code, 'sender', '小明').ok).toBe(true);
+    expect(service.revokePair(purpose === 'allow-group' ? 'peer' : 'sender', purpose).ok).toBe(true);
+    const reloaded = fixture().service;
+    expect(reloaded.beginClaimFromMessage(scope, 'peer', code, 'sender', '小明')).toMatchObject({ ok: false });
+    expect(reloaded.pairStatus().challenges[0]?.claims[0]?.state).toBe('revoked');
+  });
+  it('keeps partial manual failures available and returns confirmed identities with saved nicknames', () => {
+    const { service } = fixture(); service.renameMember('saved', '已保存昵称');
+    const code = service.issuePairCode('allow-c2c').code;
+    expect(service.addManualMember('allow-c2c', 'saved，new:小明\n:无效')).toMatchObject({
+      ok: true, added: 2, results: [{ openid: 'saved', nickname: '已保存昵称' }, { openid: 'new', nickname: '小明' }], errors: [{ input: ':无效' }],
+    });
+    expect(service.isActivePairCode(code)).toBe(true);
+  });
+  it('does not report successful claims when membership persistence fails, and allows retry', () => {
+    const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
+    const blocked = join(profile.dir!, 'cordis.patch.yml.imqqbot.tmp'); mkdirSync(blocked);
+    expect(service.beginClaimFromMessage('c2c', 'peer', code, 'sender', '小明').ok).toBe(false);
+    expect(service.pairStatus().challenges[0]?.claims).toEqual([]);
+    expect(service.isActivePairCode(code)).toBe(true);
+    rmSync(blocked, { recursive: true });
+    expect(service.beginClaimFromMessage('c2c', 'peer', code, 'sender', '小明').ok).toBe(true);
+  });
+  it('rejects a legacy confirmation after its batch is closed', () => {
+    const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
+    const result = service.startClaim(code, { openid: 'sender', nickname: '小明', scope: 'c2c', sceneName: '' });
+    service.endPairCode(code, 'allow-c2c');
+    expect(service.applyClaim(result.nonce!)).toMatchObject({ ok: false });
+    expect(service.pairStatus().allowC2c).toEqual([]);
+  });
   it.each(['owner', 'allow-c2c', 'allow-group'] as const)('can reimport copied %s entries with nicknames using lines or commas', purpose => {
     const { service } = fixture();
     for (const separator of ['\n', ',']) {
@@ -87,7 +136,7 @@ describe('membership persistence and pairing scope', () => {
     expect(service.pairing.hasActiveCode(challenge.code)).toBe(true);
     expect(store.list()).toEqual([]);
     expect(service.beginClaimFromMessage(correct, 'right-peer', challenge.code, 'sender').ok).toBe(true);
-    expect(service.pairing.hasActiveCode(challenge.code)).toBe(false);
+    expect(service.pairing.hasActiveCode(challenge.code)).toBe(true);
     const access = readProfileAccess(undefined, profile.dir);
     expect(purpose === 'allow-group' ? access.groupAllow : access.c2cAllow)
       .toEqual([purpose === 'allow-group' ? 'right-peer' : 'sender']);
