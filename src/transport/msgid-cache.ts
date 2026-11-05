@@ -58,6 +58,13 @@ export function cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId
   push(scope, targetId, { kind: 'msg', id: msgId });
 }
 
+export function forgetMsgId(scope: ChatScope, targetId: string, msgId: string): void {
+  const key = cacheKey(scope, targetId);
+  const entries = cache.get(key)?.filter(entry => entry.target.kind !== 'msg' || entry.target.id !== msgId);
+  if (entries?.length) cache.set(key, entries);
+  else cache.delete(key);
+}
+
 /** 记录互动事件 eventId（内部拼 INTERACTION_CREATE 前缀） */
 export function cacheEventId(scope: ChatScope, targetId: string | undefined, eventId: string | undefined): void {
   if (!eventId) return;

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { ApiError, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { bindDelivery, guardSender } from '../transport/delivery-context.ts';
+import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import {
   QuestionChannel,
   type UserQuestion,
@@ -20,10 +22,9 @@ interface SentMessage {
   opts?: { keyboard?: unknown };
 }
 
-function createSender(sent: SentMessage[], opts?: { failKeyboard?: boolean }) {
+function createSender(sent: SentMessage[]) {
   return {
     sendMarkdown: vi.fn(async (_target: ReplyTarget, content: string, o?: { keyboard?: unknown }) => {
-      if (o?.keyboard && opts?.failKeyboard) throw new Error('keyboard not permitted');
       sent.push({ text: content, opts: o });
     }),
   };
@@ -201,16 +202,39 @@ describe('QuestionChannel.askViaQQ', () => {
     await p;
   });
 
-  it('falls back to plain text when keyboard send fails', async () => {
-    const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent, { failKeyboard: true }), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const p = startAsk(ch, 'c2c', 'U1', [q2()]);
-    await sleep(20);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.opts).toBeUndefined();
-    expect(sent[0]?.text).toContain('回复编号选择');
-    ch.tryAnswer('c2c', 'U1', '1');
-    await p;
+  it.each([true, false])('reuses the question operation and falls back only on a definite rejection (%s)', async (rejected) => {
+    const ledger = new DeliveryLedger();
+    const record = makeRecord('question-session');
+    const target = bindDelivery(record.replyTarget, { key: 'question-turn', allowed: () => true });
+    const response = rejected
+      ? new ApiError('keyboard not permitted', 403, '/v2/users/x/messages', 40034010)
+      : new ApiError('response timeout', 0, '/v2/users/x/messages');
+    const sendMarkdown = vi.fn().mockRejectedValueOnce(response).mockResolvedValue(undefined);
+    const sender = guardSender({ sendMarkdown, openStream: vi.fn() }, ledger);
+    const manager = createManager({ getSessionRecord: () => record });
+    const channel = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const request = { questions: [q2()] };
+    if (!rejected) {
+      await expect(channel.askViaQQ(record, target, request)).rejects.toThrow('response timeout');
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
+      return;
+    }
+
+    const first = channel.askViaQQ(record, target, request);
+    await vi.waitFor(() => {
+      expect(channel.tryAnswer('c2c', 'x', '1')).toBe(true);
+    });
+    await first;
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(sendMarkdown.mock.calls[0]?.[2]).toHaveProperty('keyboard');
+    expect(sendMarkdown.mock.calls[1]?.[1]).toContain('回复编号选择');
+
+    const replay = channel.askViaQQ(record, target, request);
+    await vi.waitFor(() => {
+      expect(channel.tryAnswer('c2c', 'x', '1')).toBe(true);
+    });
+    await replay;
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
   });
 
   it('rejects when the question cannot be delivered at all', async () => {

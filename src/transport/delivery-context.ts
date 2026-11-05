@@ -3,6 +3,7 @@ import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
 import type { MediaSenderLike, MediaSendResult } from '../media/send-media.ts';
 import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
 import { chunkMarkdownText } from './chunker.ts';
+import { isMessageRejected, StreamTargetExpired } from './delivery-errors.ts';
 
 interface DeliveryContext { key: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
 const contexts = new WeakMap<ReplyTarget, DeliveryContext>();
@@ -36,6 +37,12 @@ function authorize(context: DeliveryContext): void {
   if (!context.allowed()) throw new Error('QQ delivery canceled: source or access is no longer authorized');
 }
 
+export function assertDeliveryAllowed(target: ReplyTarget): void {
+  const context = contexts.get(target);
+  if (!context) throw new Error('QQ automatic delivery has no source identity');
+  authorize(context);
+}
+
 export function guardSender(sender: QQBotSender, ledger: DeliveryLedger): QQBotSender {
   return {
     async sendText(target, content, limit) {
@@ -59,7 +66,14 @@ export function guardSender(sender: QQBotSender, ledger: DeliveryLedger): QQBotS
       if (streamState && streamState !== 'not-sent') return false;
       return ledger.run(deliveryKey(context.key, 'markdown', context.fixed ? null : [content, opts]), async () => {
         authorize(context);
-        return sender.sendMarkdown(target, content, opts);
+        const options = opts?.keyboard ? { keyboard: opts.keyboard } : undefined;
+        try {
+          await sender.sendMarkdown(target, content, options);
+        } catch (error) {
+          if (opts?.fallbackText === undefined || !isMessageRejected(error)) throw error;
+          authorize(context);
+          await sender.sendMarkdown(target, opts.fallbackText);
+        }
       });
     },
     openStream(target) {
@@ -72,25 +86,31 @@ export function guardSender(sender: QQBotSender, ledger: DeliveryLedger): QQBotS
       let stream: StreamSessionLike;
       try { stream = sender.openStream(target); }
       catch (error) { ledger.settle(key, 'not-sent'); throw error; }
-      let failed = false;
       let complete = false;
+      const fail = (error: unknown): never => {
+        complete = true;
+        stream.cancel?.();
+        ledger.settle(key, error instanceof StreamTargetExpired ? 'not-sent' : 'unknown');
+        throw error;
+      };
       return {
         async update(content) {
-          authorize(context);
+          if (complete) return;
           try {
+            authorize(context);
             return await stream.update(content);
-          } catch (error) { failed = true; ledger.settle(key, 'unknown'); throw error; }
+          } catch (error) { return fail(error); }
         },
         async complete() {
           if (complete) return;
           complete = true;
-          if (failed || !context.allowed()) {
+          if (!context.allowed()) {
             stream.cancel?.();
             ledger.settle(key, 'unknown');
             return;
           }
-          try { await stream.complete(); ledger.settle(key, failed ? 'unknown' : 'accepted'); }
-          catch (error) { ledger.settle(key, 'unknown'); throw error; }
+          try { await stream.complete(); ledger.settle(key, 'accepted'); }
+          catch (error) { fail(error); }
         },
         cancel() {
           if (complete) return;
