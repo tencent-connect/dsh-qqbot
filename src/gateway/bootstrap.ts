@@ -103,6 +103,12 @@ export async function bootstrapGateway(
         msgId: target.msgId as string,
       },
     }),
+    // 唤醒消息（c2c 30 天窗口的主动投递）。是否真的用到由 wakeupFallback 决定：
+    // 开关关闭时出站路由不会调用，行为与上游一致。
+    sendWakeup: (target, content) => bot.sendWakeup(
+      { scope: target.scope, targetId: target.targetId },
+      content,
+    ),
   };
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
