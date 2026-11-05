@@ -37,7 +37,7 @@ export interface EnsureCredentialsOptions {
 }
 
 /**
- * 执行扫码绑定编排，返回凭据就绪的 Promise；失败/取消 resolve null。
+ * 执行扫码绑定编排；失败后等待刷新，成功返回凭据，取消 resolve null。
  *
  * 【同步契约】函数体必须保持无 await——绑定编排（服务接管、路由注册、
  * 呈现策略、ctx 生命周期挂载）在调用后的同步阶段全部完成，随后返回

@@ -3,7 +3,7 @@
  *
  * 用可控的假 connector 驱动，覆盖：
  * waiting 相位与呈现通知、refresh 重建任务、扫码成功收敛为凭据、
- * 失败终结、dispose 静默退出、陈旧 generation 丢弃。
+ * 失败后刷新重试、dispose 静默退出、陈旧 generation 丢弃。
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { QrConnectCallbacks, QrConnectOptions } from '@tencent-connect/qqbot-connector';
@@ -120,29 +120,70 @@ describe('BindingService', () => {
     service.dispose();
   });
 
-  it('连接失败：进入 failed 相位且 start() 解析 null', async () => {
+  it('连接失败后等待刷新，后续扫码仍完成最初的凭据等待', async () => {
     const fake = new FakeConnect();
     const { service } = createService(fake);
     const promise = service.start();
+    const settled = vi.fn();
+    void promise.then(settled);
     await flush();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     fake.latest.callbacks.onFailure(new Error('获取绑定任务失败'));
-    await expect(promise).resolves.toBeNull();
+    await flush();
     expect(service.wireState()).toEqual({ phase: 'failed', reason: '获取绑定任务失败' });
     expect(errorSpy).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    expect(service.start()).toBe(promise);
+
+    service.refresh();
+    await flush();
+    expect(fake.sessions).toHaveLength(2);
+    expect(service.wireState()).toEqual({ phase: 'starting' });
+    fake.latest.callbacks.onQrDisplayed?.('https://q.qq.com/retry');
+    await flush();
+    expect(service.wireState()).toMatchObject({ phase: 'waiting', url: 'https://q.qq.com/retry' });
+    fake.latest.callbacks.onSuccess([{ appId: 'app-retry', appSecret: 'secret-retry' }]);
+    await expect(promise).resolves.toEqual({ appId: 'app-retry', appSecret: 'secret-retry' });
+    expect(settled).toHaveBeenCalledOnce();
     errorSpy.mockRestore();
   });
 
-  it('空凭据：软失败终结（不进入无限 refresh 循环）', async () => {
+  it('空凭据：等待刷新且不自动循环，dispose 结束最初等待', async () => {
     const fake = new FakeConnect();
     const { service } = createService(fake);
     const promise = service.start();
     await flush();
 
     fake.latest.callbacks.onSuccess([]);
-    await expect(promise).resolves.toBeNull();
+    await flush();
     expect(service.wireState()).toEqual({ phase: 'failed', reason: '扫码未返回有效凭据' });
+    expect(fake.sessions).toHaveLength(1);
+    service.dispose();
+    await expect(promise).resolves.toBeNull();
+  });
+
+  it('连接失败后迟到的二维码渲染不得覆盖 failed 相位', async () => {
+    const fake = new FakeConnect();
+    const qr = Promise.withResolvers<string>();
+    const service = new BindingService({
+      source: 'test',
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      connect: fake.connect,
+      renderQr: () => qr.promise,
+    });
+    const promise = service.start();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    fake.latest.callbacks.onQrDisplayed?.('https://q.qq.com/failed-task');
+    fake.latest.callbacks.onFailure(new Error('任务失效'));
+    await flush();
+
+    qr.resolve('data:image/svg+xml;base64,STALE');
+    await flush();
+    expect(service.wireState()).toEqual({ phase: 'failed', reason: '任务失效' });
+    service.dispose();
+    await expect(promise).resolves.toBeNull();
+    errorSpy.mockRestore();
   });
 
   it('dispose：静默退出，start() 解析 null 且不再重建任务', async () => {
