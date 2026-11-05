@@ -27,6 +27,8 @@ interface PrefsFile {
   sessionIds: Record<string, string>;
   /** sessionKey → preset id（per-peer preset 覆盖） */
   presets: Record<string, string>;
+  /** sessionKey → 思考深度（reasoning effort）偏好 */
+  efforts: Record<string, string>;
 }
 
 /** 各段的删除墓碑（key 集合），合并时用于压住磁盘上的旧值 */
@@ -34,6 +36,7 @@ interface Tombstones {
   overrides: Set<string>;
   sessionIds: Set<string>;
   presets: Set<string>;
+  efforts: Set<string>;
 }
 
 export class PrefsStore {
@@ -45,8 +48,15 @@ export class PrefsStore {
   private sessionKeys = new Map<string, string>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
+  /** per-peer 思考深度偏好（内存态） */
+  private efforts = new Map<string, string>();
   /** 本进程显式删除的 key（防止并发合并把删除复活） */
-  private deleted: Tombstones = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
+  private deleted: Tombstones = {
+    overrides: new Set(),
+    sessionIds: new Set(),
+    presets: new Set(),
+    efforts: new Set(),
+  };
   /** 隔离偏好文件路径 */
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
@@ -137,6 +147,27 @@ export class PrefsStore {
     return deleted;
   }
 
+  // ── Effort（思考深度）操作 ──
+
+  getEffort(sessionKey: string): string | undefined {
+    return this.efforts.get(sessionKey);
+  }
+
+  setEffort(sessionKey: string, effort: string): void {
+    this.efforts.set(sessionKey, effort);
+    this.deleted.efforts.delete(sessionKey);
+    this.write();
+  }
+
+  clearEffort(sessionKey: string): boolean {
+    const deleted = this.efforts.delete(sessionKey);
+    if (deleted) {
+      this.deleted.efforts.add(sessionKey);
+      this.write();
+    }
+    return deleted;
+  }
+
   // ── 私有方法 ──
 
   /** 移除 sessionKey 当前指向的反向索引（仅当索引仍归属该 key） */
@@ -171,6 +202,13 @@ export class PrefsStore {
         for (const [key, presetId] of Object.entries(data.presets)) {
           if (typeof presetId === 'string' && presetId) {
             this.presets.set(key, presetId);
+          }
+        }
+      }
+      if (data.efforts && typeof data.efforts === 'object') {
+        for (const [key, effort] of Object.entries(data.efforts)) {
+          if (typeof effort === 'string' && effort) {
+            this.efforts.set(key, effort);
           }
         }
       }
@@ -238,6 +276,7 @@ export class PrefsStore {
       overrides: pick(this.overrides, disk?.overrides, this.deleted.overrides),
       sessionIds: pick(this.sessionIds, disk?.sessionIds, this.deleted.sessionIds),
       presets: pick(this.presets, disk?.presets, this.deleted.presets),
+      efforts: pick(this.efforts, disk?.efforts, this.deleted.efforts),
     };
   }
 

@@ -19,6 +19,22 @@ export interface SessionEventLike {
   [key: string]: unknown;
 }
 
+/** 宿主动态模型选择接口（dsh 0.2.x 起由 Agent 暴露；旧宿主没有） */
+export interface DshAgentModelSelection {
+  provider: string;
+  model: string;
+  /** 适配器拥有的推理性强度；省略 = 适配器默认 */
+  reasoningEffort?: string;
+}
+
+/** Agent 的模型选择句柄（feature-detect 后使用） */
+export interface DshAgentModel {
+  /** 下一步将使用的完整选择 */
+  current?(): DshAgentModelSelection | undefined;
+  /** 替换下一步的完整选择（运行中的步骤保留启动时的选择） */
+  select(selection: DshAgentModelSelection): void;
+}
+
 /** dsh Agent 简化接口 */
 export interface DshAgent {
   readonly id: string;
@@ -30,6 +46,8 @@ export interface DshAgent {
     readonly id: string;
     snapshotEvents(): readonly SessionEventLike[];
   };
+  /** 动态模型选择（旧宿主没有这个字段） */
+  readonly model?: DshAgentModel;
   cancel(cause: { kind: string }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;
@@ -66,6 +84,15 @@ export interface PresetSwitchOutcome {
   ok: boolean;
   reason?: 'unavailable' | 'unknown-preset' | 'broken' | 'failed';
   presetId?: string;
+  message?: string;
+}
+
+/** 思考深度（reasoning effort）切换结果 */
+export interface EffortSwitchOutcome {
+  ok: boolean;
+  /** 是否已对活跃会话立即生效（false = 仅保存偏好，下次会话生效） */
+  live?: boolean;
+  reason?: 'unsupported' | 'failed';
   message?: string;
 }
 
@@ -137,6 +164,8 @@ export interface SessionStatus {
   sessionId?: string;
   provider?: string;
   model?: string;
+  /** 当前思考深度（未手动设置时为 undefined = 模型默认） */
+  effort?: string;
   preset?: string;
   lastActivity?: number;
   messageCount?: number;

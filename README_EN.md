@@ -162,6 +162,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/model` | View or switch model |
+| `/think` (aliases `/effort` `/reasoning` `/思考`) | View or switch reasoning effort |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |

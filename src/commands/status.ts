@@ -20,6 +20,7 @@ export function statusCommand({ manager }: CommandDeps): CategorizedCommand {
         '📊 会话状态',
         `会话: ${status.sessionId ? status.sessionId.slice(0, 8) : '—'}`,
         `模型: ${modelInfo}`,
+        `思考深度: ${status.effort ?? '默认'}`,
         `Preset: ${status.preset ?? '无'}`,
         `消息数: ${status.messageCount ?? 0}`,
         `最后活动: ${formatRelativeTime(status.lastActivity)}`,

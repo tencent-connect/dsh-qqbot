@@ -582,3 +582,103 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(created[0].sections.size).toBe(0);
   });
 });
+
+describe('思考深度（reasoning effort）', () => {
+  /** 带 Agent.model 的替身（模拟 dsh 0.2.x） */
+  function agentWithModel(id: string, selected: Array<Record<string, unknown>>): DshAgent {
+    const base = fakeAgent(id) as unknown as Record<string, unknown>;
+    base.model = {
+      current: () => ({ provider: 'p', model: 'm' }),
+      select: (selection: Record<string, unknown>) => {
+        selected.push(selection);
+      },
+    };
+    return base as unknown as DshAgent;
+  }
+
+  it('无活跃会话：只持久化偏好，标记为下次生效', async () => {
+    const { registry } = createRegistry(async () => {
+      throw new Error('should not resume');
+    });
+    const manager = createManager(registry);
+
+    const outcome = await manager.setEffortOverride('c2c', PEER, 'high');
+
+    expect(outcome).toEqual({ ok: true, live: false });
+    expect(new PrefsStore().getEffort(KEY)).toBe('high');
+  });
+
+  it('活跃会话：经 agent.model.select() 原地生效，不 fork 不换 sessionId', async () => {
+    const sessionId = 'session-live';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const selected: Array<Record<string, unknown>> = [];
+    const agent = agentWithModel(sessionId, selected);
+    const registry = { get: vi.fn(() => agent), resume: vi.fn(), create: vi.fn() };
+    const manager = createManager(registry as unknown as Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>);
+    await manager.getOrCreate('c2c', PEER, 'u1', REPLY);
+
+    const outcome = await manager.setEffortOverride('c2c', PEER, 'low');
+
+    expect(outcome).toEqual({ ok: true, live: true });
+    expect(selected).toEqual([{ provider: 'p', model: 'm', reasoningEffort: 'low' }]);
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(manager.getSessionRecord('c2c', PEER)?.sessionId).toBe(sessionId);
+  });
+
+  it('恢复默认：select 不带 reasoningEffort，偏好被清除', async () => {
+    const sessionId = 'session-live';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, sessionId);
+    prefs.setEffort(KEY, 'high');
+    const selected: Array<Record<string, unknown>> = [];
+    const agent = agentWithModel(sessionId, selected);
+    const registry = { get: vi.fn(() => agent), resume: vi.fn(), create: vi.fn() };
+    const manager = createManager(registry as unknown as Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>);
+    await manager.getOrCreate('c2c', PEER, 'u1', REPLY);
+    selected.length = 0; // 打开时会先应用已保存的 high
+
+    const outcome = await manager.setEffortOverride('c2c', PEER, null);
+
+    expect(outcome).toEqual({ ok: true, live: true });
+    expect(selected).toEqual([{ provider: 'p', model: 'm' }]);
+    expect(new PrefsStore().getEffort(KEY)).toBeUndefined();
+  });
+
+  it('打开会话时应用已保存的档位（重启/回收后仍生效）', async () => {
+    const sessionId = 'session-live';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, sessionId);
+    prefs.setEffort(KEY, 'medium');
+    const selected: Array<Record<string, unknown>> = [];
+    const agent = agentWithModel(sessionId, selected);
+    const registry = { get: vi.fn(() => agent), resume: vi.fn(), create: vi.fn() };
+
+    await createManager(registry as unknown as Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>)
+      .getOrCreate('c2c', PEER, 'u1', REPLY);
+
+    expect(selected).toEqual([{ provider: 'p', model: 'm', reasoningEffort: 'medium' }]);
+  });
+
+  it('宿主没有 Agent.model：拒绝并回滚偏好，不留下不会生效的设置', async () => {
+    const sessionId = 'session-live';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const registry = { get: vi.fn(() => fakeAgent(sessionId)), resume: vi.fn(), create: vi.fn() };
+    const manager = createManager(registry as unknown as Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>);
+    await manager.getOrCreate('c2c', PEER, 'u1', REPLY);
+
+    const outcome = await manager.setEffortOverride('c2c', PEER, 'high');
+
+    expect(outcome).toEqual({ ok: false, live: false, reason: 'unsupported' });
+    expect(new PrefsStore().getEffort(KEY)).toBeUndefined();
+  });
+
+  it('getStatus 反映当前档位', async () => {
+    new PrefsStore().setEffort(KEY, 'low');
+    const { registry } = createRegistry(async () => {
+      throw new Error('should not resume');
+    });
+    const manager = createManager(registry);
+
+    expect(manager.getStatus('c2c', PEER).effort).toBe('low');
+  });
+});

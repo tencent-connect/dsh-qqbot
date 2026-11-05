@@ -118,8 +118,7 @@ describe('PrefsStore 并发安全（E3）', () => {
   });
 });
 
-describe('PrefsStore.findSessionKey 反向索引', () => {
-  it('随 set/clear 同步维护：换新会话后旧 id 不再命中', () => {
+describe('PrefsStore.findSessionKey 反向索引', () => {  it('随 set/clear 同步维护：换新会话后旧 id 不再命中', () => {
     const s = store();
     s.setSessionId('k', 'session-1');
     expect(s.findSessionKey('session-1')).toBe('k');
@@ -136,5 +135,45 @@ describe('PrefsStore.findSessionKey 反向索引', () => {
     store().setSessionId('k', 'session-1');
 
     expect(store().findSessionKey('session-1')).toBe('k');
+  });
+});
+
+describe('PrefsStore 思考深度（efforts）', () => {
+  it('set/get/clear 往返，并落盘为 efforts 段', () => {
+    const s = store();
+    expect(s.getEffort('k')).toBeUndefined();
+    s.setEffort('k', 'high');
+    expect(s.getEffort('k')).toBe('high');
+    expect(JSON.parse(readFileSync(path, 'utf8')).efforts.k).toBe('high');
+    expect(s.clearEffort('k')).toBe(true);
+    expect(s.getEffort('k')).toBeUndefined();
+    expect('k' in JSON.parse(readFileSync(path, 'utf8')).efforts).toBe(false);
+  });
+
+  it('与其他偏好互不影响', () => {
+    const s = store();
+    s.setOverride('k', { provider: 'p', model: 'm' });
+    s.setPreset('k', 'p1');
+    s.setEffort('k', 'low');
+    s.clearEffort('k');
+    const reloaded = store();
+    expect(reloaded.getOverride('k')?.model).toBe('m');
+    expect(reloaded.getPreset('k')).toBe('p1');
+    expect(reloaded.getEffort('k')).toBeUndefined();
+  });
+
+  it('删除墓碑：clear 后并发写盘的旧值不复活', () => {
+    const a = store();
+    a.setEffort('k', 'high');
+
+    const external = JSON.parse(readFileSync(path, 'utf8'));
+    external.efforts.k = 'low';
+    writeFileSync(path, JSON.stringify(external), 'utf8');
+
+    a.clearEffort('k');
+    expect('k' in JSON.parse(readFileSync(path, 'utf8')).efforts).toBe(false);
+
+    a.setEffort('k', 'medium');
+    expect(JSON.parse(readFileSync(path, 'utf8')).efforts.k).toBe('medium');
   });
 });

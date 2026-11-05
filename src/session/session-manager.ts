@@ -23,7 +23,7 @@ import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
-import type { ModelRoute, ModelEntry } from '../model/types.ts';
+import type { ModelRoute, ModelEntry, ModelReasoning } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
@@ -41,6 +41,8 @@ import type {
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
+  EffortSwitchOutcome,
+  DshAgentModel,
 } from './types.ts';
 
 /** ManualCompactionError 各 code 的友好提示 */
@@ -185,6 +187,87 @@ export class SessionManager {
     return this.modelResolver.getEffectiveRoute(this.sessionKey(scope, peerId));
   }
 
+  /** 当前生效的思考深度（per-peer 偏好；未设置 = 模型默认） */
+  getEffectiveEffort(scope: ChatScope, peerId: string): string | undefined {
+    return this.modelResolver.getEffort(this.sessionKey(scope, peerId));
+  }
+
+  /** 查询当前模型公布的思考深度档位（/think 列表用） */
+  async getReasoningInfo(scope: ChatScope, peerId: string): Promise<ModelReasoning | undefined> {
+    return this.modelResolver.reasoningFor(this.getEffectiveModel(scope, peerId));
+  }
+
+  /**
+   * 设置/清除思考深度（effort 为 null 表示恢复默认）
+   *
+   * 有活跃会话且宿主暴露 `agent.model.select()` 时原地替换下一步选择——不 fork、
+   * 不换 sessionId、历史保留；否则只保存偏好，下次会话创建/恢复时应用。
+   */
+  async setEffortOverride(
+    scope: ChatScope,
+    peerId: string,
+    effort: string | null,
+  ): Promise<EffortSwitchOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    const previous = this.modelResolver.getEffort(key);
+    if (effort === null) this.modelResolver.clearEffort(key);
+    else this.modelResolver.setEffort(key, effort);
+
+    const record = this.sessions.get(key);
+    if (!record) return { ok: true, live: false };
+
+    const model = this.modelSelectionApi(record.agent);
+    if (!model) {
+      // 活跃会话已证明宿主没有动态选择接口：不留一条不会生效的偏好
+      if (previous === undefined) this.modelResolver.clearEffort(key);
+      else this.modelResolver.setEffort(key, previous);
+      return { ok: false, live: false, reason: 'unsupported' };
+    }
+
+    const current = model.current?.() ?? this.modelResolver.getEffectiveRoute(key);
+    if (!current?.provider || !current.model) {
+      return { ok: false, live: false, reason: 'failed', message: '当前模型路由未知' };
+    }
+
+    try {
+      model.select({
+        provider: current.provider,
+        model: current.model,
+        ...(effort ? { reasoningEffort: effort } : {}),
+      });
+      this.logger.info(`effort switched: key=${key} effort=${effort ?? 'default'}`);
+      return { ok: true, live: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`effort switch failed: key=${key} err=${message}`);
+      return { ok: true, live: false, reason: 'failed', message };
+    }
+  }
+
+  /** 宿主动态模型选择接口（旧宿主没有 Agent.model） */
+  private modelSelectionApi(agent: DshAgent): DshAgentModel | undefined {
+    const model = agent.model;
+    return model && typeof model.select === 'function' ? model : undefined;
+  }
+
+  /** 把已保存的思考深度应用到指定 agent（宿主不支持时跳过） */
+  private applyEffort(agent: DshAgent, effort: string, key: string): void {
+    const model = this.modelSelectionApi(agent);
+    if (!model) {
+      this.logger.debug(`effort not applied (host has no Agent.model): key=${key} effort=${effort}`);
+      return;
+    }
+    const current = model.current?.() ?? this.modelResolver.getEffectiveRoute(key);
+    if (!current?.provider || !current.model) return;
+    try {
+      model.select({ provider: current.provider, model: current.model, reasoningEffort: effort });
+    } catch (err) {
+      this.logger.warn(
+        `effort apply failed: key=${key} err=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /**
    * 获取指定 peer 的生效 preset（per-peer 覆盖 > config.preset）
    */
@@ -219,6 +302,19 @@ export class SessionManager {
     const key = this.sessionKey(scope, peerId);
 
     this.modelResolver.setOverride(key, route);
+
+    // 新模型不公布的档位不能留着：清掉，避免下次请求带无效 effort
+    const previousEffort = this.modelResolver.getEffort(key);
+    if (previousEffort) {
+      const reasoning = await this.modelResolver.reasoningFor(route);
+      const supported = reasoning?.efforts.some((effort) => effort.id === previousEffort) ?? false;
+      if (!supported) {
+        this.modelResolver.clearEffort(key);
+        this.logger.info(
+          `effort cleared after model switch: key=${key} effort=${previousEffort} (unsupported by ${route.provider}/${route.model})`,
+        );
+      }
+    }
 
     const record = this.sessions.get(key);
     if (!record) {
@@ -327,6 +423,10 @@ export class SessionManager {
 
     this.modelResolver.setSessionId(key, childId);
 
+    // fork 出来的子会话没有记录过选择：把已保存的思考深度补上
+    const effort = this.modelResolver.getEffort(key);
+    if (effort) this.applyEffort(created.agent, effort, key);
+
     const oldHandle = record.handle;
     const oldAgent = record.agent;
     record.sessionId = childId;
@@ -370,6 +470,7 @@ export class SessionManager {
       sessionId: record?.sessionId,
       provider: route?.provider,
       model: route?.model,
+      effort: this.modelResolver.getEffort(this.sessionKey(scope, peerId)),
       preset: record?.agentPreset,
       lastActivity: record?.lastActivity,
       messageCount: this.countMessages(record),
@@ -576,6 +677,10 @@ export class SessionManager {
       lastActivity: Date.now(),
       agentPreset,
     };
+
+    // 已保存的思考深度：无论 resume / create / 复用，都落到这个 agent 上
+    const savedEffort = this.modelResolver.getEffort(key);
+    if (savedEffort) this.applyEffort(agent, savedEffort, key);
 
     this.attachPrompt(agent, scope);
     this.sessions.set(key, record);
