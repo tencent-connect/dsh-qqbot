@@ -20,10 +20,15 @@ export interface StreamSessionLike {
   cancel?(): void;
 }
 
+export interface MarkdownOptions {
+  keyboard?: InlineKeyboard;
+  fallbackText?: string;
+}
+
 /** QQ Bot 发送接口 */
 export interface QQBotSender {
   sendText?(target: ReplyTarget, content: string, limit: number): Promise<void>;
-  sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
+  sendMarkdown(target: ReplyTarget, content: string, opts?: MarkdownOptions): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
 }
 

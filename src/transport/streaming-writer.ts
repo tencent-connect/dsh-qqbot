@@ -4,13 +4,12 @@
  * 边界条件设计：
  *   - 节流（throttle）：固定间隔 flush，避免每 token 发 HTTP，同时保证长文本分多次推送
  *   - 串行队列（chain）：保证 update 顺序，finish 前最后一次文本必达
- *   - 降级（sentChunkCount === 0）：只有从未成功发送分片才降级静态，
- *     避免"已流式部分 + 静态全量"的重复内容
+ *   - 降级：只有确定没有发送过分片时才改为静态发送
  *   - 终态幂等（finished）：finish/abort 后忽略 append，重复 finish 不重复 complete
- *   - 中止关闭（abort）：abort 时若 session 已打开，串行 complete 关闭，避免悬挂
  */
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
+import { StreamTargetExpired } from './delivery-errors.ts';
 
 export interface StreamingWriterDeps {
   bot: QQBotSender;
@@ -23,8 +22,7 @@ export interface StreamingWriterDeps {
 export class StreamingWriter {
   private fullText = '';
   private session: StreamSessionLike | null = null;
-  private sentChunkCount = 0;
-  private updateAttempted = false;
+  private allowStaticFallback = true;
   private failed = false;
   private finished = false;
   private aborted = false;
@@ -37,9 +35,8 @@ export class StreamingWriter {
     this.deps = deps;
   }
 
-  /** 是否应降级为静态发送：从未成功发送过任何分片 */
   public get shouldFallback(): boolean {
-    return this.sentChunkCount === 0 && !this.updateAttempted;
+    return this.allowStaticFallback;
   }
 
   /** 累积全文（降级静态发送时使用） */
@@ -50,9 +47,7 @@ export class StreamingWriter {
   /**
    * 重置累积文本（LLM 重试的新 attempt）。
    *
-   * 保留已打开的流式会话与 sentChunkCount：QQ 流式 update 是全量替换语义，
-   * 新 attempt 的增量会把同一条消息整体重写，用户不会看到两条消息；
-   * sentChunkCount 保留则防止重试后误判"从未发送"而降级静态造成重复。
+   * QQ 流式 update 会原地替换全文，模型重试沿用已经打开的流。
    */
   public reset(): void {
     if (this.finished) return;
@@ -93,6 +88,7 @@ export class StreamingWriter {
       try {
         await this.session.complete();
       } catch (err) {
+        if (err instanceof StreamTargetExpired) this.allowStaticFallback = true;
         this.deps.logger.error(
           `im-qqbot: stream complete failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -111,10 +107,12 @@ export class StreamingWriter {
       this.throttleTimer = null;
     }
 
-    // 串行 complete（排在 pending update 之后），关闭已打开的流式会话
+    if (this.session?.cancel) {
+      this.session.cancel();
+      return;
+    }
     this.chain = this.chain.then(async () => {
       if (this.session) {
-        if (this.session.cancel) { this.session.cancel(); return; }
         try {
           await this.session.complete();
         } catch (err) {
@@ -150,12 +148,11 @@ export class StreamingWriter {
     }
 
     try {
-      this.updateAttempted = true;
+      this.allowStaticFallback = false;
       await this.session.update(this.fullText);
-      this.sentChunkCount++;
     } catch (err) {
       this.failed = true;
-      // update 失败：不标记 failed（session 已打开，finish 会 complete 关闭）
+      if (err instanceof StreamTargetExpired) this.allowStaticFallback = true;
       this.deps.logger.warn(
         `im-qqbot: stream update failed: ${err instanceof Error ? err.message : String(err)}`,
       );

@@ -25,6 +25,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
+import { createDeliveryMedia, openDeliveryStream } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { readProfileAccess } from '../setup/persist.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
@@ -33,7 +34,7 @@ import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { registerSendFileTool } from '../media/send-file-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 
 /**
@@ -119,24 +120,13 @@ export async function bootstrapGateway(
   const replyLimiter = new ReplyLimiter({ limit: 4 });
   const sender: QQBotSender = guardSender({
     sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),
-    openStream: (target) => bot.openStream({
-      target: {
-        scope: target.scope,
-        targetId: target.targetId,
-        msgId: target.msgId as string,
-      },
-    }),
+    openStream: (target) => openDeliveryStream(bot, target, logger),
   }, ledger);
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender: MediaSenderLike = guardMedia({
-    sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
-    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
-  }, ledger);
+  const mediaSender = guardMedia(createDeliveryMedia(bot, replyLimiter), ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
