@@ -7,6 +7,7 @@
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
+import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
@@ -41,6 +42,11 @@ export interface OutboundHandlers {
    * 实时流式帧入口（注册到 ctx.on('agent/assistant-stream', ..., { global: true })）。
    */
   routeStreamFrame(agentId: string, delta: StreamDelta): void;
+  /**
+   * 接入快捷按钮来源（尾部编号选项补挂按钮）。
+   * QuestionChannel 在出站之后构造，构造完成后回填，故用 setter 而非构造参数。
+   */
+  setQuickReplySource(source: QuickReplySourceLike | undefined): void;
 }
 
 /** dsh Session 简化类型 */
@@ -53,6 +59,14 @@ interface ToolCallRecord {
   name: string;
   args: string;
 }
+
+/** 快捷按钮来源（QuestionChannel 结构化满足；避免循环依赖只取最小接口） */
+export interface QuickReplySourceLike {
+  prepareQuickReply(key: string, text: string): { keyboard: InlineKeyboard; labels: string[] } | undefined;
+}
+
+/** 快捷按钮附加消息的引导文案（流式消息挂不了键盘，按钮放附加短消息上） */
+const QUICK_REPLY_PROMPT = '🔘 快速选择（或直接回复编号）';
 
 /** 不展示给用户的轮次错误码（底层传输/网络错误，对用户无意义，且常被重试兜住） */
 const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
@@ -81,6 +95,8 @@ class OutboundRouter {
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
   private readonly deliverer: DeliverablesDelivererLike | undefined;
   private readonly tracker: TurnTracker;
+  /** 尾部编号选项 → 快捷按钮来源（QuestionChannel 构造后回填，可缺省） */
+  private quickReplySource: QuickReplySourceLike | undefined;
 
   public constructor(
     manager: SessionManager,
@@ -98,6 +114,11 @@ class OutboundRouter {
     this.tracker = tracker;
     this.toolsRegistry = toolsRegistry;
     this.deliverer = deliverer;
+  }
+
+  /** 接入快捷按钮来源（QuestionChannel 构造晚于出站，构造后回填） */
+  public setQuickReplySource(source: QuickReplySourceLike | undefined): void {
+    this.quickReplySource = source;
   }
 
   /** 事件分发入口 */
@@ -213,11 +234,11 @@ class OutboundRouter {
     this.presentedCalls.delete(sessionId);
   }
 
-  /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
+  /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块；尾部编号选项补挂快捷按钮 */
   private onMessage(sessionId: string, plan: DeliveryPlan, event: MessageEvent): void {
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined && buffer.text.trim()) {
-      this.trackText(sessionId, buffer.flush());
+      this.trackText(sessionId, this.flushWithQuickReply(sessionId, plan.target, buffer));
       this.buffers.delete(sessionId);
       return;
     }
@@ -229,8 +250,42 @@ class OutboundRouter {
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
 
-    this.trackText(sessionId, this.send(plan.target, fullText, 'sendMarkdown'));
+    this.trackText(sessionId, this.sendWithQuickReply(sessionId, plan.target, fullText));
     this.buffers.delete(sessionId);
+  }
+
+  /** 发送完整文本 → 按需追加快捷按钮消息 */
+  private async sendWithQuickReply(sessionId: string, target: ReplyTarget, text: string): Promise<void> {
+    const keyboard = this.prepareQuickReply(sessionId, text);
+    await this.send(target, text, 'sendMarkdown');
+    await this.sendQuickReply(target, keyboard);
+  }
+
+  /** flush 流式缓冲 → 按需追加快捷按钮消息（键盘挂不上流式消息，单独一条短消息承载） */
+  private async flushWithQuickReply(sessionId: string, target: ReplyTarget, buffer: OutboundBuffer): Promise<void> {
+    const keyboard = this.prepareQuickReply(sessionId, buffer.text);
+    await buffer.flush();
+    await this.sendQuickReply(target, keyboard);
+  }
+
+  /** 检测尾部编号选项并登记快捷按钮（配置关闭、非 QQ 会话或无来源时跳过） */
+  private prepareQuickReply(sessionId: string, text: string): InlineKeyboard | undefined {
+    if (this.quickReplySource === undefined) return undefined;
+    try {
+      const record = this.manager.findBySessionId(sessionId);
+      if (record === undefined) return undefined;
+      // 会话键取记录上的规范键，与 interaction 侧 getSessionRecord(scope, peerId) 一致
+      return this.quickReplySource.prepareQuickReply(record.sessionKey, text)?.keyboard;
+    } catch (err) {
+      this.logger.debug(`im-qqbot: quick-reply prepare failed: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  }
+
+  /** 发送快捷按钮附加消息（失败只记日志，正文已在上一轮送达） */
+  private async sendQuickReply(target: ReplyTarget, keyboard: InlineKeyboard | undefined): Promise<void> {
+    if (keyboard === undefined) return;
+    await this.send(target, QUICK_REPLY_PROMPT, 'sendQuickReply', keyboard);
   }
 
   /** 记录每会话最后一笔在途文本任务（自身吞错：错误已由 send/flush 内部记录） */
@@ -287,7 +342,9 @@ class OutboundRouter {
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
     if (buffer !== undefined) {
-      if (buffer.text.trim()) {
+      if (buffer.text.trim() && plan !== undefined) {
+        flushTask = this.flushWithQuickReply(sessionId, plan.target, buffer);
+      } else if (buffer.text.trim()) {
         flushTask = buffer.flush();
       } else {
         buffer.cancel();
@@ -315,12 +372,16 @@ class OutboundRouter {
     })();
   }
 
-  /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
-  private async send(target: ReplyTarget, text: string, tag: string): Promise<void> {
+  /**
+   * 统一发送：切分 + 逐 chunk 发送 + 错误记录。
+   * keyboard 只由附加短消息传入（正文与 chunk 切分后挂不了键盘）。
+   */
+  private async send(target: ReplyTarget, text: string, tag: string, keyboard?: InlineKeyboard): Promise<void> {
     const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
     for (const chunk of chunks) {
       try {
-        await this.bot.sendMarkdown(target, chunk);
+        if (keyboard === undefined) await this.bot.sendMarkdown(target, chunk);
+        else await this.bot.sendMarkdown(target, chunk, { keyboard });
       } catch (err) {
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -369,5 +430,6 @@ export function createOutboundHandler(
   return {
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),
+    setQuickReplySource: (source) => router.setQuickReplySource(source),
   };
 }
