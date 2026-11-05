@@ -505,13 +505,13 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     return { registry, created };
   }
 
-  it('会话建立即注册 4 个 section + 2 个 context；remove() 全部释放', async () => {
+  it('会话建立即注册 5 个 section + 2 个 context；remove() 全部释放', async () => {
     const { registry, created } = promptRegistry();
     const manager = createManager(registry);
 
     await manager.getOrCreate('c2c', PEER, PEER, REPLY);
     expect(created).toHaveLength(1);
-    expect([...created[0].sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
+    expect([...created[0].sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:question-style', 'qqbot:rules']);
     expect([...created[0].contexts.keys()].sort()).toEqual(['qqbot:background', 'qqbot:turn-meta']);
 
     await manager.remove('c2c', PEER);
@@ -537,6 +537,24 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(extra.text()).toBe('NEW_DIRECT');
   });
 
+  it('config.questionStylePrompt 接到 question-style section：默认注入，关掉即空文本', async () => {
+    const { registry, created } = promptRegistry();
+    const config = ConfigSchema({
+      appId: APP_ID, appSecret: 'secret', provider: 'p', model: 'm',
+      cwd: join(env.home, 'workspace'), sessionIdleTimeout: 0,
+    } as ImQQBotConfig);
+    const manager = new SessionManager(absentCtx(), registry as unknown as DshAgentRegistry, config, createLogger());
+    managers.push(manager);
+
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const style = created[0].sections.get('qqbot:question-style') as { text: () => string };
+    expect(config.questionStylePrompt).toBe(true); // Schema 默认开启
+    expect(style.text()).toContain('ask_user_question');
+
+    config.questionStylePrompt = false; // 热更新配置（Schema 代理可写）
+    expect(style.text()).toBe('');
+  });
+
   it('live 复用：释放后的 agent 再次被 get() 命中时重新安装 prompt（WeakSet 实现下会永久丢失）', async () => {
     const { registry, created } = promptRegistry();
     const manager = createManager(registry);
@@ -554,7 +572,7 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(record.agent).toBe(agent);
     expect(registry.create).toHaveBeenCalledTimes(1); // 未重建 agent，纯复用
     // 关键回归：prompt 必须重新注册，而不是因"已安装"标记被跳过
-    expect(created[0].sections.size).toBe(3);
+    expect(created[0].sections.size).toBe(4);
     expect(created[0].contexts.size).toBe(2);
   });
 

@@ -102,6 +102,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
+| `questionStylePrompt` | boolean | `true` | Whether to inject the question-style prompt (ask via `ask_user_question` instead of plain-text numbered options) |
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min; `<=0` disables eviction |
