@@ -11,6 +11,8 @@
 import type { ExternalTurnDelivery } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { QqInputRegistry } from './qq-input-origin.ts';
+import { bindDelivery } from './delivery-context.ts';
+import { deliveryKey } from './delivery-ledger.ts';
 import {
   classifyTurnInput,
   createTurnState,
@@ -40,12 +42,16 @@ export interface TurnTrackerManagerLike {
 
 export interface TurnTrackerOptions {
   externalTurns: ExternalTurnDelivery;
+  allowed?: (target: ReplyTarget) => boolean;
 }
 
 interface TrackedTurn {
   state: TurnDeliveryState;
   /** 本回合认领的 QQ 入站消息 id，回合结束时释放登记 */
   inputs: Set<string>;
+  target: ReplyTarget;
+  external: boolean;
+  invalid: boolean;
 }
 
 /** user/message 事件数据（宿主契约：data 即 UserMessage；兼容 { message } 包裹形态） */
@@ -56,6 +62,7 @@ interface UserMessageData {
 }
 
 export class TurnTracker implements DeliveryTargetResolver {
+  public get verifiesSources(): boolean { return this.inputs.ledger !== undefined; }
   private readonly turns = new Map<string, TrackedTurn>();
   private readonly manager: TurnTrackerManagerLike;
   private readonly inputs: QqInputRegistry;
@@ -84,7 +91,7 @@ export class TurnTracker implements DeliveryTargetResolver {
     if (current?.state.turn === turn) return false;
     if (this.addressOf(sessionId) === undefined) return false;
     if (current !== undefined) this.release(current);
-    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set() });
+    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set(), target: { ...this.addressOf(sessionId)! }, external: false, invalid: false });
     return true;
   }
 
@@ -93,7 +100,14 @@ export class TurnTracker implements DeliveryTargetResolver {
     const tracked = this.turns.get(sessionId);
     if (tracked === undefined) return;
     const { messageId, source } = readUserMessage(data);
-    const qqOwned = this.inputs.has(messageId);
+    const receipt = messageId ? this.inputs.claim(messageId, sessionId, data.content ?? (data.message as { content?: unknown } | undefined)?.content, tracked.state.turn) : undefined;
+    if (!receipt && messageId && this.inputs.ledger?.knowsInput(messageId)) tracked.invalid = true;
+    const qqOwned = this.inputs.ledger ? receipt !== undefined : this.inputs.has(messageId);
+    if (receipt) {
+      if (tracked.inputs.size > 0 && !tracked.inputs.has(receipt.messageId)) tracked.invalid = true;
+      tracked.target = { ...receipt.target };
+    }
+    if (classifyTurnInput(source, qqOwned) === 'external') tracked.external = true;
     if (qqOwned && messageId !== undefined) tracked.inputs.add(messageId);
 
     const before = deliveryMode(tracked.state);
@@ -115,7 +129,7 @@ export class TurnTracker implements DeliveryTargetResolver {
    */
   public isCurrent(sessionId: string, type: string, turn: number | undefined): boolean {
     const tracked = this.turns.get(sessionId);
-    if (tracked === undefined) return true;
+    if (tracked === undefined) return !this.inputs.ledger;
     if (type === 'turn/end') return turn === tracked.state.turn;
     return turn === undefined || turn === tracked.state.turn;
   }
@@ -138,6 +152,18 @@ export class TurnTracker implements DeliveryTargetResolver {
     const base = this.addressOf(sessionId);
     if (base === undefined) return undefined;
     const tracked = this.turns.get(sessionId);
+    if (this.inputs.ledger) {
+      if (!tracked || tracked.invalid) return undefined;
+      if (tracked.inputs.size > 0 && tracked.external) return undefined;
+      if (tracked.state.origin === null && !tracked.state.sawInternal) return undefined;
+      const target = tracked.state.origin === 'qq' ? tracked.target
+        : { scope: tracked.target.scope, targetId: tracked.target.targetId, forceProactive: true };
+      if (tracked.external && !this.allowsExternal(target)) return undefined;
+      const allowed = () => !tracked.invalid && !(tracked.inputs.size > 0 && tracked.external)
+        && (this.options.allowed?.(target) ?? true);
+      if (!allowed()) return undefined;
+      return { target: bindDelivery(target, { key: deliveryKey(sessionId, tracked.state.turn), allowed }), proactive: tracked.state.origin !== 'qq' };
+    }
     if (tracked === undefined || deliveryMode(tracked.state) === 'passive') {
       return { target: base, proactive: false };
     }

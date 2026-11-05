@@ -1,8 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
 import { ReplyLimiter } from './reply-limiter.ts';
 import { cacheMsgId, cacheEventId } from './msgid-cache.ts';
-import { resolveReplyTarget, sendResolvedMarkdown } from './reply-target.ts';
+import { resolveReplyTarget } from './reply-target.ts';
 import type { ReplyTarget } from '../types.ts';
 
 function makeTarget(msgId?: string, targetId = 'peer-1'): ReplyTarget {
@@ -81,31 +80,5 @@ describe('resolveReplyTarget', () => {
     const result = resolveReplyTarget(makeTarget(undefined, 'peer-4'), limiter, true);
     expect(result.eventId).toBe('INTERACTION_CREATE:evt-2');
     expect(result.msgId).toBeUndefined();
-  });
-});
-
-describe('sendResolvedMarkdown', () => {
-  it('fills event_id via bot.send when target has eventId', async () => {
-    const bot = {
-      send: vi.fn(async () => ({})),
-      sendMarkdown: vi.fn(async () => ({})),
-    } as unknown as QQBot;
-    const target: ReplyTarget = { scope: 'c2c', targetId: 'p', eventId: 'INTERACTION_CREATE:evt' };
-    await sendResolvedMarkdown(bot, target, 'hello');
-    expect(bot.send).toHaveBeenCalledWith(expect.objectContaining({
-      extra: { event_id: 'INTERACTION_CREATE:evt' },
-    }));
-    expect(bot.sendMarkdown).not.toHaveBeenCalled();
-  });
-
-  it('uses sendMarkdown for msgId targets', async () => {
-    const bot = {
-      send: vi.fn(async () => ({})),
-      sendMarkdown: vi.fn(async () => ({})),
-    } as unknown as QQBot;
-    const target: ReplyTarget = { scope: 'c2c', targetId: 'p', msgId: 'm1' };
-    await sendResolvedMarkdown(bot, target, 'hello');
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(target, 'hello', undefined);
-    expect(bot.send).not.toHaveBeenCalled();
   });
 });

@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { Middleware, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -26,6 +26,7 @@ import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
+import { messageSenderName } from '../shared/message-sender-name.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
@@ -39,22 +40,43 @@ export function setupMiddlewares(
   // 2. 消息过滤：bot 回声 + 消息去重
   bot.use(messageFilter({ skipSelfEcho: false }));
 
-  // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
-  bot.use(accessPolicy({
-    c2c: {
-      mode: config.access.c2cMode,
-      allow: config.access.c2cAllow,
-    },
-    group: {
-      mode: config.access.groupMode,
-      allow: config.access.groupAllow,
-    },
-    onBlock: (_mCtx, reason) => {
-      if (config.debug) {
-        logger.debug(`Access blocked: ${reason}`);
+  const mention = mentionGate({ requireMentionInGroup: config.requireMention });
+  const limit = rateLimiter();
+
+  // 有效网页邀请是加白入口，必须先于访问控制；普通消息仍走下方策略。
+  bot.use(async (ctx, next) => {
+    const service = manager.accountAccess;
+    const content = ctx.message.content
+      .replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
+    if (!service || !content || content.length > 32 || !service.isActivePairCode(content)) {
+      await next();
+      return;
+    }
+    await mention(ctx, async () => limit(ctx, async () => {
+      try {
+        const result = service.beginClaimFromMessage(
+          ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
+          ctx.message.senderId, messageSenderName(ctx.message),
+        );
+        await ctx.bot.sendText(ctx.replyTarget, result.message);
+      } catch (err) {
+        logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
+        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
       }
-    },
-  }));
+      ctx.stop('claim-result');
+    }));
+  });
+
+  // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
+  const admit: Middleware = (ctx, next) => {
+    const access = manager.accountAccess?.currentAccess() ?? config.access;
+    return accessPolicy({
+      c2c: { mode: access.c2cMode, allow: access.c2cAllow },
+      group: { mode: access.groupMode, allow: access.groupAllow },
+      onBlock: (_ctx, reason) => { if (config.debug) logger.debug('Access blocked: ' + reason); },
+    })(ctx, next);
+  };
+  bot.use(admit);
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
   //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
@@ -70,9 +92,7 @@ export function setupMiddlewares(
   }));
 
   // 5. 群聊 @bot 门控
-  bot.use(mentionGate({
-    requireMentionInGroup: config.requireMention,
-  }));
+  bot.use(mention);
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
@@ -80,7 +100,7 @@ export function setupMiddlewares(
   }));
 
   // 7. 三层限流（sender / group / global）
-  bot.use(rateLimiter());
+  bot.use(limit);
 
   // 8. 斜杠命令（在 concurrencyGuard 之前，命令匹配后不排队直接响应）
   const slash = slashCommand({
@@ -90,16 +110,26 @@ export function setupMiddlewares(
     commands: buildCommandList({ manager, config, logger }),
   });
   bot.use(slash.middleware);
-
+  bot.use(async (ctx, next) => {
+    if (ctx.message.content.trim().startsWith('/')) {
+      const service = manager.accountAccess;
+      const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
+      await ctx.bot.sendText(ctx.replyTarget, error ?? '未知命令，请发送 /bot-help 查看可用命令。');
+      ctx.stop(error ? 'slash-command-access-denied' : 'unknown-command');
+      return;
+    }
+    await next();
+  });
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
   bot.use(questionAnswer(manager));
 
-  // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
+  // 9. 同 peer 串行。不能合并不同发送者，否则无法保留每条输入的身份和回复窗口。
   bot.use(concurrencyGuard({
-    strategy: 'merge',
+    strategy: 'queue',
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
   }));
+  bot.use(admit);
 
   // 10. C2C 输入状态指示
   bot.use(typingIndicator());

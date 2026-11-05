@@ -15,6 +15,8 @@ import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from './send-media.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
+import { bindDelivery } from '../transport/delivery-context.ts';
+import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -73,6 +75,7 @@ export function registerSendFileTool(
   config: ImQQBotConfig,
   logger: Logger,
   targets?: DeliveryTargetResolver,
+  active?: () => boolean,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
@@ -118,7 +121,7 @@ export function registerSendFileTool(
         return [{ type: 'text', text: `已发送 ${v.fileName} → ${v.target}` }];
       },
     },
-    async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
+    async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown; callId?: string }): Promise<Record<string, unknown>> {
       const { file_path, target } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
@@ -138,6 +141,18 @@ export function registerSendFileTool(
         throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
       }
 
+      if (active) {
+        const agentId = (exec.agent as { id?: string } | undefined)?.id;
+        if (!agentId || !exec.callId) throw new Error('qqbot_send_file: 缺少原生调用身份，不能确认发送归属');
+        const qqSession = manager.findBySessionId(agentId) ?? manager.deliveryAddress(agentId);
+        const allowed = () => active() && !exec.signal.aborted
+          && (!qqSession || targets?.targetFor(agentId) !== undefined);
+        if (!allowed()) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
+        // Explicit targets remain supported. The originating invocation still
+        // needs an eligible source and a stable callId, even with an override.
+        replyTarget = bindDelivery(replyTarget, { key: deliveryKey('file-tool', agentId, exec.callId), allowed, fixed: true });
+      }
+
       // 2. 校验文件 + 路径白名单
       const absPath = resolve(file_path);
       if (!isPathAllowed(absPath, config.sendFile, cwd)) {
@@ -152,6 +167,9 @@ export function registerSendFileTool(
       const result = await sendMediaFile(bot, replyTarget, absPath);
       if (result.outcome === 'missing') {
         throw new Error(`qqbot_send_file: 文件不存在或不可读: ${absPath}`);
+      }
+      if (result.outcome === 'already-submitted') {
+        throw new Error(`qqbot_send_file: ${result.error}`);
       }
       if (result.outcome === 'failed') {
         throw new Error(`qqbot_send_file: 发送失败: ${result.error}`);

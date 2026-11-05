@@ -27,6 +27,7 @@ const BASELINE_EXTERNALS = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-ui-primitives',
 ];
 
 const isBaseline = (specifier: string): boolean =>

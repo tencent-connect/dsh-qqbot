@@ -10,6 +10,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'node:pat
 import type { ReplyTarget } from '../types.ts';
 import type { SendFileConfig } from '../config.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
+import { MediaAlreadySubmitted } from '../transport/delivery-errors.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 
 export { resolveAgentCwd };
@@ -83,6 +84,7 @@ export function isPathAllowed(filePath: string, config: SendFileConfig, cwd: str
 export type SendMediaResult =
   | { outcome: 'sent'; size: number; fileUuid?: string; messageId?: string }
   | { outcome: 'missing' }
+  | { outcome: 'already-submitted'; error: string }
   | { outcome: 'failed'; error: string };
 
 /**
@@ -125,6 +127,7 @@ export async function sendMediaFile(
       ...(result.message?.id !== undefined ? { messageId: result.message.id } : {}),
     };
   } catch (err) {
+    if (err instanceof MediaAlreadySubmitted) return { outcome: 'already-submitted', error: err.message };
     return { outcome: 'failed', error: err instanceof Error ? err.message : String(err) };
   }
 }

@@ -9,12 +9,14 @@
  *   - 逐题推进：多问题时一次问一题，答完一题再问下一题
  *   - 完成 / 中断（abort / 超时 / 会话回收）：reject(ASK_ABORTED)
  */
-import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
 import { buildKeyboard, formatQuestion } from './question-renderer.ts';
 import { decodeButtonData } from './button-utils.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
+import { continueDelivery, deliveryPart } from '../transport/delivery-context.ts';
+import type { QQBotSender } from '../transport/outbound-buffer.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
 
@@ -65,9 +67,7 @@ export interface QuestionChannelManagerLike {
   getSessionRecord(scope: ChatScope, peerId: string): QuestionSessionRecordLike | undefined;
 }
 
-export interface QuestionChannelSenderLike {
-  sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
-}
+export type QuestionChannelSenderLike = Pick<QQBotSender, 'sendMarkdown'>;
 
 export interface QuestionChannelConfigLike {
   requireMention: boolean;
@@ -280,7 +280,10 @@ export class QuestionChannel {
       const next = entry.request.questions[entry.index]!;
       this.resetTimer(entry, key);
       // 用户刚在 QQ 作答：后续题被动回复其作答（replyTarget 携带最新 msgId 候选）
-      void this.sendQuestion(entry.record, entry.record.replyTarget, next).catch((err) => {
+      const sessionId = entry.request.agent?.id;
+      const source = this.targets && sessionId ? this.targets.targetFor(sessionId) : entry.record.replyTarget;
+      const target = source && continueDelivery(source, entry.record.replyTarget);
+      void (target ? this.sendQuestion(entry.record, target, next) : Promise.reject(new Error('QQ question source is no longer authorized'))).catch((err) => {
         this.pending.delete(key);
         this.clearTimer(entry);
         this.removeAbort(entry);
@@ -304,16 +307,13 @@ export class QuestionChannel {
   ): Promise<void> {
     const hint = record.scope === 'group' && this.config.requireMention === true;
     const keyboard = buildKeyboard(question);
+    const plain = formatQuestion(question, hint, false);
     try {
-      if (keyboard) {
-        try {
-          await this.sender.sendMarkdown(target, formatQuestion(question, hint, true), { keyboard });
-          return;
-        } catch (err) {
-          this.logger.warn(`im-qqbot: keyboard send failed, fallback to text: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      await this.sender.sendMarkdown(target, formatQuestion(question, hint, false));
+      await this.sender.sendMarkdown(
+        deliveryPart(target, 'question', question.id),
+        keyboard ? formatQuestion(question, hint, true) : plain,
+        keyboard ? { keyboard, fallbackText: plain } : undefined,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`im-qqbot: question send failed key=${record.sessionKey}: ${msg}`);

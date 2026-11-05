@@ -8,3 +8,5 @@ docs/
 .dsh-sessions/
 *.tsbuildinfo
 node_modules/
+
+.audit/
