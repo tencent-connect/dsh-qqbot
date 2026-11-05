@@ -69,7 +69,10 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  // /sendfile 命令在装配阶段注册，附件发送器要到下方出站适配器才构造完成，
+  // 故注入取值函数：命令执行时（此时 bot 已在收消息）必然已就绪。
+  let mediaSenderRef: MediaSenderLike | undefined;
+  setupMiddlewares(bot, config, manager, logger, () => mediaSenderRef);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -105,7 +108,7 @@ export async function bootstrapGateway(
     }),
   };
 
-  // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
+  // ── 附件发送适配器（qqbot_send_file 工具、/sendfile 命令与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
   const mediaSender: MediaSenderLike = {
@@ -114,6 +117,7 @@ export async function bootstrapGateway(
     sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
+  mediaSenderRef = mediaSender;
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
