@@ -161,6 +161,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 |------|------|
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
+| `/switch` | Rebind this channel to another session (no args lists candidates; index or id prefix; `/switch default` restores the default route; applies without restarting the host) |
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
