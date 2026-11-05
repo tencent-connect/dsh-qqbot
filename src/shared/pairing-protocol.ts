@@ -91,3 +91,37 @@ export function openidTail(openid: string): string {
   const tail = openid.slice(-4);
   return `…${tail}`;
 }
+
+type WhitelistEntry = { input: string; openid: string; nickname: string } | ManualPairResult['errors'][number];
+
+export function formatWhitelistEntry(openid: string, nickname: string): string {
+  const name = nickname.trim();
+  if (!name) return openid;
+  return openid + ':' + (/[,，;；"\r\n]/.test(name) ? JSON.stringify(name) : name);
+}
+
+export function parseWhitelistEntries(text: string): WhitelistEntry[] {
+  const entry = (input: string, openid: string, nickname: string): WhitelistEntry => {
+    const id = openid.trim();
+    return !id || id.length > 1024 || /\s|\0/.test(id)
+      ? { input, message: 'OpenID 无效' }
+      : { input, openid: id, nickname: nickname.trim() };
+  };
+  return text.split(/\r?\n/).flatMap((line): WhitelistEntry[] => {
+    const input = line.trim();
+    if (!input) return [];
+    // A quoted nickname occupies one line so its punctuation cannot become another OpenID.
+    if (/[:：]\s*"/.test(input)) {
+      const quoted = /^([^:：,，;；]+)[:：]\s*("(?:[^"\\]|\\.)*")$/.exec(input);
+      if (quoted?.[1] && quoted[2]) {
+        try { return [entry(input, quoted[1], JSON.parse(quoted[2]) as string)]; }
+        catch { /* malformed quoted nickname; never fall back to splitting it */ }
+      }
+      return [{ input, message: '带引号的昵称格式无效，请每行填写一个 OpenID。' }];
+    }
+    return input.split(/[,，;；]+/).map(part => part.trim()).filter(Boolean).map(part => {
+      const colon = part.search(/[:：]/);
+      return colon < 0 ? entry(part, part, '') : entry(part, part.slice(0, colon), part.slice(colon + 1));
+    });
+  });
+}

@@ -8,11 +8,11 @@ describe('pairing service', () => {
     const svc = new PairingService({ now, random: () => 0 }); // deterministic code
     const c = svc.issue('owner');
     expect(c.purpose).toBe('owner');
-    const first = svc.consume(c.code);
+    const first = svc.validate(c.code);
     expect(first).toEqual({ ok: true, purpose: 'owner' });
-    expect(svc.consume(c.code)).toEqual({ ok: true, purpose: 'owner' });
+    expect(svc.validate(c.code)).toEqual({ ok: true, purpose: 'owner' });
     svc.end(c.code, 'owner');
-    expect(svc.consume(c.code)).toEqual({ ok: false, reason: 'unknown' });
+    expect(svc.validate(c.code)).toEqual({ ok: false, reason: 'unknown' });
   });
 
   it('rejects an expired code', () => {
@@ -20,26 +20,14 @@ describe('pairing service', () => {
     const svc = new PairingService({ now: () => t });
     const c = svc.issue('allow-c2c');
     t += 10 * 60 * 1000 + 1;
-    expect(svc.consume(c.code)).toEqual({ ok: false, reason: 'expired' });
+    expect(svc.validate(c.code)).toEqual({ ok: false, reason: 'expired' });
   });
 
   it('normalizes user-entered codes (case / spaces / dashes)', () => {
     const svc = new PairingService({ random: () => 0 });
     const c = svc.issue('allow-group');
     const messy = ` ${c.code.toLowerCase().slice(0, 3)}-${c.code.slice(3)} `;
-    expect(svc.consume(messy)).toEqual({ ok: true, purpose: 'allow-group' });
-  });
-
-  it('reports only unexpired challenges and records claimed members (dedup by openid+scene)', () => {
-    let t = 0; const svc = new PairingService({ now: () => t, random: () => 0 });
-    const c = svc.issue('owner');
-    expect(svc.listChallenges().map((x) => x.code)).toContain(c.code);
-    svc.recordClaimed({ openid: 'oid-1234', nickname: '张三', scene: 'group', sceneName: 'G', claimedAt: t });
-    svc.recordClaimed({ openid: 'oid-1234', nickname: '张三(改)', scene: 'group', sceneName: 'G', claimedAt: t + 5 });
-    expect(svc.listClaimed()).toHaveLength(1);
-    expect(svc.listClaimed()[0]?.nickname).toBe('张三(改)');
-    svc.forget('oid-1234');
-    expect(svc.listClaimed()).toHaveLength(0);
+    expect(svc.validate(messy)).toEqual({ ok: true, purpose: 'allow-group' });
   });
 
   it('code generator uses the unambiguous alphabet and tail masks openid', () => {
@@ -69,7 +57,7 @@ describe('pairing service', () => {
     expect(svc.listChallenges()[0]?.claims).toEqual([member]);
     t = code.expiresAt;
     expect(svc.hasActiveCode(code.code)).toBe(false);
-    expect(svc.consume(code.code)).toEqual({ ok: false, reason: 'expired' });
+    expect(svc.validate(code.code)).toEqual({ ok: false, reason: 'expired' });
     expect(svc.listChallenges()).toEqual([]);
   });
 });

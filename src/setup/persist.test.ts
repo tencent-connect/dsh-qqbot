@@ -57,6 +57,20 @@ describe('persistCredentialsToProfile', () => {
       .toThrow(AccessConfigConflict);
     expect(readFileSync(patchPath, 'utf8')).toBe(bytes);
   });
+  it('checks account identity again inside the profile write transaction', () => {
+    const original = readProfileAccess(undefined);
+    expect(updateProfileConfig({ access: original }, dir, log)).toBe(true);
+    expect(persistCredentialsToProfile(credentials, dir, log)).toBe(true);
+    const revision = accessRevision(original, credentials.appId);
+    expect(persistCredentialsToProfile({ ...credentials, appId: 'other-app' }, dir, log)).toBe(true);
+    const bytes = readFileSync(patchPath, 'utf8');
+    expect(() => updateProfileConfig({ access: { ...original, commandMode: 'disabled' } }, dir, log, {
+      revision, fallback: original, appId: credentials.appId,
+    })).toThrow(AccessConfigConflict);
+    expect(() => readProfileAccess(original, dir, credentials.appId)).toThrow(AccessConfigConflict);
+    expect(readProfileAccess(original, dir, 'other-app')).toEqual(original);
+    expect(readFileSync(patchPath, 'utf8')).toBe(bytes);
+  });
   it('更新凭据并完整保留其他插件条目、insert 行与注释', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
 

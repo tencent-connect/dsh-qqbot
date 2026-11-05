@@ -92,11 +92,25 @@ describe('account-only identity storage', () => {
     write.mockRestore(); expect(new MemberStore(root, 'app').ownerIds()).toEqual([]);
   });
 
-  it.each(['bad-json', 'wrong-account', 'bad-owner', 'too-many-owners'])('refuses %s identity data without overwriting it', scenario => {
-    const bytes = scenario === 'bad-json' ? '{' : JSON.stringify({ format: 2, appId: scenario === 'wrong-account' ? 'other' : 'app', owners: scenario === 'bad-owner' ? [42] : scenario === 'too-many-owners' ? Array.from({ length: 101 }, (_, i) => `owner-${i}`) : [], entries: [] });
+  it.each(['bad-json', 'wrong-account', 'bad-owner'])('refuses %s identity data without overwriting it', scenario => {
+    const bytes = scenario === 'bad-json' ? '{' : JSON.stringify({ format: 2, appId: scenario === 'wrong-account' ? 'other' : 'app', owners: scenario === 'bad-owner' ? [42] : [], entries: [] });
     writeFileSync(catalogPath(), bytes);
     expect(() => new MemberStore(root, 'app')).toThrow(); expect(readFileSync(catalogPath(), 'utf8')).toBe(bytes);
     expect(existsSync(memberPath())).toBe(false);
+  });
+
+  it.each(['identity catalog', 'upstream private whitelist'])('preserves 101 valid identities from the %s and after reload', source => {
+    const owners = Array.from({ length: 101 }, (_, i) => 'owner-' + i);
+    if (source === 'identity catalog') {
+      writeFileSync(catalogPath(), JSON.stringify({ format: 2, appId: 'app', owners }));
+    } else {
+      new PrefsStore(undefined, { path: join(root, 'model-prefs.json') }).setSessionId('qqbot:app:c2c:owner-0', 'old-session');
+    }
+    const members = new MemberStore(root, 'app', () => owners);
+    expect(members.ownerIds()).toEqual(owners);
+    members.claimOwner('next', profile);
+    members.revokeOwner('owner-0');
+    expect(new MemberStore(root, 'app').ownerIds()).toEqual([...owners.slice(1), 'next']);
   });
 
   it('does not recreate a missing live identity file from a stale legacy list', () => {

@@ -8,7 +8,7 @@ import { MemberStore } from '../runtime/member-store.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { PairingService } from '../runtime/pairing-service.ts';
 import type { SessionManager } from '../session/index.ts';
-import { readProfileAccess } from '../setup/persist.ts';
+import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -78,6 +78,44 @@ describe('pairing before conversation admission', () => {
     expect(f.send).toHaveBeenCalledTimes(2);
     expect(f.agent).not.toHaveBeenCalled();
   });
+  it.each([false, true])('does not reopen a disabled scope with a previously issued code (group=%s)', async group => {
+    const f = fixture();
+    const purpose = group ? 'allow-group' : 'allow-c2c';
+    const mode = group ? 'groupMode' : 'c2cMode';
+    const list = group ? 'groupAllow' : 'c2cAllow';
+    const code = f.service.issuePairCode(purpose).code;
+    updateProfileConfig({ access: { ...f.service.config.access, [mode]: 'disabled' } }, profile.dir);
+    await f.receive(code, { group, mentioned: group });
+    expect(f.send).toHaveBeenLastCalledWith(expect.anything(), expect.stringContaining('已关闭'));
+    await f.receive('hello', { group, mentioned: group });
+    expect(readProfileAccess(undefined, profile.dir)).toMatchObject({ [mode]: 'disabled', [list]: [] });
+    expect(f.service.pairStatus().challenges[0]?.claims).toEqual([]);
+    expect(f.agent).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('uses the current whitelist on the next message without rebuilding the SDK chain (group=%s)', async group => {
+    const f = fixture();
+    const purpose = group ? 'allow-group' : 'allow-c2c';
+    const id = group ? 'team' : 'sender';
+    expect(f.service.addManualMember(purpose, id).ok).toBe(true);
+    await f.receive('first', { group, mentioned: group });
+    expect(f.agent).toHaveBeenCalledOnce();
+    expect(f.service.revokePair(id, purpose).ok).toBe(true);
+    await f.receive('second', { group, mentioned: group });
+    expect(f.agent).toHaveBeenCalledOnce();
+  });
+
+  it('checks command access once for registered and unknown commands', async () => {
+    const f = fixture();
+    f.service.addManualMember('allow-c2c', 'sender');
+    const check = vi.spyOn(f.service, 'commandAccessError');
+    await f.receive('/bot-ping');
+    await f.receive('/not-a-command');
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(f.send).toHaveBeenCalledTimes(2);
+    expect(f.agent).not.toHaveBeenCalled();
+  });
+
   it('allows a current private invitation through an empty whitelist without starting an Agent', async () => {
     const f = fixture();
     const code = f.service.issuePairCode('allow-c2c').code;

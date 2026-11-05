@@ -38,7 +38,6 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   commands.push(helpCommand(deps, () => commands));
 
   for (const command of commands) {
-    delete command.authorized;
     const original = command.handler;
     command.handler = ctx => {
       const service = deps.manager.accountAccess;
@@ -49,6 +48,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   return commands;
 }
 export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
+  const mode = deps.manager.accountAccess?.currentAccess().commandMode ?? deps.config.access.commandMode ?? 'open';
   return buildCommandList(deps).map((command): SlashCommandDescriptor => {
     const names = Array.isArray(command.name) ? command.name : [command.name];
     return {
@@ -56,7 +56,7 @@ export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
       aliases: names.slice(1),
       description: command.description ?? '',
       category: command.category,
-      scope: (deps.config.access.commandMode ?? 'open') === 'open' ? 'all' : deps.config.access.commandMode === 'disabled' ? 'disabled' : 'owner',
+      scope: mode === 'open' ? 'all' : mode === 'disabled' ? 'disabled' : 'owner',
       ...(command.hidden === true ? { hidden: true } : {}),
     };
   }).filter((descriptor) => descriptor.name !== '');

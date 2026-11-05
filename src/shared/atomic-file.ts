@@ -2,24 +2,42 @@ import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSyn
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-/** Commit the complete replacement before publishing it to in-memory readers. */
+/** Replaces the file atomically. A directory sync failure after replacement emits a warning. */
 export function atomicWrite(path: string, chunks: Iterable<string>): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const parent = dirname(path);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, 'wx', 0o600);
   try {
-    for (const chunk of chunks) {
-      const buffer = Buffer.from(chunk);
-      let offset = 0;
-      while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
+    try {
+      for (const chunk of chunks) {
+        const buffer = Buffer.from(chunk);
+        let offset = 0;
+        while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
+      }
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
     }
-    fsyncSync(fd);
+    renameSync(temporary, path);
   } catch (error) {
-    closeSync(fd); rmSync(temporary, { force: true }); throw error;
+    rmSync(temporary, { force: true });
+    throw error;
   }
-  closeSync(fd);
-  try { renameSync(temporary, path); }
-  catch (error) { rmSync(temporary, { force: true }); throw error; }
-  const directory = openSync(dirname(path), 'r');
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+
+  // Windows fsync cannot flush the read-only directory handle used below.
+  if (process.platform === 'win32') return;
+  try {
+    const directory = openSync(parent, 'r');
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    process.emitWarning(`QQ state was replaced but directory sync failed: ${reason}`, {
+      code: 'QQBOT_DIRECTORY_SYNC_FAILED',
+    });
+  }
 }

@@ -20,12 +20,12 @@ import type { Logger } from '../types.ts';
 import { AccessControlSchema, type AccessControlConfig } from '../config.ts';
 
 export class AccessConfigConflict extends Error {
-  constructor() { super('访问设置或白名单已更新，请刷新配置后确认并保存。'); }
+  constructor() { super('机器人账号、访问设置或白名单已更新，请刷新配置后确认并保存。'); }
 }
 
-export function accessRevision(access: AccessControlConfig): string {
+export function accessRevision(access: AccessControlConfig, appId = ''): string {
   return createHash('sha256').update(JSON.stringify([
-    access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? 'open',
+    appId, access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? 'open',
   ])).digest('hex');
 }
 
@@ -37,10 +37,37 @@ function savedAccess(config: YAMLMap | undefined, fallback: unknown): AccessCont
   return AccessControlSchema({ ...base, ...node.toJSON() });
 }
 
-/** Read persisted membership even while the old plugin fiber is still serving requests. */
-export function readProfileAccess(fallback: unknown, profileDir?: string): AccessControlConfig {
+function readProfileConfig(profileDir?: string): YAMLMap | undefined {
   const path = profileDir && resolve(profileDir, 'cordis.patch.yml');
-  return savedAccess(path && existsSync(path) ? findEntryConfig(parseProfilePatch(readFileSync(path, 'utf8'))) : undefined, fallback);
+  return path && existsSync(path) ? findEntryConfig(parseProfilePatch(readFileSync(path, 'utf8'))) : undefined;
+}
+
+function explicitAppId(value: unknown): string | undefined {
+  return typeof value === 'string' && value && value !== '__FROM_ENV__' && !value.startsWith('process.env')
+    ? value : undefined;
+}
+
+function checkedAppId(config: YAMLMap | undefined, expectedAppId?: string): string {
+  const node = config?.get('appId', true);
+  const saved = isScalar(node) && (node.tag === undefined || node.tag === 'tag:yaml.org,2002:str')
+    ? explicitAppId(node.value) : undefined;
+  const expected = explicitAppId(expectedAppId);
+  if (saved && expected && saved !== expected) throw new AccessConfigConflict();
+  return saved ?? expected ?? '';
+}
+
+/** Read persisted membership even while the old plugin fiber is still serving requests. */
+export function readProfileAccess(fallback: unknown, profileDir?: string, expectedAppId?: string): AccessControlConfig {
+  const config = readProfileConfig(profileDir);
+  checkedAppId(config, expectedAppId);
+  return savedAccess(config, fallback);
+}
+
+export function readProfileAccessSnapshot(fallback: unknown, profileDir?: string, expectedAppId?: string) {
+  const config = readProfileConfig(profileDir);
+  const appId = checkedAppId(config, expectedAppId);
+  const access = savedAccess(config, fallback);
+  return { access, appId, revision: accessRevision(access, appId) };
 }
 
 /** 凭据结果 */
@@ -381,7 +408,7 @@ export function updateProfileConfig(
   configPatch: Record<string, unknown>,
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
-  accessCondition?: { revision: string; fallback: unknown },
+  accessCondition?: { revision: string; fallback: unknown; appId?: string },
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) {
@@ -394,8 +421,11 @@ export function updateProfileConfig(
     const ok = editProfilePatch(
       profileDir,
       ({ config, attached, appendEntry }) => {
-        if (accessCondition && accessRevision(savedAccess(config, accessCondition.fallback)) !== accessCondition.revision) {
-          throw new AccessConfigConflict();
+        if (accessCondition) {
+          const appId = checkedAppId(config, accessCondition.appId);
+          if (accessRevision(savedAccess(config, accessCondition.fallback), appId) !== accessCondition.revision) {
+            throw new AccessConfigConflict();
+          }
         }
         for (const [key, value] of Object.entries(configPatch)) {
           if (key === 'appId' || key === 'appSecret') continue;
