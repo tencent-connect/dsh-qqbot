@@ -101,6 +101,11 @@ export class SessionManager {
     agents: DshAgentRegistry,
     config: ImQQBotConfig,
     logger: Logger,
+    /**
+     * per-bot 偏好文件路径（多 bot 模式：PLUGIN_HOME/bots/<appId>/model-prefs.json）。
+     * 缺省由 ModelResolver 按 config 自派生；单 bot 为 undefined（legacy 共享路径）。
+     */
+    prefsPath?: string,
   ) {
     this.ctx = ctx;
     this.agents = agents;
@@ -108,7 +113,7 @@ export class SessionManager {
     this.logger = logger;
     this.host = createHostAdapter(ctx, logger);
     this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
-    this.modelResolver = new ModelResolver(ctx, config, logger);
+    this.modelResolver = new ModelResolver(ctx, config, logger, prefsPath);
 
     this.evictor = new IdleEvictor(
       this.sessions,

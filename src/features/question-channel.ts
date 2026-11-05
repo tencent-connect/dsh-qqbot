@@ -89,6 +89,22 @@ class QuestionChannelError extends Error {
   }
 }
 
+// ── ask patch 的进程级共享状态（同进程多 bot 实例） ──
+
+/**
+ * `userQuestions` 是宿主单例服务，ask patch 全局只能装一次；但多 bot 时每个
+ * 实例各有自己的 SessionManager（会话归属不同）。因此 patch 做成「一次安装、
+ * 多通道分派」：按注册顺序问各通道是否持有该 agent 的会话，命中即由该通道走
+ * QQ，全部未命中才回退宿主原实现（Web/TUI 弹框）。
+ */
+interface AskPatch {
+  origAsk: UserQuestionsServiceLike['ask'];
+  channels: Set<QuestionChannel>;
+}
+
+/** key 为被 patch 的 userQuestions 服务实例 */
+const askPatches = new WeakMap<object, AskPatch>();
+
 // ── 每会话状态机 ──
 
 interface PendingEntry {
@@ -109,7 +125,6 @@ interface PendingEntry {
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
   private uq?: UserQuestionsServiceLike;
-  private origAsk?: UserQuestionsServiceLike['ask'];
   private readonly manager: QuestionChannelManagerLike;
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
@@ -135,37 +150,59 @@ export class QuestionChannel {
 
   /**
    * 包装 userQuestions.ask：QQ 会话走 QQ 通道，其余委托原实现。
-   * 幂等（已 patch 则跳过）；服务缺失或 ask 非函数时优雅禁用。
+   * 幂等（同一服务只 patch 一次）；服务缺失或 ask 非函数时优雅禁用。
+   *
+   * 多实例：每个实例都注册进同一个 patch 的分派表（见 askPatches），
+   * 因此第二实例不会被 `__qqQuestionPatched` 静默跳过、其会话的提问也能路由到 QQ。
    */
   public install(ctx: { get(name: string): unknown }): void {
     const uq = ctx.get('userQuestions') as UserQuestionsServiceLike | undefined;
-    if (!uq || uq.__qqQuestionPatched) return;
+    if (!uq) return;
     if (typeof uq.ask !== 'function') {
       this.logger.warn('im-qqbot: userQuestions service lacks ask() — QQ question channel disabled');
       return;
     }
 
-    const self = this;
-    this.origAsk = uq.ask.bind(uq);
-    uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
-      const sessionId = request?.agent?.id;
-      const record = sessionId ? self.manager.findBySessionId(sessionId) : undefined;
-      // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 交回宿主默认界面
-      const target = record && sessionId ? self.resolveTarget(sessionId, record) : undefined;
-      if (record && target) return self.askViaQQ(record, target, request);
-      return self.origAsk!(request);
-    };
-    Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
+    let patch = askPatches.get(uq);
+    if (!patch) {
+      const created: AskPatch = { origAsk: uq.ask.bind(uq), channels: new Set() };
+      uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
+        const sessionId = request?.agent?.id;
+        if (sessionId) {
+          for (const channel of created.channels) {
+            const record = channel.manager.findBySessionId(sessionId);
+            // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 继续找下一个通道/宿主默认界面
+            const target = record ? channel.resolveTarget(sessionId, record) : undefined;
+            if (record && target) return channel.askViaQQ(record, target, request);
+          }
+        }
+        return created.origAsk(request);
+      };
+      Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
+      askPatches.set(uq, created);
+      patch = created;
+    }
+    patch.channels.add(this);
     this.uq = uq;
-    this.logger.info('im-qqbot: QQ question channel installed');
+    this.logger.info(
+      patch.channels.size === 1
+        ? 'im-qqbot: QQ question channel installed'
+        : `im-qqbot: QQ question routing across ${patch.channels.size} bot channels`,
+    );
   }
 
   public uninstall(): void {
-    if (this.uq && this.origAsk) {
-      this.uq.ask = this.origAsk;
-      delete this.uq.__qqQuestionPatched;
+    const uq = this.uq;
+    const patch = uq ? askPatches.get(uq) : undefined;
+    if (uq && patch) {
+      patch.channels.delete(this);
+      // 最后一个通道卸载才恢复宿主原实现：多 bot 下一个实例卸载不得带走别人的路由
+      if (patch.channels.size === 0) {
+        uq.ask = patch.origAsk;
+        delete uq.__qqQuestionPatched;
+        askPatches.delete(uq);
+      }
       this.uq = undefined;
-      this.origAsk = undefined;
     }
     for (const [, entry] of this.pending) {
       this.clearTimer(entry);
