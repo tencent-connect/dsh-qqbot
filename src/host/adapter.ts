@@ -26,6 +26,14 @@ export interface HostAdapter {
   /** 会话 header 读取（取 agentPreset 等）；会话不存在、服务缺失或读取失败返回 undefined */
   sessionHeader(sessionId: string): Promise<SessionHeaderLike | undefined>;
   /**
+   * 枚举持久化层里的会话摘要（/switch 候选列表）。
+   *
+   * `undefined` = 没有枚举手段（宿主未注册 sessionPersistence，或其形态不含
+   * `list`）；空数组 = 有能力但一个会话都没有。后端真故障照常抛出，由调用方
+   * 决定降级——把「列举失败」静默成「没有会话」会让用户以为会话丢了。
+   */
+  listSessions(): Promise<SessionSummaryLike[] | undefined>;
+  /**
    * 会话是否存在于持久化层。
    *
    * `undefined` = 没有求证手段（宿主未注册 sessionPersistence，或其形态不含
@@ -47,7 +55,21 @@ export interface HostAdapter {
 
 /** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
 export interface SessionHeaderLike {
+  id?: string;
+  /** Unix epoch 毫秒 */
+  createdAt?: number;
+  cwd?: string;
+  /** 'subagent' = 子代理会话（不可作为桥接目标） */
+  origin?: 'subagent';
   agentPreset?: string;
+}
+
+/** 会话摘要（`listSessions` 的投影；只暴露选择桥接目标所需的字段） */
+export interface SessionSummaryLike {
+  id: string;
+  cwd?: string;
+  createdAt?: number;
+  origin?: 'subagent';
 }
 
 /** 工作区实体最小契约（对齐 dsh-workspace Workspace） */
@@ -68,12 +90,21 @@ const WORKSPACE_TITLE = 'QQBot';
 /**
  * 持久化服务的最小只读契约。
  *
- * 只用 `stat`：它不读事件日志、不取写所有权，且**会话不存在时返回 `undefined`
- * 而非抛错**，正好是存在性判定需要的语义。不用 `open`（会争写所有权）、不用
- * `list`（全量扫描）。
+ * 只用 `stat`（存在性判定）与 `list`（候选枚举）：`stat` 不读事件日志、不取写
+ * 所有权，且**会话不存在时返回 `undefined` 而非抛错**，正好是存在性判定需要的
+ * 语义。不用 `open`（会争写所有权）。
+ *
+ * `list` 的返回形状在 0.5.2 → 0.5.5 之间漂移过：0.5.2 直接给 `SessionHeader[]`，
+ * 0.5.5 给 `{ header, revision }` 快照数组。两形态都认（见 toSessionSummary）。
  */
 interface SessionPersistenceLike {
   stat(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+  list?(): Promise<readonly unknown[]>;
+}
+
+/** 可取 `list` 的持久化服务形态（方法存在性先探测，缺失时绝不调用） */
+interface ListCapablePersistence {
+  list(): Promise<readonly unknown[]>;
 }
 
 /**
@@ -85,6 +116,31 @@ interface SessionPersistenceLike {
 function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
   return typeof persistence?.stat === 'function' ? persistence : undefined;
+}
+
+/** 取 `list` 能力；形态不匹配返回 undefined */
+function listCapablePersistence(ctx: Context): ListCapablePersistence | undefined {
+  const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
+  return typeof persistence?.list === 'function' ? (persistence as ListCapablePersistence) : undefined;
+}
+
+/**
+ * 把 `list()` 的一项投影成摘要。
+ *
+ * 兼容两种宿主形态：0.5.5 的 `{ header }` 快照，以及 0.5.2 直接返回的 header。
+ * 取不出 id 的条目丢弃——没有 id 就没有可绑定目标。
+ */
+function toSessionSummary(entry: unknown): SessionSummaryLike | undefined {
+  const wrapper = entry as { header?: SessionHeaderLike } | undefined;
+  const header = (wrapper?.header ?? (entry as SessionHeaderLike | undefined));
+  const id = header?.id;
+  if (typeof id !== 'string' || id === '') return undefined;
+  return {
+    id,
+    ...(header?.cwd !== undefined ? { cwd: header.cwd } : {}),
+    ...(header?.createdAt !== undefined ? { createdAt: header.createdAt } : {}),
+    ...(header?.origin === 'subagent' ? { origin: 'subagent' as const } : {}),
+  };
 }
 
 /** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
@@ -119,6 +175,9 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
   capabilities.push(statCapablePersistence(ctx)
     ? 'sessionPersistence.stat(可用)'
     : 'sessionPersistence.stat(不可用，会话存在性判定降级)');
+  capabilities.push(listCapablePersistence(ctx)
+    ? 'sessionPersistence.list(可用)'
+    : 'sessionPersistence.list(不可用，/switch 候选枚举降级)');
   capabilities.push(workspaceRegistry(ctx)
     ? 'workspaceRegistry.create(可用)'
     : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
@@ -180,6 +239,18 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
       const persistence = statCapablePersistence(ctx);
       if (!persistence) return undefined;
       return (await persistence.stat(sessionId)) !== undefined;
+    },
+
+    async listSessions() {
+      const persistence = listCapablePersistence(ctx);
+      if (!persistence) return undefined;
+      const entries = await persistence.list();
+      const summaries: SessionSummaryLike[] = [];
+      for (const entry of entries ?? []) {
+        const summary = toSessionSummary(entry);
+        if (summary) summaries.push(summary);
+      }
+      return summaries;
     },
 
     async attachSessionToWorkspace(sessionId, cwd) {
