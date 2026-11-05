@@ -67,6 +67,16 @@ npx @deepseek-ai/dsh --profile qqbot
 
 > **提示**：建议升级至 `0.4.0` 以上版本扫码，支持点击链接在浏览器打开，避免部分终端二维码渲染错位的问题。
 
+> **安装报 `ERESOLVE could not resolve`？** 与**声明了 prerelease（`-rc`）peer 范围的其他插件共装**时，npm 7+ 的严格解析可能判定这组范围不相交而拒绝安装（[#37](https://github.com/tencent-connect/dsh-qqbot/issues/37) 跟踪中）。实测：profile 里只装本插件不触发，与其他同类插件共装才触发。
+>
+> 首选仍走上面的 `dsh plugin` 命令——它对 profile 目录执行的是 **pnpm**，通常不会被 npm 的严格解析拦下。只有在该 profile 由 npm 管理、确实被拦住时，才用 npm 的放宽开关：
+>
+> ```bash
+> npm install --prefix ~/.dsh/profiles/qqbot --legacy-peer-deps @tencent-connect/dsh-qqbot
+> ```
+>
+> 注意：`dsh plugin add` 按 pnpm 布局管理 profile，用 npm 直接安装会额外留下 `package-lock.json` 与扁平 `node_modules`，之后再用 pnpm 操作该 profile 容易出现依赖树异常。若已经这样装过，删掉 profile 里这两处残留后用 `dsh plugin` 重装即可。
+
 ### 方式三：本地路径安装
 
 ```bash
