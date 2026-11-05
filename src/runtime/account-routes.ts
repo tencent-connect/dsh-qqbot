@@ -1,16 +1,16 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { CONVERSATIONS_PATH } from '../shared/conversation-protocol.ts';
+import { COMMANDS_PATH } from '../shared/command-protocol.ts';
 import { PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH, type PairPurpose } from '../shared/pairing-protocol.ts';
 import type { WebServerLike } from '../setup/bind-routes.ts';
-import type { ConversationService } from './conversation-service.ts';
+import type { AccountAccessService } from './account-service.ts';
 
 
-export function registerConversationRoutes(ctx: Context, service: ConversationService, commands: () => unknown): void {
+export function registerAccountRoutes(ctx: Context, service: AccountAccessService, commands: () => unknown): void {
   ctx.inject(['webServer'], scoped => {
     let active = true;
     const server = scoped.get('webServer') as WebServerLike;
-    const disposers = [server.register({kind:'exact', path: CONVERSATIONS_PATH, handler: async (_req, res) => json(res,200,{ commands: commands() })})];
+    const disposers = [server.register({kind:'exact', path: COMMANDS_PATH, handler: async (_req, res) => json(res,200,{ commands: commands() })})];
     const pairHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       try {
         if (!active) return json(res, 503, { error: 'QQ 插件已重载，请刷新后重试' });

@@ -45,7 +45,7 @@ export function setupMiddlewares(
 
   // 有效网页邀请是加白入口，必须先于访问控制；普通消息仍走下方策略。
   bot.use(async (ctx, next) => {
-    const service = manager.conversations;
+    const service = manager.accountAccess;
     const content = ctx.message.content
       .replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
     if (!service || !content || content.length > 32 || !service.isActivePairCode(content)) {
@@ -109,7 +109,7 @@ export function setupMiddlewares(
   bot.use(limit);
 
   bot.use(async (ctx, next) => {
-    const service = manager.conversations;
+    const service = manager.accountAccess;
     if (ctx.message.content.trim().startsWith('/')) {
       const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
       if (error) {

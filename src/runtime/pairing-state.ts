@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { atomicWrite } from '../conversations/files.ts';
+import { atomicWrite } from '../shared/atomic-file.ts';
 import type { PairChallenge, PairClaimResult } from '../shared/pairing-protocol.ts';
 
 /** Revocation is authorization state, independent of best-effort claim receipts. */

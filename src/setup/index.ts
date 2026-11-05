@@ -19,7 +19,6 @@ import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import type { RuntimeState } from '../runtime/state.ts';
 
 export type { SetupCredentials } from './persist.ts';
 export { persistCredentialsToProfile } from './persist.ts';
@@ -35,7 +34,6 @@ export interface EnsureCredentialsOptions {
   source?: string;
   /** 当前生效配置（apply 时 loader 合并值；config 路由 GET 回显用） */
   config: Record<string, unknown>;
-  runtime?: RuntimeState;
 }
 
 /**
@@ -56,7 +54,6 @@ export async function ensureCredentials(
   options: EnsureCredentialsOptions,
 ): Promise<SetupCredentials | null> {
   const logger = options.logger;
-  const runtime = options.runtime;
   const source = options.source ?? 'dsh-qqbot';
 
   // 单例接管：HMR 双 fiber 窗口下，新实例终止旧实例的轮询
@@ -98,7 +95,6 @@ export async function ensureCredentials(
         return persistCredentials(credentials, logger);
       },
       currentConfig: () => options.config,
-      runtimeState: runtime ? () => runtime.snapshot() : undefined,
     });
     // 回调作用域（服务卸载/替换、插件卸载）连带注销路由
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
@@ -115,7 +111,7 @@ export async function ensureCredentials(
  * 在 apply 的 bootstrapGateway 之前调用；写入经同一 persist 路径，
  * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
  */
-export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>, runtime?: RuntimeState): void {
+export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
   (ctx as unknown as {
     inject(deps: readonly string[], callback: (scoped: Context) => void): unknown;
   }).inject(['webServer'], (scoped) => {
@@ -125,7 +121,6 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
       boundAppId: () => appId,
       onManualCredentials: (credentials) => persistCredentials(credentials, logger),
       currentConfig: () => config,
-      runtimeState: runtime ? () => runtime.snapshot() : undefined,
     });
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
       return disposeRoutes;

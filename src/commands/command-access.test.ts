@@ -7,8 +7,8 @@ import { commandAccessError } from './auth.ts';
 import { buildCommandList, describeCommands } from './index.ts';
 import type { CommandDeps } from './types.ts';
 import type { SlashCommandHandlerContext } from '@tencent-connect/qqbot-nodejs';
-import { ConversationService } from '../runtime/conversation-service.ts';
-import { ConversationStore } from '../conversations/index.ts';
+import { AccountAccessService } from '../runtime/account-service.ts';
+import { MemberStore } from '../runtime/member-store.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -16,12 +16,12 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'qq-command-access-'));
   roots.push(root);
-  const store = new ConversationStore(root, 'test-app');
-  store.setOwnerIds(['member']);
+  const store = new MemberStore(root, 'test-app');
+  store.claimOwner('member', { nickname: '', scene: 'c2c', sceneName: '', claimedAt: 0 });
   const config = ConfigSchema({ appId: 'test-app', appSecret: 'not-a-real-secret' });
   // Keep disk state isolated while using the production authorization and command wrappers.
-  const service = Object.assign(Object.create(ConversationService.prototype) as ConversationService, { config, store });
-  const deps = { manager: { conversations: service }, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
+  const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService, { config, store });
+  const deps = { manager: { accountAccess: service }, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
   const context = (senderId?: string) => ({ message: { senderId, kind: 'c2c' } }) as SlashCommandHandlerContext;
   return { store, service, config, deps, context, root };
 }
@@ -78,7 +78,7 @@ describe('QQ slash-command access modes', () => {
       config.access.commandMode = mode;
       expect(store.ownerIds()).toEqual(['member']);
     }
-    expect(new ConversationStore(root, 'test-app').ownerIds()).toEqual(['member']);
+    expect(new MemberStore(root, 'test-app').ownerIds()).toEqual(['member']);
   });
 
   it('reports the effective policy in the command catalog while retaining aliases', () => {

@@ -15,12 +15,9 @@ import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
 import { fetchJson, HttpError } from './http.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
-import type { SelectorSource } from './host-selectors.ts';
 import { SlashCommandList } from './slash-command-list.ts';
-import { CONVERSATIONS_PATH, type SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
+import { COMMANDS_PATH, type SlashCommandDescriptor } from '../shared/command-protocol.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
-import type { QQBotKey } from './qq-locale.ts';
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots';
 
 /** 样式注入标记（幂等） */
 const STYLE_ID = 'im-qqbot-config-panel-styles';
@@ -188,7 +185,7 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
   return undefined;
 }
 
-export interface ConfigPanelProps { bindPhase?: string; selectorSource?: SelectorSource; t?: Translate<QQBotKey> }
+export interface ConfigPanelProps { bindPhase?: string }
 
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
 export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
@@ -198,7 +195,7 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
   useEffect(() => {
     const controller = new AbortController();
     if (bindPhase !== 'bound') return;
-    void fetchJson<{ commands: SlashCommandDescriptor[] }>(CONVERSATIONS_PATH, { signal: controller.signal })
+    void fetchJson<{ commands: SlashCommandDescriptor[] }>(COMMANDS_PATH, { signal: controller.signal })
       .then(result => { setCommands(result.commands); setCommandsError(null); })
       .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();

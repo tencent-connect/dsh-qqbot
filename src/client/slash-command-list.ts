@@ -1,6 +1,6 @@
 import { createElement as h, useCallback, useState, type ReactNode } from 'react';
 import { DisclosureRow, IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
+import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 
 /** 命令访问面板中的命令清单，内容来自服务端注册表。 */
 export function SlashCommandList({ commands }: { commands: readonly SlashCommandDescriptor[] }): ReactNode {

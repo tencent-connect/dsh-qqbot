@@ -1,4 +1,4 @@
-import type { SlashCommandDescriptor } from '../shared/conversation-protocol.ts';
+import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 /**
  * 斜杠命令注册中心
  *
@@ -41,7 +41,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     delete command.authorized;
     const original = command.handler;
     command.handler = ctx => {
-      const service = deps.manager.conversations;
+      const service = deps.manager.accountAccess;
       const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
       return error ? Promise.resolve(error) : original(ctx);
     };

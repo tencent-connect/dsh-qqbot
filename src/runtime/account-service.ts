@@ -1,7 +1,7 @@
 import { commandAccessError } from '../commands/auth.ts';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { ConversationStore } from '../conversations/index.ts';
+import { MemberStore } from './member-store.ts';
 import { PairingService, type PendingActor } from './pairing-service.ts';
 import { openidTail, type ClaimedMember, type ManualPairResult, type PairChallenge, type PairPurpose, type PairStatusWire } from '../shared/pairing-protocol.ts';
 import type { ChatScope, Logger } from '../types.ts';
@@ -9,15 +9,13 @@ import type { ImQQBotConfig } from '../config.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { updateProfileConfig, readProfileAccess } from '../setup/persist.ts';
-export class ConversationService {
-  readonly store: ConversationStore;
+export class AccountAccessService {
+  readonly store: MemberStore;
   readonly pairing: PairingService;
   constructor(readonly config: ImQQBotConfig, readonly logger: Logger) {
     this.pairing = new PairingService({ stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`) });
-    this.store = new ConversationStore(PLUGIN_HOME, config.appId, {legacyOwnerIds: () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []});
-    this.store.migratePrefs();
+    this.store = new MemberStore(PLUGIN_HOME, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
   }
-  entry(scope: ChatScope, peerId: string) { return this.store.ensure(scope, peerId); }
   // ── 配对码认领（Web 生成码 / QQ 核销） ──────────────────────────────
   /** Web：为一种名单生成限时配对批次，替换时旧码失效。 */
   issuePairCode(purpose: PairPurpose, previousCode?: string): PairChallenge {
@@ -90,7 +88,7 @@ export class ConversationService {
         ? '请在目标群聊中 @机器人发送此配对码；配对码仍然有效。'
         : '请在私聊中发送此配对码；配对码仍然有效。' };
     }
-    const entry = this.entry(scope, peerId);
+    const entry = this.store.peerName(scope, peerId);
     // 群白名单是对「群」加白：身份用群 openID（peerId），昵称用群名；其余用发送者 openID。
     const isGroupAllow = purpose === 'allow-group';
     const savedName = this.store.memberProfiles()[isGroupAllow ? peerId : senderId]?.nickname;

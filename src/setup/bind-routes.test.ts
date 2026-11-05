@@ -22,8 +22,6 @@ import {
   type WebRoute,
 } from './bind-routes.ts';
 import type { BindingService } from './binding-service.ts';
-import { RUNTIME_STATE_PATH } from '../shared/runtime-protocol.ts';
-import { RuntimeState } from '../runtime/state.ts';
 import { accessRevision, readProfileAccess, updateProfileConfig } from './persist.ts';
 
 /** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
@@ -498,38 +496,5 @@ describe('bind-routes', () => {
     const resNone = fakeRes();
     await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), resNone);
     expect(resNone.statusCode).toBe(200);
-  });
-});
-
-
-describe('runtime route', () => {
-  it('reports the supplied runtime snapshot without credentials or message data', async () => {
-    const state = new RuntimeState(() => 12);
-    state.setPhase('ready');
-    state.received();
-    const { routes } = createHarness({ runtimeState: () => state.snapshot() });
-    const response = fakeRes();
-    await invoke(routes.get(RUNTIME_STATE_PATH), fakeReq('GET'), response);
-    expect(response.statusCode).toBe(200);
-    expect(response.headers['cache-control']).toBe('no-store');
-    expect(json(response)).toEqual(state.snapshot());
-  });
-
-  it('returns unavailable when no observer exists instead of claiming readiness', async () => {
-    const { routes } = createHarness();
-    const response = fakeRes();
-    await invoke(routes.get(RUNTIME_STATE_PATH), fakeReq('GET'), response);
-    expect(response.statusCode).toBe(503);
-  });
-
-  it('is read-only and rejects cross-origin requests', async () => {
-    const state = new RuntimeState();
-    const { routes } = createHarness({ runtimeState: () => state.snapshot() });
-    const write = fakeRes();
-    await invoke(routes.get(RUNTIME_STATE_PATH), fakeReq('POST'), write);
-    expect(write.statusCode).toBe(405);
-    const crossOrigin = fakeRes();
-    await invoke(routes.get(RUNTIME_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080', origin: 'https://other.invalid' }), crossOrigin);
-    expect(crossOrigin.statusCode).toBe(403);
   });
 });

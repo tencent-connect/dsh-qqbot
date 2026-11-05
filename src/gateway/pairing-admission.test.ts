@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QQBot, runMiddlewareChain, type Middleware, type MiddlewareContext, type QQBotInboundMessage } from '@tencent-connect/qqbot-nodejs';
 import { ConfigSchema } from '../config.ts';
-import { ConversationStore } from '../conversations/index.ts';
-import { ConversationService } from '../runtime/conversation-service.ts';
+import { MemberStore } from '../runtime/member-store.ts';
+import { AccountAccessService } from '../runtime/account-service.ts';
 import { PairingService } from '../runtime/pairing-service.ts';
 import type { SessionManager } from '../session/index.ts';
 import { readProfileAccess } from '../setup/persist.ts';
@@ -24,11 +24,11 @@ function fixture() {
     c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'disabled',
   } });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-  const store = new ConversationStore(join(profile.dir, 'data'), config.appId);
+  const store = new MemberStore(join(profile.dir, 'data'), config.appId);
   let now = Date.now();
-  const service = Object.assign(Object.create(ConversationService.prototype) as ConversationService,
+  const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService,
     { config, logger, store, pairing: new PairingService({ now: () => now }) });
-  const manager = { conversations: service } as SessionManager;
+  const manager = { accountAccess: service } as SessionManager;
   const bot = new QQBot({ appId: config.appId, appSecret: config.appSecret, logger });
   const chain: Middleware[] = [];
   vi.spyOn(bot, 'use').mockImplementation((...middleware) => { chain.push(...middleware); return bot; });
@@ -100,7 +100,7 @@ describe('pairing before conversation admission', () => {
     expect(f.send).not.toHaveBeenCalled();
     expect(f.agent).not.toHaveBeenCalled();
     expect(f.service.pairStatus().allowC2c).toEqual([]);
-    expect(f.store.list()).toEqual([]);
+    expect(f.store.memberProfiles()).toEqual({});
   });
 
   it('requires the group mention and strips only the bot marker before redeeming an invitation', async () => {
@@ -121,7 +121,7 @@ describe('pairing before conversation admission', () => {
     await f.receive(code);
     expect(f.send).toHaveBeenLastCalledWith(expect.anything(), expect.stringContaining('目标群聊'));
     expect(f.service.isActivePairCode(code)).toBe(true);
-    expect(f.store.list()).toEqual([]);
+    expect(f.store.memberProfiles()).toEqual({});
     await f.receive(code, { group: true, mentioned: true });
     expect(readProfileAccess(undefined, profile.dir).groupAllow).toEqual(['team']);
     expect(f.agent).not.toHaveBeenCalled();

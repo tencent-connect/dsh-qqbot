@@ -6,22 +6,22 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigSchema } from '../config.ts';
-import { ConversationStore } from '../conversations/index.ts';
+import { MemberStore } from './member-store.ts';
 import { PAIR_MANUAL_PATH, PAIR_RENAME_PATH } from '../shared/pairing-protocol.ts';
 import type { WebRoute } from '../setup/bind-routes.ts';
-import { ConversationService } from './conversation-service.ts';
+import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
-import { registerConversationRoutes } from './conversation-routes.ts';
+import { registerAccountRoutes } from './account-routes.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
 afterEach(() => { if (profile.dir) rmSync(profile.dir, { recursive: true, force: true }); profile.dir = undefined; });
-function service(): ConversationService {
+function service(): AccountAccessService {
   profile.dir ??= mkdtempSync(join(tmpdir(), 'qq-route-lifecycle-'));
   const config = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' });
-  return Object.assign(Object.create(ConversationService.prototype) as ConversationService, {
+  return Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService, {
     config, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    store: new ConversationStore(join(profile.dir, 'data'), config.appId),
+    store: new MemberStore(join(profile.dir, 'data'), config.appId),
     pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }),
   });
 }
@@ -36,7 +36,7 @@ describe('pairing routes during reload', () => {
       effect: (effect: () => () => void) => { dispose = effect(); },
     };
     const context = { inject: (_dependencies: string[], callback: (scope: typeof scoped) => void) => callback(scoped) };
-    registerConversationRoutes(context as unknown as Context, old, () => []);
+    registerAccountRoutes(context as unknown as Context, old, () => []);
     let arrived = (): void => {};
     const dispatched = new Promise<void>(resolve => { arrived = resolve; });
     const requests = new Set<Promise<void>>();

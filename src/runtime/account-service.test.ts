@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigSchema } from '../config.ts';
-import { ConversationStore } from '../conversations/index.ts';
-import { ConversationService } from './conversation-service.ts';
+import { MemberStore } from './member-store.ts';
+import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
 import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { whitelistEntries } from '../client/whitelist-export.ts';
-import * as files from '../conversations/files.ts';
+import * as files from '../shared/atomic-file.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
@@ -18,8 +18,8 @@ function fixture() {
   profile.dir ??= mkdtempSync(join(tmpdir(), 'qq-membership-'));
   const config = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-  const store = new ConversationStore(join(profile.dir, 'data'), config.appId);
-  const service = Object.assign(Object.create(ConversationService.prototype) as ConversationService,
+  const store = new MemberStore(join(profile.dir, 'data'), config.appId);
+  const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService,
     { config, logger, store, pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }) });
   return { service, store };
 }
@@ -92,7 +92,7 @@ describe('membership persistence and pairing scope', () => {
     expect(first.revokePair('alice', 'owner').ok).toBe(true);
     expect(stale.isOwner('alice')).toBe(false);
     stale.renameMember('bob', 'Bob');
-    stale.entry('c2c', 'bob');
+    stale.store.setMemberProfile('bob', { nickname: 'Bob', scene: 'c2c', sceneName: '', claimedAt: 0 });
     expect(fixture().service.isOwner('alice')).toBe(false);
   });
   it.each(['rename', 'discovery'])('does not restore revoked command members during a stale %s mutation', mutation => {
@@ -100,7 +100,7 @@ describe('membership persistence and pairing scope', () => {
     const stale = fixture().service;
     first.revokePair('alice', 'owner');
     if (mutation === 'rename') stale.renameMember('bob', 'Bob');
-    else stale.entry('c2c', 'bob');
+    else stale.store.setMemberProfile('bob', { nickname: 'Bob', scene: 'c2c', sceneName: '', claimedAt: 0 });
     expect(fixture().service.isOwner('alice')).toBe(false);
   });
   it('does not report removal or change membership if the revocation fence cannot be persisted', () => {
@@ -177,7 +177,7 @@ describe('membership persistence and pairing scope', () => {
     const { service, store } = fixture();
     expect(service.addManualMember('allow-c2c', 'alice:Alice').ok).toBe(true);
     expect(service.addManualMember('allow-group', 'team:Project Group').ok).toBe(true);
-    store.setOwnerIds(['other']);
+    store.claimOwner('other', { nickname: '', scene: 'c2c', sceneName: '', claimedAt: 0 });
     const reopened = fixture().service;
     expect(reopened.pairStatus().allowC2c).toEqual([expect.objectContaining({ openid: 'alice', nickname: 'Alice', scene: 'c2c' })]);
     expect(reopened.pairStatus().allowGroup).toEqual([expect.objectContaining({ openid: 'team', nickname: 'Project Group', scene: 'group' })]);
@@ -193,6 +193,15 @@ describe('membership persistence and pairing scope', () => {
     expect(first.service.pairStatus().allowGroup.map(m => m.openid)).toEqual(['team']);
   });
 
+  it('keeps the private-chat nickname when the same identity loses command access', () => {
+    const { service } = fixture();
+    service.addManualMember('allow-c2c', 'alice:Alice');
+    service.addManualMember('owner', 'alice');
+    service.revokePair('alice', 'owner');
+    expect(service.isOwner('alice')).toBe(false);
+    expect(fixture().service.pairStatus().allowC2c).toEqual([expect.objectContaining({ openid: 'alice', nickname: 'Alice' })]);
+  });
+
   it.each([
     ['allow-group', 'c2c', 'group'], ['allow-c2c', 'group', 'c2c'],
   ] as const)('does not consume %s codes in %s, then accepts the correct scene', (purpose, wrong, correct) => {
@@ -200,7 +209,7 @@ describe('membership persistence and pairing scope', () => {
     const challenge = service.issuePairCode(purpose);
     expect(service.beginClaimFromMessage(wrong, 'wrong-peer', challenge.code, 'sender').ok).toBe(false);
     expect(service.pairing.hasActiveCode(challenge.code)).toBe(true);
-    expect(store.list()).toEqual([]);
+    expect(store.memberProfiles()).toEqual({});
     expect(service.beginClaimFromMessage(correct, 'right-peer', challenge.code, 'sender').ok).toBe(true);
     expect(service.pairing.hasActiveCode(challenge.code)).toBe(true);
     const access = readProfileAccess(undefined, profile.dir);
