@@ -12,6 +12,7 @@ import type { QQScope } from './scope.ts';
 import { RULES_SECTION_NAME, RULES_ORDER, RULES_TEXT } from './rules.ts';
 import { PERSONA_SECTION_NAME, PERSONA_ORDER, selectPersonaText } from './persona.ts';
 import { EXTRA_SECTION_NAME, EXTRA_ORDER, selectExtraPrompt } from './extra.ts';
+import { QUESTION_STYLE_SECTION_NAME, QUESTION_STYLE_ORDER, selectQuestionStyleText } from './question-style.ts';
 import { TURN_META_CONTEXT_NAME, TURN_META_ORDER } from './turn-meta.ts';
 
 /** Frozen facts from the exact QQ input claimed for the current native turn. */
@@ -27,6 +28,8 @@ export interface QQPromptEntry {
   personaCard(): string;
   /** 补充提示词（群/私分字段）。 */
   extraPrompts(): { group?: string; direct?: string };
+  /** 提问规约开关：缺省（undefined）= 注入，显式 false 关闭（渲染为空文本，宿主丢弃）。 */
+  questionStyleEnabled?(): boolean;
   /** Read only the current turn's verified input; queued and previous turns return nothing. */
   turnContext?(): QQTurnContext | undefined;
 }
@@ -45,6 +48,8 @@ export function installQQPrompt(agentCtx: Context, entry: QQPromptEntry): QQProm
   disposers.push(service.section({ name: RULES_SECTION_NAME, order: RULES_ORDER, text: RULES_TEXT }));
   disposers.push(service.section({ name: PERSONA_SECTION_NAME, order: PERSONA_ORDER, text: () => selectPersonaText(entry.personaCard(), entry.scope) }));
   disposers.push(service.section({ name: EXTRA_SECTION_NAME, order: EXTRA_ORDER, text: () => selectExtraPrompt(entry.extraPrompts(), entry.scope) }));
+  // 提问规约：恒挂（只对装了 QQ prompt 的 agent 生效，即 QQ 会话）；开关关闭时渲染为空文本被宿主丢弃。
+  disposers.push(service.section({ name: QUESTION_STYLE_SECTION_NAME, order: QUESTION_STYLE_ORDER, text: () => selectQuestionStyleText(entry.questionStyleEnabled?.()) }));
   // The Host claims its inbox before assembly, but appends user/message only after
   // assembly. Resolve the durable claim instead of observing the previous input.
   // interpolate: false 防止用户文本中的 {{...}} 被插值；旧版类型无此字段，push 处断言桥接。
