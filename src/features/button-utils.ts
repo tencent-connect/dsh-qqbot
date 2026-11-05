@@ -35,7 +35,13 @@ export interface ApprovalButtonData {
   n?: string;
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData;
+/** 快捷按钮（出站编号选项兜底）：i=选项下标 */
+export interface QuickReplyButtonData {
+  t: 'quick';
+  i: number;
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | QuickReplyButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -46,7 +52,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'quick')) {
       return parsed as ButtonData;
     }
   } catch {

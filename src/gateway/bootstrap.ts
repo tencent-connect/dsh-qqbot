@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
-import { handleInbound, createOutboundHandler, createTurnTracker } from '../transport/index.ts';
+import { handleInbound, createOutboundHandler, createTurnTracker, injectUserText } from '../transport/index.ts';
 import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
@@ -141,13 +141,18 @@ export async function bootstrapGateway(
   const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
   questionChannel.install(ctx);
+  // 尾部编号选项的快捷按钮兜底：出站检测 → 通道登记键盘（出站先构造，故构造后回填）
+  outbound.setQuickReplySource(questionChannel);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
   const approvalChannel = new ApprovalChannel(manager, sender, config, logger, turnTracker);
   manager.approvalChannel = approvalChannel;
   approvalChannel.install(ctx as unknown as ApprovalChannelContext);
 
-  // ── 按钮点击回调（interaction）：统一分发到问答/审批通道 ──
+  // ── 按钮点击回调（interaction，平台要求 5 秒内 ACK）──
+  // 1) 统一分发器按按钮 `t` 判别字段路由到问答/审批通道；
+  // 2) 未命中时若命中出站挂的快捷按钮 → 注入为用户消息（点击等同回复编号）；
+  // 3) 都未命中 → ACK 码 3（无效交互）。
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
     // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
     const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
@@ -155,7 +160,22 @@ export async function bootstrapGateway(
     // 记录互动事件 id，作为后续被动回复候选（event_id）
     cacheEventId(scope, targetId, event.id);
 
-    const matched = dispatchInteraction(event, manager);
+    let matched = false;
+    try {
+      matched = dispatchInteraction(event, manager);
+      if (!matched) {
+        const quick = questionChannel.consumeQuickReply(event);
+        if (quick) {
+          matched = true;
+          void injectUserText(manager, quick.scope, quick.peerId, quick.senderId, quick.text, logger, qqInputs)
+            .catch((err: unknown) => {
+              logger.error(`im-qqbot: quick-reply inject failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+        }
+      }
+    } catch (err) {
+      logger.error(`im-qqbot: interaction handling failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
   });
 

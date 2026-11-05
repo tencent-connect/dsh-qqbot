@@ -155,6 +155,34 @@ export async function handleInbound(
   }
 }
 
+/**
+ * 注入一条纯文本用户消息（快捷按钮点击：点击等同回复编号）。
+ *
+ * 与 QQ 入站同语义：先按 Message.id 登记本插件铸造的入站，出站据此认领回合
+ * 归属（不登记会被 TurnTracker 判成 external，回复又被推回 QQ）；
+ * 随后 followup，与入站一样阻塞到本轮收敛。
+ * 不携带 msgId —— 后续回复走主动投递（点击时机与原消息通常已脱节）。
+ */
+export async function injectUserText(
+  manager: SessionManager,
+  scope: ChatScope,
+  peerId: string,
+  senderId: string,
+  text: string,
+  logger: Logger,
+  inputs: QqInputRegistry,
+): Promise<void> {
+  const replyTarget: ReplyTarget = { scope, targetId: peerId };
+  const record = await manager.getOrCreate(scope, peerId, senderId, replyTarget);
+  const message = createUserMessage({
+    content: [{ type: 'text' as const, text }],
+    source: { kind: 'user' as const },
+  });
+  inputs.register(String(message.id));
+  record.agent.followup(message);
+  logger.info(`im-qqbot: quick reply injected: key=${scope}:${peerId} text="${text}"`);
+}
+
 // ══════════════════════════════════════════════════════════════
 // Body Assembly（5 层组装）
 // ══════════════════════════════════════════════════════════════
