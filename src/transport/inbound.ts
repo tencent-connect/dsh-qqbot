@@ -93,6 +93,7 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
   inputs: QqInputRegistry,
+  allowTarget: (target: ReplyTarget) => boolean,
 ): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
@@ -114,6 +115,8 @@ export async function handleInbound(
     targetId: peerId,
     msgId: msg.messageId,
   };
+  const canSubmit = () => !ctx.signal.aborted && allowTarget(replyTarget);
+  if (!canSubmit()) return;
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   const agentBody = assembleAgentBody(msg, mwState, scope, logger);
@@ -128,6 +131,7 @@ export async function handleInbound(
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
+    if (!canSubmit()) return;
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
       await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');
@@ -136,6 +140,8 @@ export async function handleInbound(
     }
     return;
   }
+
+  if (!canSubmit()) return;
 
   // ── 构建 UserMessage → followup ──
   const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];

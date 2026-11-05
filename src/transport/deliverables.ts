@@ -65,7 +65,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
       } else if (result.outcome === 'failed') {
         this.logger.warn(`im-qqbot: 交付物发送失败 ${display}: ${result.error}`);
         missed.push(display);
-      } else {
+      } else if (result.outcome === 'missing') {
         missed.push(display);
       }
     }

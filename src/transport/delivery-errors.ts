@@ -4,6 +4,10 @@ export class StreamTargetExpired extends Error {
   constructor() { super('QQ stream target has expired or is unavailable'); }
 }
 
+export class MediaAlreadySubmitted extends Error {
+  constructor() { super('QQ file was already submitted; check its result before sending again'); }
+}
+
 export function isMessageRejected(error: unknown): boolean {
   return error instanceof ApiError && error.path.endsWith('/messages')
     && [400, 403, 422].includes(error.httpStatus);

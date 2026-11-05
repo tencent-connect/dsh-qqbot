@@ -168,6 +168,9 @@ export function registerSendFileTool(
       if (result.outcome === 'missing') {
         throw new Error(`qqbot_send_file: 文件不存在或不可读: ${absPath}`);
       }
+      if (result.outcome === 'already-submitted') {
+        throw new Error(`qqbot_send_file: ${result.error}`);
+      }
       if (result.outcome === 'failed') {
         throw new Error(`qqbot_send_file: 发送失败: ${result.error}`);
       }

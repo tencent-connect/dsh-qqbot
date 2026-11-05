@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { Middleware, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -68,14 +68,15 @@ export function setupMiddlewares(
   });
 
   // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
-  bot.use((ctx, next) => {
+  const admit: Middleware = (ctx, next) => {
     const access = manager.accountAccess?.currentAccess() ?? config.access;
     return accessPolicy({
       c2c: { mode: access.c2cMode, allow: access.c2cAllow },
       group: { mode: access.groupMode, allow: access.groupAllow },
       onBlock: (_ctx, reason) => { if (config.debug) logger.debug('Access blocked: ' + reason); },
     })(ctx, next);
-  });
+  };
+  bot.use(admit);
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
   //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
@@ -128,6 +129,7 @@ export function setupMiddlewares(
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
   }));
+  bot.use(admit);
 
   // 10. C2C 输入状态指示
   bot.use(typingIndicator());

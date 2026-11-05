@@ -1,12 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { ApiError, MediaFileType, QQBot, StreamInputState } from '@tencent-connect/qqbot-nodejs';
+import { ApiError, MediaFileType, QQBot, StreamInputState, type InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import { bindDelivery, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
-import { cacheMsgId } from './msgid-cache.ts';
+import { cacheEventId, cacheMsgId } from './msgid-cache.ts';
 import { OutboundBuffer } from './outbound-buffer.ts';
-import { createDeliveryMedia, openDeliveryStream } from './qq-delivery.ts';
+import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from './qq-delivery.ts';
 import { ReplyLimiter } from './reply-limiter.ts';
-import { resolveReplyTarget, sendResolvedMarkdown } from './reply-target.ts';
 import type { ReplyTarget } from '../types.ts';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -25,7 +24,7 @@ function setup() {
   const ledger = new DeliveryLedger();
   const sender = guardSender({
     openStream: target => openDeliveryStream(bot, target, logger),
-    sendMarkdown: (target, body, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, limiter, true), body, opts),
+    sendMarkdown: (target, body, opts) => sendDeliveryMarkdown(bot, limiter, target, body, opts),
   }, ledger);
   const media = guardMedia(createDeliveryMedia(bot, limiter), ledger);
   return { bot, request, peer, target, sender, media, revoke: () => { allowed = false; } };
@@ -138,4 +137,40 @@ it('rechecks file access if token acquisition delays submission', async () => {
   releaseToken('fixture-token');
   await expect(delivery).rejects.toThrow('no longer authorized');
   expect(request).not.toHaveBeenCalled();
+});
+
+const keyboard: InlineKeyboard = { content: { rows: [] } };
+
+it.each(['text', 'card'] as const)('blocks static %s if access is revoked while acquiring the token', async kind => {
+  const { bot, request, sender, target, revoke } = setup();
+  const release = Promise.withResolvers<string>();
+  const token = vi.spyOn(bot.tokenManager, 'getAccessToken').mockReturnValueOnce(release.promise);
+  const sending = kind === 'text'
+    ? sender.sendText!(target, 'static answer', 4500)
+    : sender.sendMarkdown(target, 'card', { keyboard });
+  const denied = expect(sending).rejects.toThrow('no longer authorized');
+  try {
+    await vi.waitFor(() => expect(token).toHaveBeenCalledOnce());
+    revoke();
+  } finally {
+    release.resolve('fixture-token');
+  }
+  await denied;
+  expect(request).not.toHaveBeenCalled();
+});
+
+it('preserves event_id, keyboard, and outbound reference tracking for an authorized card', async () => {
+  const { bot, request, sender, peer, target } = setup();
+  const eventId = 'INTERACTION_CREATE:approval';
+  cacheEventId(peer.scope, peer.targetId, 'approval');
+  const eventTarget = bindDelivery({ scope: peer.scope, targetId: peer.targetId }, { key: 'approved', allowed: () => true });
+  const notify = vi.spyOn(bot.messageApi, 'notifyMessageSent');
+  request.mockResolvedValueOnce({ id: 'card', ext_info: { ref_idx: 'reference' } });
+  await sender.sendMarkdown(eventTarget, 'approval card', { keyboard });
+  expect(request.mock.lastCall?.[3]).toMatchObject({ event_id: eventId, msg_type: 2, markdown: { content: 'approval card' }, keyboard });
+  expect(request.mock.lastCall?.[3]).not.toHaveProperty('msg_id');
+  expect(notify).toHaveBeenCalledWith('reference', { text: 'approval card' });
+  await sender.sendText!(target, 'static answer', 4500);
+  expect(request.mock.lastCall?.[3]).toMatchObject({ msg_id: peer.msgId, msg_type: 2, markdown: { content: 'static answer' } });
+  expect(request.mock.lastCall?.[3]).not.toHaveProperty('event_id');
 });

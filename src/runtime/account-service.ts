@@ -205,6 +205,12 @@ export class AccountAccessService {
   currentAccess() {
     return readProfileAccess(this.config.access, getProfileDir() ?? undefined, this.config.appId);
   }
+  allowsConversation(scope: ChatScope, openid: string): boolean {
+    const access = this.currentAccess();
+    const mode = scope === 'group' ? access.groupMode : access.c2cMode;
+    const allow = scope === 'group' ? access.groupAllow : access.c2cAllow;
+    return mode === 'open' || (mode === 'allowlist' && allow.includes(openid));
+  }
   commandAccessError(actor?: string): string | undefined {
     const mode = this.currentAccess().commandMode;
     return commandAccessError(mode, actor, mode === 'allowlist' && this.isOwner(actor));

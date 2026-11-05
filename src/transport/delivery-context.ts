@@ -3,7 +3,7 @@ import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
 import type { MediaSenderLike, MediaSendResult } from '../media/send-media.ts';
 import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
 import { chunkMarkdownText } from './chunker.ts';
-import { isMessageRejected, StreamTargetExpired } from './delivery-errors.ts';
+import { isMessageRejected, MediaAlreadySubmitted, StreamTargetExpired } from './delivery-errors.ts';
 
 interface DeliveryContext { key: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
 const contexts = new WeakMap<ReplyTarget, DeliveryContext>();
@@ -133,7 +133,8 @@ export function guardMedia(sender: MediaSenderLike, ledger: DeliveryLedger): Med
       authorize(context);
       result = await action();
     });
-    if (!submitted || !result) throw new Error('QQ file was already submitted; check its result before sending again');
+    if (!submitted) throw new MediaAlreadySubmitted();
+    if (!result) throw new Error('QQ file delivery returned no result');
     return result;
   };
   return {
