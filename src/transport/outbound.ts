@@ -13,6 +13,8 @@ import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from '.
 import type { DeliverablesDelivererLike } from './deliverables.ts';
 import { QqInputRegistry } from './qq-input-origin.ts';
 import { TurnTracker, type DeliveryPlan } from './turn-tracker.ts';
+import { extractUserMessageText, formatMirrorWebText, isMirrorableOrigin } from './mirror-web.ts';
+import type { MessageOrigin } from './turn-origin.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -108,7 +110,9 @@ class OutboundRouter {
       return;
     }
     if (raw.type === 'user/message') {
-      this.tracker.note(sessionId, raw.data);
+      // 归属判定与 Web 镜像共用同一次分类结果
+      const origin = this.tracker.note(sessionId, raw.data);
+      this.mirrorUserMessage(sessionId, origin, raw.data);
       return;
     }
     if (!this.tracker.isCurrent(sessionId, raw.type, eventTurn(raw.data))) return;
@@ -186,7 +190,7 @@ class OutboundRouter {
     if (buffer === undefined) {
       buffer = new OutboundBuffer(
         plan.target,
-        this.bot,
+        this.textSender(),
         this.config.textChunkLimit,
         this.logger,
         this.shouldStream(plan),
@@ -194,6 +198,21 @@ class OutboundRouter {
       this.buffers.set(sessionId, buffer);
     }
     buffer.append(text);
+  }
+
+  /**
+   * buffer 降级静态发送时用的发送器。
+   *
+   * wakeupFallback 关闭（默认）时原样返回适配器，行为与上游一致；
+   * 开启时套一层，让流式降级后的静态分片也走同一套兜底（否则私聊开启流式时，
+   * 真正的正文分片走了 buffer，兜底只会覆盖非流式文本）。
+   */
+  private textSender(): QQBotSender {
+    if (this.config.wakeupFallback !== true) return this.bot;
+    return {
+      sendMarkdown: (target, content) => this.sendChunk(target, content, 'sendMarkdown'),
+      openStream: (target) => this.bot.openStream(target),
+    };
   }
 
   /** 被动回复且 c2c 有 msgId 才流式（群聊、主动推送均不流式） */
@@ -211,6 +230,32 @@ class OutboundRouter {
     this.streamAttempts.delete(sessionId);
     this.presentedFiles.delete(sessionId);
     this.presentedCalls.delete(sessionId);
+  }
+
+  /**
+   * Web/桌面端输入的用户消息镜像到 QQ（mirrorWeb，默认关闭）。
+   *
+   * 只镜像 TurnTracker 判定为 external 的来源：qq 来源在 QQ 端本来就有这条消息，
+   * internal 来源是宿主/插件自己注入的（schedule、notice、已回答的提问、每轮注入
+   * 的上下文、快捷按钮注入的编号与答案回显），镜像它们会刷屏或自激。
+   * 目标走 planFor：external 回合已置 forceProactive，不复用被动回复窗口；
+   * externalTurns 策略不允许推送、或不是 QQ 会话时 planFor 返回 undefined，自然跳过。
+   */
+  private mirrorUserMessage(
+    sessionId: string,
+    origin: MessageOrigin | undefined,
+    data: Record<string, unknown>,
+  ): void {
+    if (this.config.mirrorWeb !== true || !isMirrorableOrigin(origin)) return;
+    const plan = this.tracker.planFor(sessionId);
+    if (plan === undefined) return;
+    const text = extractUserMessageText(data);
+    if (text === undefined) return; // 仅附件等非文本消息不镜像
+
+    const mirror = formatMirrorWebText(text);
+    // 排在会话内前一笔在途文本之后：上一轮回复还在飞时，镜像不应抢在它前面
+    const prev = this.pendingText.get(sessionId) ?? Promise.resolve();
+    this.trackText(sessionId, prev.then(() => this.send(plan.target, mirror, 'sendMirrorWeb')));
   }
 
   /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
@@ -319,12 +364,56 @@ class OutboundRouter {
   private async send(target: ReplyTarget, text: string, tag: string): Promise<void> {
     const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
     for (const chunk of chunks) {
+      await this.sendChunk(target, chunk, tag);
+    }
+  }
+
+  /**
+   * 单条文本投递。
+   *
+   * wakeupFallback 关闭（默认）时与上游完全一致：只发一次，失败记 error 后放弃。
+   * 开启时补两档失败路径兜底：
+   *   1. 正常目标 —— 被动回复复用 msgId。注意上游 resolveReplyTarget 只在「发送
+   *      之前」按限额/cache TTL 预判降级，发送阶段被平台拒绝时不会重试；
+   *   2. 被动失败 → 置 forceProactive 去掉 msgId/eventId 主动重投一次；
+   *   3. 仍失败且 c2c → sendWakeup（30 天唤醒窗口，平台限频，仅私聊支持）。
+   */
+  private async sendChunk(target: ReplyTarget, content: string, tag: string): Promise<void> {
+    const fallback = this.config.wakeupFallback === true;
+    try {
+      await this.bot.sendMarkdown(target, content);
+      return;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      if (!fallback) {
+        this.logger.error(`im-qqbot: ${tag} failed: ${detail}`);
+        return;
+      }
+      // 还有兜底档：先 warn，error 留到所有档都失败时记一次
+      this.logger.warn(`im-qqbot: ${tag} failed: ${detail}`);
+    }
+
+    // 第二档：被动回复失败 → 主动投递（置 forceProactive，避免再粘上任何 msgId/eventId）
+    if (target.msgId !== undefined || target.eventId !== undefined) {
       try {
-        await this.bot.sendMarkdown(target, chunk);
+        await this.bot.sendMarkdown({ scope: target.scope, targetId: target.targetId, forceProactive: true }, content);
+        return;
       } catch (err) {
-        this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
+        this.logger.warn(`im-qqbot: ${tag} proactive retry failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+
+    // 第三档：唤醒消息兜底（仅私聊）
+    if (target.scope === 'c2c' && this.bot.sendWakeup !== undefined) {
+      try {
+        await this.bot.sendWakeup({ scope: target.scope, targetId: target.targetId }, content);
+        return;
+      } catch (err) {
+        this.logger.warn(`im-qqbot: ${tag} wakeup failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    this.logger.error(`im-qqbot: ${tag} failed after all fallbacks`);
   }
 }
 
