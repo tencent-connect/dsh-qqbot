@@ -427,3 +427,75 @@ describe('QuestionChannel.install routing', () => {
     expect(logger.warn).not.toHaveBeenCalled();
   });
 });
+
+describe('QuestionChannel.install 多实例（多 bot 共享一次 ask patch）', () => {
+  /** 每 bot 一个 manager：只认自己 appId 下的会话，sessionKey 带 appId */
+  function botRig(appId: string, peer: string, sessionId: string) {
+    const sent: SentMessage[] = [];
+    const record: QuestionSessionRecordLike = {
+      sessionKey: `qqbot:${appId}:c2c:${peer}`,
+      scope: 'c2c',
+      replyTarget: { scope: 'c2c', targetId: peer, msgId: 'm' },
+    };
+    (record as { sessionId?: string }).sessionId = sessionId;
+    const manager = createManager({
+      findBySessionId: (id) => (id === sessionId ? record : undefined),
+      getSessionRecord: (scope, p) => makeRecord(`qqbot:${appId}:${scope}:${p}`, scope),
+    });
+    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    return { ch, sent, peer };
+  }
+
+  it('第二个实例不会被幂等跳过：两个 bot 的会话各自路由到自己的 QQ 通道', async () => {
+    const a = botRig('app-a', 'ua', 'sess-a');
+    const b = botRig('app-b', 'ub', 'sess-b');
+    const orig = vi.fn(async () => ({ answers: [] }));
+    const uq = { ask: orig };
+    const ctx = { get: (n: string) => (n === 'userQuestions' ? uq : undefined) };
+    a.ch.install(ctx);
+    b.ch.install(ctx);
+
+    const pa = uq.ask({ questions: [q2()], agent: { id: 'sess-a' } });
+    await sleep(10);
+    expect(a.sent).toHaveLength(1);
+    expect(b.sent).toHaveLength(0);
+    expect(a.ch.tryAnswer('c2c', a.peer, '1')).toBe(true);
+    expect(await pa).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+
+    const pb = uq.ask({ questions: [q2()], agent: { id: 'sess-b' } });
+    await sleep(10);
+    expect(b.sent).toHaveLength(1);
+    expect(a.sent).toHaveLength(1);
+    expect(b.ch.tryAnswer('c2c', b.peer, '2')).toBe(true);
+    expect(await pb).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
+
+    expect(orig).not.toHaveBeenCalled(); // 两个 bot 的提问都没落回宿主默认界面
+  });
+
+  it('一个实例卸载不影响另一个；最后一个卸载才恢复原实现', async () => {
+    const a = botRig('app-a', 'ua', 'sess-a');
+    const b = botRig('app-b', 'ub', 'sess-b');
+    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
+      ask: async () => ({ answers: [] }),
+    };
+    const ctx = { get: (n: string) => (n === 'userQuestions' ? uq : undefined) };
+    a.ch.install(ctx);
+    b.ch.install(ctx);
+    const patchedAsk = uq.ask;
+
+    a.ch.uninstall();
+    expect(uq.__qqQuestionPatched).toBe(true); // 仍被 b 持有
+    expect(uq.ask).toBe(patchedAsk); // 未恢复原实现
+    const p = uq.ask({ questions: [q2()], agent: { id: 'sess-b' } });
+    await sleep(10);
+    expect(b.sent).toHaveLength(1);
+    b.ch.tryAnswer('c2c', b.peer, '1');
+    await p;
+
+    b.ch.uninstall();
+    expect(uq.__qqQuestionPatched).toBeUndefined();
+    expect(uq.ask).not.toBe(patchedAsk); // 原实现已恢复
+    // 恢复后 QQ 会话不再被截获：走回宿主原实现（此处即空结果）
+    expect(await uq.ask({ questions: [q2()], agent: { id: 'sess-b' } })).toEqual({ answers: [] });
+  });
+});
