@@ -17,9 +17,7 @@ function text(value: unknown, max = 1024): string {
 }
 function ownerIds(value: unknown): string[] {
   if (!Array.isArray(value)) throw new TypeError('QQ 命令名单无效');
-  const ids = [...new Set(value.map(id => text(id).trim()).filter(Boolean))];
-  if (ids.length > 100) throw new TypeError('Too many QQ owner identities');
-  return ids;
+  return [...new Set(value.map(id => text(id).trim()).filter(Boolean))];
 }
 function memberProfile(value: unknown): MemberProfile {
   const data = object(value);

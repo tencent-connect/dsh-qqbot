@@ -132,12 +132,35 @@ describe('membership persistence and pairing scope', () => {
     rmSync(blocked, { recursive: true });
     expect(service.beginClaimFromMessage('c2c', 'peer', code, 'sender', '小明').ok).toBe(true);
   });
-  it('rejects a legacy confirmation after its batch is closed', () => {
+  it('rejects redemption after the current batch ends without writing the whitelist', () => {
     const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
-    const result = service.startClaim(code, { openid: 'sender', nickname: '小明', scope: 'c2c', sceneName: '' });
     service.endPairCode(code, 'allow-c2c');
-    expect(service.applyClaim(result.nonce!)).toMatchObject({ ok: false });
+    expect(service.beginClaimFromMessage('c2c', 'peer', code, 'sender', '小明').ok).toBe(false);
     expect(service.pairStatus().allowC2c).toEqual([]);
+  });
+  it('returns earlier successes when a later manual write fails', () => {
+    const { service, store } = fixture();
+    const write = store.claimOwner.bind(store);
+    vi.spyOn(store, 'claimOwner').mockImplementation((openid, profile) => {
+      if (openid === 'blocked') throw new Error('disk full');
+      write(openid, profile);
+    });
+    expect(service.addManualMember('owner', 'first:Alice\nblocked:Bob\nlast:Carol')).toMatchObject({
+      ok: true, added: 2, results: [{ openid: 'first' }, { openid: 'last' }], errors: [{ input: 'blocked:Bob' }],
+    });
+    expect(fixture().store.ownerIds()).toEqual(['first', 'last']);
+  });
+  it('copies delimiter-containing nicknames without creating any extra authorization', () => {
+    const { service } = fixture();
+    const nickname = 'Alice,unexpected-id；"nickname"\nnext-line';
+    expect(service.addManualMember('owner', 'person').ok).toBe(true);
+    service.renameMember('person', nickname);
+    const copied = whitelistEntries(service.pairStatus().owners);
+    service.revokePair('person', 'owner');
+    expect(service.addManualMember('owner', copied)).toMatchObject({ ok: true, added: 1 });
+    expect(service.pairStatus().owners).toMatchObject([{ openid: 'person', nickname }]);
+    expect(service.addManualMember('owner', 'other:"unterminated,unexpected-id')).toMatchObject({ ok: false, added: 0 });
+    expect(service.store.ownerIds()).toEqual(['person']);
   });
   it.each(['owner', 'allow-c2c', 'allow-group'] as const)('can reimport copied %s entries with nicknames using lines or commas', purpose => {
     const { service } = fixture();
@@ -221,6 +244,6 @@ describe('membership persistence and pairing scope', () => {
     const { service } = fixture();
     updateProfileConfig({ access: { c2cMode: 'disabled', c2cAllow: ['keep'], groupMode: 'open', groupAllow: [], commandMode: 'disabled' } }, profile.dir);
     expect(service.addManualMember('allow-group', 'team').ok).toBe(true);
-    expect(readProfileAccess(undefined, profile.dir)).toMatchObject({ c2cMode: 'disabled', c2cAllow: ['keep'], commandMode: 'disabled' });
+    expect(readProfileAccess(undefined, profile.dir)).toMatchObject({ c2cMode: 'disabled', c2cAllow: ['keep'], groupMode: 'open', groupAllow: ['team'], commandMode: 'disabled' });
   });
 });

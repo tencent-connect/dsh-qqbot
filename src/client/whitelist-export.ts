@@ -1,12 +1,11 @@
 import type { ClaimedMember, PairPurpose } from '../shared/pairing-protocol.ts';
-import { PAIR_PURPOSE_LABEL } from '../shared/pairing-protocol.ts';
+import { formatWhitelistEntry, PAIR_PURPOSE_LABEL } from '../shared/pairing-protocol.ts';
 
 export function whitelistEntries(members: readonly ClaimedMember[]): string {
   const entries = new Map<string, string>();
   for (const { openid, nickname } of members) {
     if (entries.has(openid)) continue;
-    const name = nickname.trim();
-    entries.set(openid, name ? `${openid}:${name}` : openid);
+    entries.set(openid, formatWhitelistEntry(openid, nickname));
   }
   return [...entries.values()].join('\n');
 }

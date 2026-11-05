@@ -232,20 +232,21 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
       .then(({ config }) => {
         if (stopped || saveController.current !== null) return;
         const expected = pendingConfirmation.current;
-        if (expected !== null && config.appId === expected.appId && !matchesSavedConfig(config, expected)) {
-          setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
-          return;
-        }
-        pendingConfirmation.current = null;
+        const confirmed = expected !== null && matchesSavedConfig(config, expected);
+        if (confirmed || expected?.appId !== config.appId) pendingConfirmation.current = null;
         const current = draftRef.current ?? storedDraft();
         const sameAccount = current?.baseline.appId === config.appId;
         const hadDraft = current !== undefined && current !== null && sameAccount && isConfigDirty(current.baseline, current.form);
         const form = hadDraft ? rebaseConfig(current.baseline, current.form, config) : config;
+        const dirty = isConfigDirty(config, form);
         replaceDraft({ baseline: config, form });
-        setDraftNotice(hadDraft && isConfigDirty(config, form) ? '已保留未保存的修改，其余配置已更新。' : null);
+        setDraftNotice(hadDraft && dirty ? '已保留未保存的修改，其余配置已更新。' : null);
         setLoadError(null);
-        setResult(expected !== null && matchesSavedConfig(config, expected) && !isConfigDirty(config, form)
-          ? { kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' } : null);
+        if (dirty) setResult(null);
+        else if (confirmed) setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
+        else if (pendingConfirmation.current !== null) {
+          setResult({ kind: 'unconfirmed', message: '已读取当前配置，内容与上次保存的值不同。' });
+        } else setResult(null);
       })
       .catch((error: unknown) => {
         if (!stopped) setLoadError(error instanceof Error ? error.message : String(error));

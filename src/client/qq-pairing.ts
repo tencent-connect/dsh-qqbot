@@ -29,8 +29,7 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
     const load = (): void => { void fetchJson<PairStatusWire>(PAIR_STATUS_PATH, { cache: 'no-store' }).then((s) => { if (!stopped) { setStatus(s); setError(null); } }).catch((c: unknown) => {
       if (stopped) return;
       const msg = c instanceof Error ? c.message : '';
-      // 未绑定态该路由未注册（404）：当作"暂无"，不显示红色错误。
-      if (/404|未绑定|not found/i.test(msg)) { setStatus({ challenges: [], owners: [], allowC2c: [], allowGroup: [] }); setError(null); return; }
+      // The route may temporarily disappear during a reload. Keep the last successful snapshot.
       setError(msg || '读取认领状态失败');
     }); };
     load();
@@ -202,7 +201,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
         h(DisclosureRow, { title: `通过 OpenID 批量添加（非${purpose === 'allow-group' ? '群号' : ' QQ 号'}）`, icon: h(IconChevronDownOutlineRegular), open: manualOpen, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: () => setManualOpen(value => !value) },
         h('div', { className: 'imqq-pairManual' },
         h('p', { className: 'imqq-pairHint' }, '用户 OpenID 不是 QQ 号，群 OpenID 也不是群号，不能直接填写 QQ 号或群号。请使用当前机器人对应的 OpenID；没有 OpenID 时，请使用上方配对码添加。'),
-        h('p', { className: 'imqq-pairHint' }, '每行一个（也支持用逗号分隔）。格式：OpenID 或 OpenID:昵称。例如：'),
+        h('p', { className: 'imqq-pairHint' }, '每行一个 OpenID 或 OpenID:昵称。简单条目也可用逗号分隔；昵称含逗号时用双引号包住。'),
         h('pre', { className: 'imqq-pairExample' }, 'ABCD1234EFGH:小明\nWXYZ5678:Alice Zhang'),
         h('textarea', { className: 'imqq-pairTextarea', rows: 4, value: manualOpenid, disabled: busy, 'aria-label': `${title} openID 列表`, placeholder: 'OpenID 或 OpenID:昵称，每行一个；不能填写 QQ 号或群号', onChange: (e: { currentTarget: { value: string } }) => setManualOpenid(e.currentTarget.value) }),
         h('div', { className: 'imqq-pairToolbar' }, h(Button, { variant: 'outline', size: 'sm', disabled: busy || manualOpenid.trim() === '', onClick: () => { addManual(); } }, '添加'),

@@ -16,8 +16,7 @@ import {
   persistCredentialsToProfile,
   removeCredentialsFromProfile,
   updateProfileConfig,
-  readProfileAccess,
-  accessRevision,
+  readProfileAccessSnapshot,
   AccessConfigConflict,
   type SetupCredentials,
 } from './persist.ts';
@@ -155,6 +154,8 @@ export function registerBindRoutes(
     return persisted ? { persisted: true } : { persisted: false, error: '无法定位 profile 目录或写入失败，请改用环境变量配置' };
   };
   const handleManualSubmit = options.onManualCredentials ?? defaultManual;
+  let active = true;
+  const isActive = () => active;
 
   const disposers = [
     webServer.register({
@@ -170,7 +171,7 @@ export function registerBindRoutes(
     webServer.register({
       kind: 'exact',
       path: BIND_MANUAL_PATH,
-      handler: (req, res) => handleManual(req, res, handleManualSubmit),
+      handler: (req, res) => handleManual(req, res, handleManualSubmit, isActive),
     }),
     webServer.register({
       kind: 'exact',
@@ -180,11 +181,14 @@ export function registerBindRoutes(
     webServer.register({
       kind: 'exact',
       path: BIND_CONFIG_PATH,
-      handler: (req, res) => handleConfig(req, res, options),
+      handler: (req, res) => handleConfig(req, res, options, isActive),
     }),
   ];
   logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
-  return () => { for (const dispose of disposers) dispose(); };
+  return () => {
+    active = false;
+    for (const dispose of disposers) dispose();
+  };
 }
 
 /**
@@ -281,6 +285,7 @@ async function handleManual(
   req: IncomingMessage,
   res: ServerResponse,
   submit: (credentials: SetupCredentials) => ManualSubmitResult,
+  isActive: () => boolean,
 ): Promise<void> {
   if (!trusted(req)) {
     sendJson(res, 403, { error: 'forbidden' });
@@ -295,6 +300,10 @@ async function handleManual(
     body = await readJsonBody(req);
   } catch (err) {
     sendJson(res, 400, { ok: false, error: `invalid request body: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+  if (!isActive()) {
+    sendJson(res, 503, { ok: false, error: 'QQ 插件已重载，请刷新后重试。' });
     return;
   }
   const credentials = parseCredentials(body);
@@ -354,7 +363,12 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
  * - GET：回显当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）
  * - POST：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载
  */
-async function handleConfig(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): Promise<void> {
+async function handleConfig(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: BindRoutesOptions,
+  isActive: () => boolean,
+): Promise<void> {
   if (!trusted(req)) {
     sendJson(res, 403, { error: 'forbidden' });
     return;
@@ -369,10 +383,11 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     // Never return secrets or configuration belonging to the retired memory backend.
     const { appSecret: _s, memory: _retired, ...safe } = current;
     try {
-      const access = readProfileAccess(current.access, getProfileDir() ?? undefined);
-      sendJson(res, 200, { config: { ...safe, access, accessRevision: accessRevision(access) } });
-    } catch {
-      sendJson(res, 503, { error: '无法读取访问设置，请检查 profile 配置文件。' });
+      const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
+      const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
+      sendJson(res, 200, { config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
+    } catch (error) {
+      sendJson(res, 503, { error: error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。' });
     }
     return;
   }
@@ -382,6 +397,10 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
     body = await readJsonBody(req, MAX_CONFIG_BODY_BYTES);
   } catch (err) {
     sendJson(res, 400, { ok: false, error: `invalid request body: ${err instanceof Error ? err.message : String(err)}` });
+    return;
+  }
+  if (!isActive()) {
+    sendJson(res, 503, { ok: false, error: 'QQ 插件已重载，请刷新后重试。' });
     return;
   }
   if (typeof body !== 'object' || body === null) {
@@ -418,15 +437,17 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   let persisted: boolean;
   try {
-    const fallback = options.currentConfig?.().access;
-    const current = readProfileAccess(fallback, getProfileDir() ?? undefined);
-    if (validated.access !== undefined && submitted.accessRevision !== accessRevision(current)) {
+    const profileDir = getProfileDir() ?? undefined;
+    const current = options.currentConfig?.() ?? {};
+    const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
+    const { revision } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
+    if (validated.access !== undefined && submitted.accessRevision !== revision) {
       sendJson(res, 409, { ok: false, error: new AccessConfigConflict().message });
       return;
     }
     persisted = options.onUpdateConfig === undefined
-      ? updateProfileConfig(validated, getProfileDir() ?? undefined, undefined,
-        validated.access === undefined ? undefined : { revision: accessRevision(current), fallback })
+      ? updateProfileConfig(validated, profileDir, undefined,
+        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId })
       : options.onUpdateConfig(validated);
   } catch (error) {
     sendJson(res, error instanceof AccessConfigConflict ? 409 : 500,

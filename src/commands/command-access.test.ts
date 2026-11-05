@@ -10,6 +10,8 @@ import type { SlashCommandHandlerContext } from '@tencent-connect/qqbot-nodejs';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { MemberStore } from '../runtime/member-store.ts';
 
+vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => undefined }));
+
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
@@ -97,7 +99,7 @@ describe('QQ slash-command access modes', () => {
     config.access.c2cAllow = ['private-id'];
     store.claimOwner('group-id', { nickname: 'Test group', scene: 'c2c', sceneName: '', claimedAt: 0 });
     store.claimOwner('private-id', { nickname: 'Test user', scene: 'group', sceneName: '', claimedAt: 0 });
-    Object.assign(service, { pairing: { listClaimed: () => [], listChallenges: () => [] } });
+    Object.assign(service, { pairing: { listChallenges: () => [] } });
     const snapshot = service.pairStatus();
     expect(snapshot.allowGroup[0]?.scene).toBe('group');
     expect(snapshot.allowC2c[0]?.scene).toBe('c2c');

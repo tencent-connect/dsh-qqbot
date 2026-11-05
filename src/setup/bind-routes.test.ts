@@ -9,6 +9,7 @@ import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
@@ -22,7 +23,7 @@ import {
   type WebRoute,
 } from './bind-routes.ts';
 import type { BindingService } from './binding-service.ts';
-import { accessRevision, readProfileAccess, updateProfileConfig } from './persist.ts';
+import { accessRevision, persistCredentialsToProfile, readProfileAccess, updateProfileConfig } from './persist.ts';
 
 /** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
 const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -73,6 +74,7 @@ function createHarness(options: BindRoutesOptions = {}): {
   routes: Map<string, WebRoute>;
   service: { wireState: () => unknown; refresh: () => void };
   manualSubmits: unknown[];
+  dispose: () => void;
 } {
   const routes = new Map<string, WebRoute>();
   const webServer = {
@@ -94,11 +96,12 @@ function createHarness(options: BindRoutesOptions = {}): {
       return options.onManualCredentials?.(credentials) ?? { persisted: true };
     },
   };
-  registerBindRoutes(webServer, service, logger, wrappedOptions);
+  const dispose = registerBindRoutes(webServer, service, logger, wrappedOptions);
   return {
     routes,
     service: service as unknown as { wireState: () => unknown; refresh: () => void },
     manualSubmits,
+    dispose,
   };
 }
 
@@ -340,6 +343,69 @@ describe('bind-routes', () => {
     expect(res.statusCode).toBe(200);
     expect(json(res)).toMatchObject({ config: { appId: '102120114', requireMention: true, cwd: '/tmp/w', accessRevision: expect.any(String) } });
     expect(res.body).not.toMatch(/SECRET|retired.example/);
+  });
+
+  it.each([
+    [BIND_CONFIG_PATH, { requireMention: false }],
+    [BIND_MANUAL_PATH, { appId: 'stale-app', appSecret: 'test-secret' }],
+  ])('rejects a pending POST to %s after the route is disposed', async (path, body) => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes, dispose, manualSubmits } = createHarness({ onUpdateConfig });
+    const req = Object.assign(new PassThrough(), { method: 'POST', headers: { host: 'localhost' } });
+    const res = fakeRes();
+    const response = invoke(routes.get(path), req as unknown as IncomingMessage, res);
+    dispose();
+    req.end(JSON.stringify(body));
+    await response;
+
+    expect(res.statusCode).toBe(503);
+    expect(onUpdateConfig).not.toHaveBeenCalled();
+    expect(manualSubmits).toEqual([]);
+  });
+
+  it('rejects a previous account revision after credentials change even when the access settings match', async () => {
+    profileDirState.dir = mkdtempSync(join(tmpdir(), 'qq-access-rebind-'));
+    const initial = readProfileAccess(undefined);
+    expect(updateProfileConfig({ access: initial }, profileDirState.dir)).toBe(true);
+    const oldRoutes = createHarness({
+      boundAppId: () => 'old-app',
+      currentConfig: () => ({ appId: '__FROM_ENV__', appSecret: 'old-secret', access: initial }),
+    }).routes;
+    const read = async (routes: Map<string, WebRoute>) => {
+      const res = fakeRes();
+      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: 'localhost' }), res);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toMatch(/old-secret|new-secret/);
+      return JSON.parse(res.body).config;
+    };
+    const old = await read(oldRoutes);
+    expect(old.appId).toBe('old-app');
+    expect(persistCredentialsToProfile({ appId: 'new-app', appSecret: 'new-secret' }, profileDirState.dir)).toBe(true);
+    const staleSave = fakeRes();
+    await invoke(oldRoutes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+      access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
+    })), staleSave);
+    expect(staleSave.statusCode).toBe(409);
+    expect(readProfileAccess(initial, profileDirState.dir)).toEqual(initial);
+
+    const { routes } = createHarness({
+      boundAppId: () => 'new-app',
+      currentConfig: () => ({ appId: 'new-app', appSecret: 'new-secret', access: initial }),
+    });
+    const fresh = await read(routes);
+    expect(fresh.appId).toBe('new-app');
+    expect(fresh.accessRevision).not.toBe(old.accessRevision);
+    const staleNewRoute = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+      access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
+    })), staleNewRoute);
+    expect(staleNewRoute.statusCode).toBe(409);
+    const freshSave = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+      access: { ...fresh.access, commandMode: 'disabled' }, accessRevision: fresh.accessRevision,
+    })), freshSave);
+    expect(freshSave.statusCode).toBe(200);
+    expect(readProfileAccess(initial, profileDirState.dir).commandMode).toBe('disabled');
   });
 
   it('POST config：白名单内合法值通过并触发合并写入', async () => {
