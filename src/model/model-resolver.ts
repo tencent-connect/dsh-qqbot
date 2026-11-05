@@ -18,6 +18,7 @@ import type { Logger } from '../types.ts';
 import type { ModelRoute, ModelEntry } from './types.ts';
 import { PrefsStore } from './prefs-store.ts';
 import { SettingsReader } from './settings-reader.ts';
+import { resolvePrefsPath } from '../shared/dirs.ts';
 
 /** ctx.llm 服务的最小接口（listProviders 同步，listModels 异步） */
 interface LlmServiceLike {
@@ -32,17 +33,30 @@ export class ModelResolver {
   private readonly config: ImQQBotConfig;
   private readonly logger?: Logger;
 
+  /**
+   * @param prefsPath per-bot 偏好文件路径（多 bot 模式由 bootstrap 传入）。
+   *   缺省按 config 自派生（同一规则：单 bot → undefined 走 legacy 共享路径），
+   *   因此漏传也不会静默回落到共享文件而丢掉 per-bot 隔离。
+   */
   constructor(
     ctx: Context,
     config: ImQQBotConfig,
     logger?: Logger,
+    prefsPath?: string,
   ) {
     this.ctx = ctx;
     this.config = config;
     this.logger = logger;
+    // 注意：PrefsStore 第二参是 options 对象（{ path, onError }），**不是**路径字符串。
+    // 传字符串不会报错，只会让 options.path 为 undefined → 静默回落共享
+    // PLUGIN_HOME/model-prefs.json，多 bot 隔离失效（见 prefs-store.ts:55）。
+    const path = prefsPath ?? resolvePrefsPath(config.appId, config.multiBot);
     this.prefs = new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
-      { onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`) },
+      {
+        ...(path === undefined ? {} : { path }),
+        onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`),
+      },
     );
     this.settings = new SettingsReader();
   }

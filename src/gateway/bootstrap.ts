@@ -19,7 +19,7 @@ import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
-import { buildUserAgent } from '../shared/index.ts';
+import { buildUserAgent, resolvePrefsPath } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
@@ -49,7 +49,12 @@ export async function bootstrapGateway(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
-  const manager = new SessionManager(ctx, agents, config, logger);
+  // 多 bot 模式：本实例状态文件命名空间（单 bot 为 undefined → 落 legacy 共享路径，
+  // 存量用户数据零迁移）。sessionKey/history 本就带 appId，唯一需要命名空间的
+  // 共享可变资源是 prefs 文件：per-appId 之后「实例持有该会话」的判定
+  // （manager.findBySessionId + 各自 prefs）即天然完成全局事件流的归属过滤。
+  const prefsPath = resolvePrefsPath(config.appId, config.multiBot);
+  const manager = new SessionManager(ctx, agents, config, logger, prefsPath);
 
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs) });
@@ -183,19 +188,30 @@ export async function bootstrapGateway(
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
 
-  // ── 富媒体过期清理 ──
-  if (config.media.enabled) {
-    startMediaCleanup(ctx, config.media.ttlHours, logger);
+  // ── 进程级全局注册：仅 primary 实例执行 ──
+  // 媒体清理定时器、视觉 modal、qqbot_* 工具都挂在宿主共享注册表上，多实例
+  // 重复注册会撞名（同名工具重复注册），而媒体目录与视觉描述本身与 bot 身份无关。
+  // 已知限制：qqbot_send_file 绑定 primary 的 sender，多 bot 下其他 bot 的会话
+  // 调用该工具会经 primary 出站（正确路由需要 per-session 实例注册表，见 README）。
+  if (config.primaryBot !== false) {
+    // ── 富媒体过期清理 ──
+    if (config.media.enabled) {
+      startMediaCleanup(ctx, config.media.ttlHours, logger);
+    }
+
+    // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
+    ensureVisionInputModal(config.vision, logger);
+    registerDescribeImageTool(ctx, config.vision, logger);
+
+    // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
+    registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker);
   }
 
-  // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
-  ensureVisionInputModal(config.vision, logger);
-  registerDescribeImageTool(ctx, config.vision, logger);
-
-  // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker);
-
   // ── 生命周期 ──
+  // effect 名按实例区分：cordis 的 label 只用于诊断/卸载追踪，但同 fiber 内多个
+  // 实例挂同名生命周期会让「谁 start/stop 了哪个 bot」在日志与 fiber 元数据里
+  // 无法区分。单 bot 保留原名（不产生任何可观察差异）。
+  const lifecycleName = config.multiBot === true ? `im-qqbot.lifecycle:${config.appId}` : 'im-qqbot.lifecycle';
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
       logger.info(`Starting bot (appId=${config.appId})`);
@@ -208,5 +224,5 @@ export async function bootstrapGateway(
         await manager.disposeAll();
         bot.stop();
       };
-    }, 'im-qqbot.lifecycle');
+    }, lifecycleName);
 }

@@ -95,10 +95,11 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 |------|------|--------|------|
 | `appId` | string | **必填** | QQ Bot AppID（或通过 `QQBOT_APPID` 环境变量） |
 | `appSecret` | string | **必填** | QQ Bot AppSecret（或通过 `QQBOT_SECRET` 环境变量） |
+| `bots` | array | `[]` | 多 Bot 列表 `[{appId, appSecret}, …]`，与上方单字段合并去重；总数 ≥2 进入多实例模式（见下节） |
 | `provider` | string | `deepseek-official` | LLM 提供商名称 |
 | `model` | string | `deepseek-chat` | 模型名称 |
 | `preset` | string | - | Agent preset id |
-| `cwd` | string | `process.cwd()` | Agent 工作目录 |
+| `cwd` | string | `~/.dsh-qqbot/workspace` | Agent 工作目录（多 bot 时各实例共用同一目录，见「多 Bot」一节） |
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
@@ -154,6 +155,24 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 |------|------|--------|------|
 | `sendFile.restrictPaths` | boolean | `true` | 是否启用路径白名单（仅 media + cwd + extraRoots） |
 | `sendFile.extraRoots` | string[] | `[]` | 额外允许访问的根目录 |
+
+## 多 Bot（一个 dsh 同时服务多个 QQ Bot）
+
+```yaml
+im-qqbot:
+  bots:
+    - appId: "100000001"
+      appSecret: "…"   # 正式号
+    - appId: "100000002"
+      appSecret: "…"   # 测试号
+```
+
+- 每个 bot 一套独立网关连接 + 独立的 `SessionManager`；会话键本就含 appId（`qqbot:<appId>:<scope>:<peerId>`），跨 bot 会话天然隔离。
+- **per-peer 模型/preset 偏好按实例命名空间**：多 bot 时落 `~/.dsh-qqbot/bots/<appId>/model-prefs.json`；单 bot（含仅配 legacy `appId`/`appSecret`）沿用 `~/.dsh-qqbot/model-prefs.json`，存量数据零迁移。
+- 出站/问答/审批对宿主事件流的订阅是全局的，但每个实例先做归属判定（`findBySessionId` + 自己的 prefs），只有持有该会话的实例处理，双实例不会双发。
+- 进程级全局注册（`qqbot_describe_image` / `qqbot_send_file` 工具、视觉 modal、媒体过期清理）只由**首位实例**执行；生命周期 effect 名按 appId 区分（`im-qqbot.lifecycle:<appId>`）。
+- **工作目录取舍**：各实例共用同一个 `cwd`（默认 `~/.dsh-qqbot/workspace`）。会话本身不冲突（不同 bot 的会话是不同 session），但多个 bot 会看到同一份文件、写进同一个目录——如需物理隔离，请自行在 `cwd` 指向的目录之外管理，或按 bot 起多个 profile。当前不支持 per-bot `cwd`。
+- 已知限制：① 非凭据类配置（prompt/白名单/模型默认/工作目录）全 bot 共享；② `qqbot_send_file` 工具绑定首位实例的出站发送器，其他 bot 会话调用时会经首位 bot 发送；③ msgId 缓存键未含 appId（QQ openid 按 app 隔离，实际不冲突，属防御性 TODO）；④ 扫码绑定只覆盖 legacy 槽位，新增 bot 需手工写 `bots[]`；⑤ 每个 bot 一条 WebSocket 连接，受官方 per-app 与并发连接限制约束。
 
 ## 内置命令
 

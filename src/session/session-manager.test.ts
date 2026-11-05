@@ -19,6 +19,9 @@ const env = vi.hoisted(() => ({ home: '' }));
 vi.mock('../shared/dirs.ts', () => ({
   get PLUGIN_HOME() { return env.home; },
   resolveAgentCwd: (cwd: string | undefined) => cwd || `${env.home}/workspace`,
+  // 多 bot 命名空间派生：与 dirs.ts 同规则（单 bot → undefined 走 legacy 共享路径）
+  resolvePrefsPath: (appId: string, multiBot: boolean | undefined) =>
+    (multiBot === true ? `${env.home}/bots/${appId}/model-prefs.json` : undefined),
 }));
 
 const { SessionManager } = await import('./session-manager.ts');
