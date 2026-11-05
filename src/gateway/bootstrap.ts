@@ -138,7 +138,8 @@ export async function bootstrapGateway(
     }, { global: true });
 
   // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
-  const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
+  // 入站登记与出站共享：答案回显注入的用户消息要登记，出站才认领回合归属。
+  const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker, qqInputs);
   manager.questionChannel = questionChannel;
   questionChannel.install(ctx);
 

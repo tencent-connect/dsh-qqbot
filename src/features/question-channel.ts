@@ -17,8 +17,10 @@
  *     QQ 端输入回归常规消息流）。
  *   - QQ 投递失败/超时不影响 Web 作答；Web provider 失败不影响 QQ 作答；
  *     两端都失败才整体拒绝。
+ *   - 答案回显：定案答案作为用户消息写回会话日志（不改工具结果语义）。
  *   - 关闭时（单测直构默认关闭）保持 QQ 单端行为。
  */
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
@@ -76,6 +78,10 @@ export interface QuestionSessionRecordLike {
   sessionKey: string;
   scope: ChatScope;
   replyTarget: ReplyTarget;
+  /** 会话 id（答案回显定位活跃记录用；活跃 SessionRecord 天然携带） */
+  sessionId?: string;
+  /** 活跃记录的宿主 agent（答案回显写日志用；运行时才判定是否支持 inject） */
+  agent?: unknown;
 }
 
 export interface QuestionChannelManagerLike {
@@ -86,6 +92,11 @@ export interface QuestionChannelManagerLike {
    * 桥接会话（无活跃记录）用；缺省时不做桥接。
    */
   deliveryAddress?(sessionId: string): ReplyTarget | undefined;
+}
+
+/** 入站登记（QqInputRegistry 的最小契约）：注入的用户消息必须登记，出站才认领回合归属 */
+export interface QuestionChannelInputsLike {
+  register(messageId: string): void;
 }
 
 export interface QuestionChannelSenderLike {
@@ -132,6 +143,39 @@ function bridgePendingKey(scope: ChatScope, peerId: string): string {
   return `bridge:${scope}:${peerId}`;
 }
 
+/** 取 agent 的 inject 能力（绑定后调用）；不支持时返回 undefined（fail-soft） */
+function injectableOf(agent: unknown): ((message: unknown) => unknown) | undefined {
+  if (agent === null || typeof agent !== 'object') return undefined;
+  const inject = (agent as InjectableAgent).inject;
+  return typeof inject === 'function' ? inject.bind(agent) : undefined;
+}
+
+/**
+ * 把作答结果渲染成可读文本（答案回显用）：
+ * 单题直接给答案值；多题时逐行「问题头: 答案」。空答案返回 undefined。
+ */
+export function renderAnswerText(
+  questions: readonly UserQuestion[],
+  result: UserQuestionResult,
+): string | undefined {
+  const lines: string[] = [];
+  for (const ans of result.answers) {
+    const parts: string[] = [];
+    if (ans.selected.length > 0) parts.push(...ans.selected);
+    if (ans.custom) parts.push(ans.custom);
+    const value = parts.join('；');
+    if (!value) continue;
+    if (result.answers.length > 1) {
+      const q = questions.find((x) => x.id === ans.id);
+      lines.push(`${q?.header ?? q?.question ?? ans.id}: ${value}`);
+    } else {
+      lines.push(value);
+    }
+  }
+  const text = lines.join('\n').trim();
+  return text || undefined;
+}
+
 interface PendingEntry {
   record: QuestionSessionRecordLike;
   /** 提问时本回合的投递目标（首题与超时提示用；用户作答后的后续题被动回复其作答） */
@@ -156,9 +200,12 @@ export class QuestionChannel {
   private readonly config: QuestionChannelConfigLike;
   private readonly logger: Logger;
   private readonly targets: DeliveryTargetResolver | undefined;
+  private readonly inputs: QuestionChannelInputsLike | undefined;
 
   /**
    * @param targets 回合投递目标解析（与出站共享）。缺省时按会话 replyTarget 被动回复。
+   * @param inputs 入站登记（与入站/出站共享）。答案回显注入的用户消息必须登记，
+   *   出站才把它认领为本回合的 QQ 输入，不会误判成外部回合。缺省时跳过登记。
    */
   public constructor(
     manager: QuestionChannelManagerLike,
@@ -166,12 +213,14 @@ export class QuestionChannel {
     config: QuestionChannelConfigLike,
     logger: Logger,
     targets?: DeliveryTargetResolver,
+    inputs?: QuestionChannelInputsLike,
   ) {
     this.manager = manager;
     this.sender = sender;
     this.config = config;
     this.logger = logger;
     this.targets = targets;
+    this.inputs = inputs;
   }
 
   /**
@@ -334,6 +383,7 @@ export class QuestionChannel {
         detachForward();
         linked.abort(); // 宿主 provider 广播 question/resolved(cancelled)，Web 卡片撤下
         webPromise.catch(() => undefined); // 吞掉随之而来的 ASK_ABORTED
+        this.echoAnswer(record, request, qqResult, 'qq');
         resolve(qqResult);
       });
 
@@ -342,6 +392,7 @@ export class QuestionChannel {
         settled = true;
         detachForward();
         this.releaseQqPending(record.sessionKey);
+        this.echoAnswer(record, request, webResult, 'web');
         resolve(webResult);
       }).catch((err: unknown) => {
         webAlive = false;
@@ -363,6 +414,41 @@ export class QuestionChannel {
   }
 
   /**
+   * 答案回显：把定案答案作为用户消息写回会话日志（`agent.inject`——记录进
+   * 当前回合的下一 step，不唤起新回合）。答案此前只存在于工具结果里，两端
+   * 转录都看不到「用户说了什么」；回显后 Web 转录出现这条答案气泡。
+   *
+   * 注入的消息按 Message.id 登记为本插件入站：出站据此认领回合归属，
+   * 回复仍走常规（被动）路径，不会被判成外部回合再推回 QQ。
+   * Fail-soft：agent 缺失或不支持 inject 时静默跳过，注入失败只记日志，
+   * 绝不影响答案本身。
+   */
+  private echoAnswer(
+    record: QuestionSessionRecordLike,
+    request: UserQuestionRequest,
+    result: UserQuestionResult,
+    origin: 'qq' | 'web',
+  ): void {
+    try {
+      const text = renderAnswerText(request.questions, result);
+      if (!text) return;
+      // 活跃记录优先；桥接会话没有 agent，跳过回显（答案仍照常定案）
+      const live = record.sessionId ? this.manager.findBySessionId(record.sessionId) : undefined;
+      const inject = injectableOf(live?.agent ?? record.agent);
+      if (!inject) return;
+      const message = createUserMessage({
+        content: [{ type: 'text' as const, text }],
+        source: { kind: 'user' as const },
+      });
+      this.inputs?.register(String(message.id));
+      inject(message);
+      this.logger.info(`im-qqbot: answer echoed into session log origin=${origin} text="${text.slice(0, 60)}"`);
+    } catch (err) {
+      this.logger.warn(`im-qqbot: answer echo failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
    * 桥接投递目标：会话没有活跃记录时，按会话解析 QQ 地址（prefs 的 sessionId
    * 反向索引）。有回合跟踪时再套一层策略判定——本回合按策略不投递到 QQ
    * （如 externalTurns=off），就不要把问题单边推到 QQ。
@@ -374,6 +460,7 @@ export class QuestionChannel {
     if (!target) return undefined;
     const record: QuestionSessionRecordLike = {
       sessionKey: bridgePendingKey(address.scope, address.targetId),
+      sessionId,
       scope: address.scope,
       replyTarget: target,
     };
