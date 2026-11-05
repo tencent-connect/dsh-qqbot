@@ -28,6 +28,10 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
     expect(cfg.sessionIdleTimeout).toBe(30 * 60 * 1000);
   });
 
+  it('提问双端同步默认开启', () => {
+    expect(ConfigSchema({}).questionSync).toBe(true);
+  });
+
   it.each([
     [{}, 'c2c'],
     [{ proactiveDelivery: {} }, 'c2c'],

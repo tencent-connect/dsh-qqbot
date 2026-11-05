@@ -95,6 +95,8 @@ export interface ImQQBotConfig {
   processingTimeoutMs: number;
   /** 待答问题超时(ms)，超时自动拒绝并提示（ask_user_question） */
   askTimeoutMs: number;
+  /** 提问双端同步：QQ 会话的 ask_user_question 同时投 QQ 与 Web，先答先得 */
+  questionSync: boolean;
   /** 群历史缓冲条数 */
   historyLimit: number;
   /** 访问控制 */
@@ -137,6 +139,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
+  questionSync: Schema.boolean().default(true).description('提问双端同步：QQ 会话的 ask_user_question 同时投 QQ 与 Web，先答先得'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
   access: AccessControlSchema.default({
     c2cMode: 'open',
