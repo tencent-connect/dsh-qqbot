@@ -6,7 +6,7 @@ import { ConfigSchema } from '../config.ts';
 import { MemberStore } from './member-store.ts';
 import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
-import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
+import { persistCredentialsToProfile, readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { whitelistEntries } from '../client/whitelist-export.ts';
 import * as files from '../shared/atomic-file.ts';
 
@@ -246,4 +246,17 @@ describe('membership persistence and pairing scope', () => {
     expect(service.addManualMember('allow-group', 'team').ok).toBe(true);
     expect(readProfileAccess(undefined, profile.dir)).toMatchObject({ c2cMode: 'disabled', c2cAllow: ['keep'], groupMode: 'open', groupAllow: ['team'], commandMode: 'disabled' });
   });
+});
+
+it('rejects an old account even when the replacement keeps the same conversation lists', () => {
+  const { service } = fixture();
+  expect(persistCredentialsToProfile({ appId: service.config.appId, appSecret: 'fixture' }, profile.dir!, service.logger)).toBe(true);
+  expect(service.addManualMember('allow-c2c', 'peer').ok).toBe(true);
+  expect(service.addManualMember('allow-group', 'team').ok).toBe(true);
+  expect(service.allowsConversation('c2c', 'peer')).toBe(true);
+  expect(service.allowsConversation('group', 'team')).toBe(true);
+  expect(persistCredentialsToProfile({ appId: 'replacement', appSecret: 'fixture' }, profile.dir!, service.logger)).toBe(true);
+  expect(readProfileAccess(undefined, profile.dir, 'replacement')).toMatchObject({ c2cAllow: ['peer'], groupAllow: ['team'] });
+  expect(() => service.allowsConversation('c2c', 'peer')).toThrow();
+  expect(() => service.allowsConversation('group', 'team')).toThrow();
 });

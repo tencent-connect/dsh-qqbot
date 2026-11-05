@@ -3,12 +3,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QQBot, runMiddlewareChain, type Middleware, type MiddlewareContext, type QQBotInboundMessage } from '@tencent-connect/qqbot-nodejs';
-import { ConfigSchema } from '../config.ts';
+import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { MemberStore } from '../runtime/member-store.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { PairingService } from '../runtime/pairing-service.ts';
 import type { SessionManager } from '../session/index.ts';
 import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
+import { handleInbound } from '../transport/inbound.ts';
+import { QqInputRegistry } from '../transport/qq-input-origin.ts';
+import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -18,7 +21,7 @@ afterEach(() => {
   profile.dir = undefined;
 });
 
-function fixture() {
+function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, config: ImQQBotConfig) => Promise<void>) {
   profile.dir = mkdtempSync(join(tmpdir(), 'qq-pair-admission-'));
   const config = ConfigSchema({ appId: '12345', appSecret: 'fixture', access: {
     c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'disabled',
@@ -60,10 +63,12 @@ function fixture() {
       abort(reason) { controller.abort(reason); this.stop(reason); },
       get aborted() { return controller.signal.aborted; },
     };
-    if (await runMiddlewareChain(chain, context)) agent();
+    if (await runMiddlewareChain([...chain, async ctx => {
+      await onInbound?.(ctx, manager, config);
+    }], context)) agent();
     return context;
   }
-  return { service, store, send, agent, receive, expire: () => { now += 11 * 60_000; } };
+  return { service, store, send, agent, receive, logger, expire: () => { now += 11 * 60_000; } };
 }
 
 describe('pairing before conversation admission', () => {
@@ -164,4 +169,59 @@ describe('pairing before conversation admission', () => {
     expect(readProfileAccess(undefined, profile.dir).groupAllow).toEqual(['team']);
     expect(f.agent).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])('rechecks admission before handing a queued message to Inbox (group=%s)', async group => {
+  const followup = vi.fn();
+  const held = Promise.withResolvers<void>();
+  const inputs = new QqInputRegistry({ ledger: new DeliveryLedger() });
+  const f = fixture(async (ctx, manager, config) => {
+    manager.getOrCreate = async () => ({
+      sessionId: 'session',
+      agent: { followup, whenIdle: () => ctx.message.content === 'hold' ? held.promise : Promise.resolve() },
+    }) as never;
+    await handleInbound(ctx, manager, config, ctx.log, inputs, target =>
+      manager.accountAccess!.allowsConversation(target.scope, target.targetId));
+  });
+  const purpose = group ? 'allow-group' : 'allow-c2c';
+  const peer = group ? 'team' : 'sender';
+  expect(f.service.addManualMember(purpose, peer).ok).toBe(true);
+  const first = f.receive('hold', { group, mentioned: group });
+  let queued: ReturnType<typeof f.receive> | undefined;
+  try {
+    await vi.waitFor(() => expect(followup).toHaveBeenCalledOnce());
+    queued = f.receive('pending-after-revoke', { group, mentioned: group });
+    await vi.waitFor(() => expect(f.logger.debug).toHaveBeenCalledWith(expect.stringContaining('[concurrency] queued message')));
+    expect(f.service.revokePair(peer, purpose).ok).toBe(true);
+  } finally {
+    held.resolve();
+    await Promise.all([first, queued]);
+  }
+  expect(followup).toHaveBeenCalledOnce();
+});
+
+it('checks live admission again if access changes while the Session is opening', async () => {
+  const opening = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const followup = vi.fn();
+  const inputs = new QqInputRegistry({ ledger: new DeliveryLedger() });
+  const f = fixture(async (ctx, manager, config) => {
+    manager.getOrCreate = async () => {
+      opening.resolve();
+      await resume.promise;
+      return { sessionId: 'session', agent: { followup, whenIdle: async () => {} } } as never;
+    };
+    await handleInbound(ctx, manager, config, ctx.log, inputs, target =>
+      manager.accountAccess!.allowsConversation(target.scope, target.targetId));
+  });
+  expect(f.service.addManualMember('allow-c2c', 'sender').ok).toBe(true);
+  const pending = f.receive('delayed open');
+  try {
+    await opening.promise;
+    expect(f.service.revokePair('sender', 'allow-c2c').ok).toBe(true);
+  } finally {
+    resume.resolve();
+    await pending;
+  }
+  expect(followup).not.toHaveBeenCalled();
 });

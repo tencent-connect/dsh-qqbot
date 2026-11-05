@@ -337,9 +337,9 @@ describe('native Inbox submission', () => {
     const followup = vi.fn();
     const manager = { getOrCreate: vi.fn(async () => ({ sessionId: 'native-session', agent: { followup, whenIdle: async () => {} } })) } as unknown as SessionManager;
     const config = { appId: 'synthetic-app' } as ImQQBotConfig;
-    const ctx = { message: { kind: group ? 'group' : 'c2c', senderId: 'synthetic-member', content: 'request', messageId: 'platform-message', groupOpenid: group ? 'synthetic-group' : undefined }, state: {}, bot: { sendMarkdown: vi.fn() } } as unknown as MiddlewareContext;
-    await handleInbound(ctx, manager, config, logger, new QqInputRegistry({ ledger: new DeliveryLedger(file) }));
-    await handleInbound(ctx, manager, config, logger, new QqInputRegistry({ ledger: new DeliveryLedger(file) }));
+    const ctx = { message: { kind: group ? 'group' : 'c2c', senderId: 'synthetic-member', content: 'request', messageId: 'platform-message', groupOpenid: group ? 'synthetic-group' : undefined }, state: {}, signal: new AbortController().signal, bot: { sendMarkdown: vi.fn() } } as unknown as MiddlewareContext;
+    await handleInbound(ctx, manager, config, logger, new QqInputRegistry({ ledger: new DeliveryLedger(file) }), () => true);
+    await handleInbound(ctx, manager, config, logger, new QqInputRegistry({ ledger: new DeliveryLedger(file) }), () => true);
     expect(manager.getOrCreate).toHaveBeenCalledTimes(1); expect(followup).toHaveBeenCalledTimes(1);
     const message = followup.mock.calls[0]?.[0];
     const receipt = new DeliveryLedger(file).claimInput(String(message.id), 'native-session', message.content, 1);
@@ -350,7 +350,36 @@ describe('native Inbox submission', () => {
   it('missing platform identities are not admitted', async () => {
     const manager = { getOrCreate: vi.fn() } as unknown as SessionManager;
     const ctx = { message: { kind: 'group', senderId: 'user', messageId: '', content: 'bad input' } } as unknown as MiddlewareContext;
-    await handleInbound(ctx, manager, {} as ImQQBotConfig, logger, new QqInputRegistry({ ledger: new DeliveryLedger() }));
+    await handleInbound(ctx, manager, {} as ImQQBotConfig, logger, new QqInputRegistry({ ledger: new DeliveryLedger() }), () => true);
     expect(manager.getOrCreate).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])('does not re-send a file or report a new failure on replay (unknown=%s)', async unknown => {
+  const root = directory();
+  const file = join(root, 'report.txt');
+  writeFileSync(file, 'synthetic artifact');
+  const journal = join(root, 'journal.jsonl');
+  const claim = { turn: 1, callId: 'present', files: [{ path: file }] };
+  const end = { turn: 1, reason: { kind: 'completed' } };
+  const first = setup({ file: journal });
+  if (unknown) first.media.sendFile.mockRejectedValueOnce(new Error('QQ response lost'));
+  first.input();
+  first.emit('deliverables/presented', claim);
+  first.emit('turn/end', end);
+  await first.deliveryFinished;
+  expect(first.media.sendFile).toHaveBeenCalledOnce();
+  if (unknown) {
+    expect(first.bot.sendMarkdown).toHaveBeenCalledExactlyOnceWith(expect.anything(), expect.stringContaining('未能直接发送'), undefined);
+  } else {
+    expect(first.bot.sendMarkdown).not.toHaveBeenCalled();
+  }
+
+  const restarted = setup({ file: journal });
+  restarted.input();
+  restarted.emit('deliverables/presented', claim);
+  restarted.emit('turn/end', end);
+  await restarted.deliveryFinished;
+  expect(restarted.media.sendFile).not.toHaveBeenCalled();
+  expect(restarted.bot.sendMarkdown).not.toHaveBeenCalled();
 });

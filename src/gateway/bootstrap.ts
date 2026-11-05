@@ -14,20 +14,18 @@ import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
 import { cacheMsgId, cacheEventId } from '../transport/msgid-cache.ts';
-import { resolveReplyTarget, sendResolvedMarkdown } from '../transport/reply-target.ts';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
-import { buildUserAgent, getProfileDir } from '../shared/index.ts';
+import { buildUserAgent } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
-import type { ChatScope, Logger } from '../types.ts';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
-import { createDeliveryMedia, openDeliveryStream } from '../transport/qq-delivery.ts';
+import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import { readProfileAccess } from '../setup/persist.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { registerAccountRoutes } from '../runtime/account-routes.ts';
 import { describeCommands } from '../commands/index.ts';
@@ -60,24 +58,23 @@ export async function bootstrapGateway(
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
 
-  manager.accountAccess = new AccountAccessService(config, logger);
-  registerAccountRoutes(ctx, manager.accountAccess, () => describeCommands({manager, config, logger}));
+  const accountAccess = new AccountAccessService(config, logger);
+  manager.accountAccess = accountAccess;
+  registerAccountRoutes(ctx, accountAccess, () => describeCommands({manager, config, logger}));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
   let active = true;
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
-  const turnTracker = createTurnTracker(manager, config, logger, qqInputs, target => {
+  const allowTarget = (target: ReplyTarget) => {
     if (!active) return false;
     try {
-      const access = readProfileAccess(config.access, getProfileDir() ?? undefined);
-      const mode = target.scope === 'group' ? access.groupMode : access.c2cMode;
-      const allow = target.scope === 'group' ? access.groupAllow : access.c2cAllow;
-      return mode === 'open' || (mode === 'allowlist' && allow.includes(target.targetId));
+      return accountAccess.allowsConversation(target.scope, target.targetId);
     } catch {
-      logger.warn('im-qqbot: access settings unavailable; QQ delivery denied');
+      logger.warn('im-qqbot: access settings unavailable; QQ conversation denied');
       return false;
     }
-  });
+  };
+  const turnTracker = createTurnTracker(manager, config, logger, qqInputs, allowTarget);
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -103,7 +100,7 @@ export async function bootstrapGateway(
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(mCtx, manager, config, logger, qqInputs);
+    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget);
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──
@@ -119,7 +116,7 @@ export async function bootstrapGateway(
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
   const sender: QQBotSender = guardSender({
-    sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),
+    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyLimiter, target, content, opts),
     openStream: (target) => openDeliveryStream(bot, target, logger),
   }, ledger);
 

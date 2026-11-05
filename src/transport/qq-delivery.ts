@@ -1,4 +1,4 @@
-import { ApiError, MediaFileType, StreamSession, type QQBot } from '@tencent-connect/qqbot-nodejs';
+import { ApiError, MediaFileType, MsgType, StreamSession, type InlineKeyboard, type QQBot } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MediaApi, MessageApi, type RequestOptions } from '@tencent-connect/qqbot-nodejs/protocol';
 import type { MediaSenderLike } from '../media/send-media.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
@@ -16,6 +16,26 @@ class CheckedApiClient extends ApiClient {
     this.check();
     return this.client.request<T>(token, method, path, body, options);
   }
+}
+
+export function sendDeliveryMarkdown(
+  bot: QQBot,
+  limiter: ReplyLimiter,
+  target: ReplyTarget,
+  content: string,
+  opts?: { keyboard?: InlineKeyboard },
+) {
+  const reply = resolveReplyTarget(target, limiter, true);
+  const client = new CheckedApiClient(bot.apiClient, () => assertDeliveryAllowed(target));
+  const api = new MessageApi(client, bot.tokenManager, { markdownSupport: true });
+  api.onMessageSent((ref, meta) => bot.messageApi.notifyMessageSent(ref, meta));
+  return api.sendRaw(reply.scope, reply.targetId, bot.getCredentials(), {
+    msg_id: reply.msgId,
+    event_id: reply.eventId,
+    msg_type: MsgType.MARKDOWN,
+    markdown: { content },
+    keyboard: opts?.keyboard,
+  });
 }
 
 export function openDeliveryStream(bot: QQBot, target: ReplyTarget, logger: Logger): StreamSessionLike {
