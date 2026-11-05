@@ -37,4 +37,16 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
   ])('proactiveDelivery.externalTurns：%j → %s', (input, expected) => {
     expect(ConfigSchema(input).proactiveDelivery.externalTurns).toBe(expected);
   });
+
+  it('两个出站增强开关默认关闭', () => {
+    const cfg = ConfigSchema({});
+    expect(cfg.mirrorWeb).toBe(false);
+    expect(cfg.wakeupFallback).toBe(false);
+  });
+
+  it('出站增强开关显式开启后生效', () => {
+    const cfg = ConfigSchema({ mirrorWeb: true, wakeupFallback: true });
+    expect(cfg.mirrorWeb).toBe(true);
+    expect(cfg.wakeupFallback).toBe(true);
+  });
 });

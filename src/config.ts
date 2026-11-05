@@ -111,6 +111,17 @@ export interface ImQQBotConfig {
   sendFile: SendFileConfig;
   /** 主动推送策略 */
   proactiveDelivery: ProactiveDeliveryConfig;
+  /**
+   * 是否把 Web/桌面端输入的用户消息镜像到 QQ（默认关闭）。
+   * 只镜像 TurnTracker 判定为 external 的来源；qq（QQ 端已有该消息）与
+   * internal（插件注入的上下文/答案回显）都不镜像，避免刷屏与自激。
+   */
+  mirrorWeb: boolean;
+  /**
+   * 文本投递的第三档兜底（默认关闭）：被动回复失败后置 forceProactive 主动
+   * 重投一次，仍失败且 scope 为 c2c 时用唤醒消息补发一次。关闭时行为与上游一致。
+   */
+  wakeupFallback: boolean;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -189,4 +200,8 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   }).default({
     externalTurns: 'c2c',
   }).description('主动推送策略（定时任务等服务回合始终推送）'),
+  mirrorWeb: Schema.boolean().default(false)
+    .description('是否把 Web/桌面端输入的用户消息镜像到 QQ（仅 external 来源，默认关闭）'),
+  wakeupFallback: Schema.boolean().default(false)
+    .description('文本发送兜底：被动失败后主动重投，仍失败时 c2c 用唤醒消息补发（默认关闭）'),
 });

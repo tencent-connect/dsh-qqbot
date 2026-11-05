@@ -129,6 +129,13 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 |------|------|--------|------|
 | `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` never push; `c2c` push direct chats only; `all` push direct and group chats |
 
+### Outbound extras (off by default)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `mirrorWeb` | boolean | `false` | Mirror questions typed in the Web/desktop UI into QQ (`🌐 来自 Web：…`). Only `external` origins are mirrored; QQ's own input and plugin-injected context/answer echoes never are. Delivery follows the turn's `externalTurns` policy |
+| `wakeupFallback` | boolean | `false` | Text delivery fallback: after a passive reply fails, retry without `msgId` as a proactive message, and if that fails too, send one wakeup message (c2c 30-day window) for direct chats only; groups are never retried via wakeup |
+
 ### Rich media (media)
 
 | Config | Type | Default | Description |
