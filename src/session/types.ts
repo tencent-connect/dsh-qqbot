@@ -131,6 +131,46 @@ export interface SessionRecord {
   agentPreset?: string;
 }
 
+/** /sessions 分组列表的单个会话条目（信息来自会话 header，读取失败字段缺省） */
+export interface SessionGroupEntry {
+  sessionId: string;
+  /** 创建时间（Unix epoch ms；header 不可得时缺省） */
+  createdAt?: number;
+  /** 会话创建时的 agent preset */
+  agentPreset?: string;
+  /** 是否为当前会话 */
+  isCurrent: boolean;
+}
+
+/** /sessions 的一个工作区分组 */
+export interface SessionGroup {
+  /** 工作区规范化路径 */
+  path: string;
+  /** 显示标题 */
+  title: string;
+  /** 是否为当前工作区（per-peer 生效 cwd） */
+  isCurrentWorkspace: boolean;
+  /** 组内会话（上限截断前） */
+  sessions: SessionGroupEntry[];
+  /** 被上限截断未展示的会话数 */
+  truncated: number;
+}
+
+/** /sessions <id> 切换结果 */
+export interface SwitchSessionOutcome {
+  ok: boolean;
+  reason?: 'unknown-session';
+  /** 目标即当前会话（幂等成功） */
+  alreadyCurrent?: boolean;
+}
+
+/** /sessions new <工作区> 结果 */
+export interface StartNewOutcome {
+  ok: boolean;
+  reason?: 'unknown-workspace';
+  path?: string;
+}
+
 /** 会话状态信息（/status 用） */
 export interface SessionStatus {
   active: boolean;

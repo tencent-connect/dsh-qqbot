@@ -38,10 +38,18 @@ import type {
   PresetSwitchOutcome,
   SessionRecord,
   SessionStatus,
+  SessionGroup,
+  SessionGroupEntry,
+  SwitchSessionOutcome,
+  StartNewOutcome,
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
 } from './types.ts';
+
+/** /sessions 列表默认上限（QQ 单条消息有限长，超出提示用 id 直达） */
+const LIST_WORKSPACE_CAP = 5;
+const LIST_SESSION_CAP = 8;
 
 /** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
@@ -315,7 +323,7 @@ export class SessionManager {
       seed,
       inheritedEventCount: boundary + 1,
       meta: {
-        cwd: this.workspaceDir(),
+        cwd: this.workspaceDir(record.sessionKey),
         isSeeded: true,
         // 旧版宿主的 delivery 豁免要求 parentSession，新版忽略——都传
         parentSession: record.sessionId,
@@ -551,7 +559,7 @@ export class SessionManager {
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.workspaceDir(),
+            cwd: this.workspaceDir(key),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),
@@ -585,7 +593,7 @@ export class SessionManager {
     // 闲置回收后会从侧边栏消失（详见 host/adapter.ts 的 attachSessionToWorkspace）。
     // cwd 必须与 meta.cwd 同源（workspaceDir()），否则 attachSession 的
     // header.cwd 校验（realpath 后须等于工作区 path）会失败。
-    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir());
+    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir(key));
 
     return record;
   }
@@ -694,14 +702,47 @@ export class SessionManager {
     this.logger.info(`session removed: key=${key}`);
   }
 
-  /** Agent 工作目录：显式配置优先，缺省独立目录 ~/.dsh-qqbot/workspace（不随宿主进程 cwd） */
-  private workspaceCache: string | undefined;
-  private workspaceDir(): string {
-    if (this.workspaceCache) return this.workspaceCache;
-    const dir = resolveAgentCwd(this.config.cwd);
+  /**
+   * Agent 工作目录（per-peer）：prefs 工作区偏好（须为宿主已登记工作区）优先，
+   * 缺省 config.cwd / ~/.dsh-qqbot/workspace（不随宿主进程 cwd）。
+   * 会话 cwd 不可变——偏好只影响"下一次 create"，切换工作区即换新会话。
+   */
+  private workspaceDirs = new Map<string, string>();
+  /** 未登记偏好的降级 warn 去重（每 key 一次，避免每条消息刷屏） */
+  private workspacePrefWarned = new Set<string>();
+  private workspaceDir(key: string): string {
+    const cached = this.workspaceDirs.get(key);
+    if (cached) return cached;
+    const dir = this.resolveWorkspacePref(key) ?? resolveAgentCwd(this.config.cwd);
     mkdirSync(dir, { recursive: true });
-    this.workspaceCache = dir;
+    this.workspaceDirs.set(key, dir);
     return dir;
+  }
+
+  /** 展示用当前工作区路径（无副作用，不 mkdir）：/sessions 列表标记当前组 */
+  effectiveWorkspacePath(key: string): string {
+    return this.resolveWorkspacePref(key) ?? resolveAgentCwd(this.config.cwd);
+  }
+
+  /** prefs 偏好命中且仍为已登记工作区才生效；未登记回退默认并 warn（每 key 一次） */
+  private resolveWorkspacePref(key: string): string | undefined {
+    const pref = this.modelResolver.getWorkspace(key);
+    if (pref === undefined) return undefined;
+    if (this.isRegisteredWorkspace(pref)) return pref;
+    if (!this.workspacePrefWarned.has(key)) {
+      this.workspacePrefWarned.add(key);
+      this.logger.warn(`per-peer workspace not registered, fallback to default: key=${key} dir=${pref}`);
+    }
+    return undefined;
+  }
+
+  private isRegisteredWorkspace(path: string): boolean {
+    return this.host.listWorkspaces().some((workspace) => workspace.path === path);
+  }
+
+  /** 目标会话是否在宿主某工作区账目内（/sessions 切换的准入校验） */
+  isRegisteredSession(sessionId: string): boolean {
+    return this.host.listWorkspaces().some((workspace) => workspace.sessionIds.includes(sessionId));
   }
 
   /**
@@ -754,6 +795,138 @@ export class SessionManager {
       this.logger.warn(`compact failed: key=${key} err=${message}`);
       return { ok: false, reason: 'failed', message };
     }
+  }
+
+  // ── /sessions：工作区分组的会话导航 ──
+
+  /** 列出宿主工作区（title + path），/sessions new 的错误提示用 */
+  listWorkspaceRefs(): Array<{ title: string; path: string }> {
+    return this.host.listWorkspaces().map((workspace) => ({ title: workspace.title, path: workspace.path }));
+  }
+
+  /**
+   * 按工作区分组列出会话（当前工作区置顶，当前会话标记 isCurrent）。
+   * 数据源是宿主 workspaceRegistry 的会话账目——插件不自建会话历史，
+   * 避免双写漂移；每组条数与组数有上限（QQ 单条消息有限长）。
+   */
+  async listSessionGroups(
+    scope: ChatScope,
+    peerId: string,
+    caps: { workspaces?: number; sessions?: number } = {},
+  ): Promise<SessionGroup[]> {
+    const key = this.sessionKey(scope, peerId);
+    const workspaceCap = caps.workspaces ?? LIST_WORKSPACE_CAP;
+    const sessionCap = caps.sessions ?? LIST_SESSION_CAP;
+    const currentSessionId = this.sessions.get(key)?.sessionId ?? this.modelResolver.getSessionId(key);
+    const currentPath = this.effectiveWorkspacePath(key);
+
+    const all = this.host.listWorkspaces();
+    if (all.length === 0) return [];
+
+    // 当前工作区排最前，其余保持注册表顺序（sort 稳定）
+    const ordered = [...all].sort(
+      (a, b) => Number(b.path === currentPath) - Number(a.path === currentPath),
+    );
+
+    const groups: SessionGroup[] = [];
+    for (const workspace of ordered.slice(0, workspaceCap)) {
+      const shown = workspace.sessionIds.slice(0, sessionCap);
+      const truncated = workspace.sessionIds.length - shown.length;
+      const sessions: SessionGroupEntry[] = [];
+      for (const sessionId of shown) {
+        const header = await this.host.sessionHeader(sessionId);
+        sessions.push({
+          sessionId,
+          createdAt: header?.createdAt,
+          agentPreset: header?.agentPreset,
+          isCurrent: sessionId === currentSessionId,
+        });
+      }
+      groups.push({
+        path: workspace.path,
+        title: workspace.title,
+        isCurrentWorkspace: workspace.path === currentPath,
+        sessions,
+        truncated,
+      });
+    }
+    return groups;
+  }
+
+  /**
+   * 解析 /sessions <arg> 的目标：1 起始的序号（对齐列表渲染顺序，仅覆盖已
+   * 展示范围）或完整/前缀会话 id（在全部工作区账目内匹配，多命中视为歧义）。
+   */
+  async resolveSessionTarget(scope: ChatScope, peerId: string, arg: string): Promise<string | undefined> {
+    const trimmed = arg.trim();
+    if (trimmed === '') return undefined;
+
+    if (/^\d+$/.test(trimmed)) {
+      const groups = await this.listSessionGroups(scope, peerId);
+      const displayed = groups.flatMap((group) => group.sessions.map((session) => session.sessionId));
+      const index = Number(trimmed);
+      return index >= 1 && index <= displayed.length ? displayed[index - 1] : undefined;
+    }
+
+    const registered = this.host.listWorkspaces().flatMap((workspace) => [...workspace.sessionIds]);
+    const matches = registered.filter((id) => id === trimmed || id.startsWith(trimmed));
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  /**
+   * 切换到指定会话（/sessions <id>）：写入 prefs 映射并释放当前 agent，
+   * 下一条消息经 getOrCreate resume 目标会话。目标须在宿主工作区账目内。
+   * 工作区偏好同步为目标会话的 cwd（已登记时），保证此后 /new 落在同一个工作区。
+   */
+  async switchSession(scope: ChatScope, peerId: string, targetSessionId: string): Promise<SwitchSessionOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    if (!this.isRegisteredSession(targetSessionId)) {
+      this.logger.warn(`switch to unregistered session refused: key=${key} target=${targetSessionId}`);
+      return { ok: false, reason: 'unknown-session' };
+    }
+
+    const record = this.sessions.get(key);
+    const currentId = record?.sessionId ?? this.modelResolver.getSessionId(key);
+    if (currentId === targetSessionId) return { ok: true, alreadyCurrent: true };
+
+    this.modelResolver.setSessionId(key, targetSessionId);
+    const header = await this.host.sessionHeader(targetSessionId);
+    if (header?.cwd !== undefined && this.isRegisteredWorkspace(header.cwd)) {
+      this.modelResolver.setWorkspace(key, header.cwd);
+    } else {
+      this.modelResolver.clearWorkspace(key);
+    }
+    this.workspaceDirs.delete(key);
+
+    if (record) {
+      this.sessions.delete(key);
+      this.releasePrompt(record.agent);
+      record.agent.cancel({ kind: 'user' });
+      await record.handle.dispose().catch(() => {});
+    }
+    this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
+    return { ok: true };
+  }
+
+  /**
+   * 在指定工作区开新会话（/sessions new <工作区>）：写工作区偏好 + 铸新
+   * 会话 id（/new 语义），下一条消息在新 cwd create。工作区须已登记。
+   */
+  async startNewInWorkspace(scope: ChatScope, peerId: string, workspaceRef: string): Promise<StartNewOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    const workspace = this.host.listWorkspaces().find(
+      (candidate) => candidate.path === workspaceRef || candidate.title === workspaceRef,
+    );
+    if (!workspace) {
+      this.logger.warn(`new session in unknown workspace refused: key=${key} ref=${workspaceRef}`);
+      return { ok: false, reason: 'unknown-workspace' };
+    }
+
+    this.modelResolver.setWorkspace(key, workspace.path);
+    this.workspaceDirs.delete(key);
+    await this.remove(scope, peerId); // 铸新 id + 释放当前 agent
+    this.logger.info(`new session in workspace: key=${key} -> ${workspace.path}`);
+    return { ok: true, path: workspace.path };
   }
 
   async disposeAll(): Promise<void> {
