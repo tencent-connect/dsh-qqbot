@@ -163,6 +163,8 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
+| `/sessions` | Browse sessions grouped by workspace; click to switch or start a new session in a workspace |
+| `/permission` | View or switch session permission (read-only / workspace-write / danger-full-access) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
