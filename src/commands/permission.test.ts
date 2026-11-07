@@ -27,7 +27,7 @@ function makeManager(overrides: Record<string, unknown> = {}) {
 /** cmdCtx 桩：sendMarkdownChunked 依赖 bot.sendMarkdown + replyTarget */
 function makeCmdCtx(raw: string, sent: string[]) {
   return {
-    message: { senderId: 'u1', kind: 'c2c' },
+    message: { senderId: 'u1', kind: 'c2c', messageId: 'm1' },
     command: { raw },
     bot: { sendMarkdown: async (_t: unknown, content: string) => { sent.push(content); } },
     replyTarget: { scope: 'c2c', targetId: 'u1' },
@@ -48,11 +48,15 @@ describe('/permission', () => {
     const text = sent.join('\n');
     expect(text).toContain('工作区可写（workspace-write）');
     expect(text).toContain('当前会话生效值');
-    expect(text).toContain('/permission read-only');
-    expect(text).toContain('/permission workspace-write');
-    expect(text).toContain('/permission danger-full-access');
+    expect(text).toContain(encodeURIComponent('/permission read-only'));
+    expect(text).toContain(encodeURIComponent('/permission workspace-write'));
+    expect(text).toContain(encodeURIComponent('/permission danger-full-access'));
     expect(text).toContain('/permission reset');
-    expect(text).toContain('高危');
+    expect(text).toContain(encodeURIComponent('⚠️'));
+    // 所有 text/show 均按更严格的「编码后 <=100」约束输出
+    for (const match of text.matchAll(/(?:text|show)="([^"]*)"/g)) {
+      expect(match[1]!.length).toBeLessThanOrEqual(100);
+    }
   });
 
   it('无参数且无偏好：显示宿主部署默认', async () => {
@@ -64,13 +68,37 @@ describe('/permission', () => {
     expect(sent.join('\n')).toContain('宿主部署默认');
   });
 
+  it('无活跃会话但有偏好：显示「待应用」，不谎称当前已生效', async () => {
+    const sent: string[] = [];
+    const manager = makeManager({
+      getPermissionStatus: () => ({
+        knobs: { sandbox: 'read-only', approval: 'ask' },
+        source: 'pref',
+        active: false,
+      }),
+    });
+    const cmd = permissionCommand({ manager, config: CONFIG });
+
+    await cmd.handler!(makeCmdCtx('', sent), {} as never);
+
+    const text = sent.join('\n');
+    expect(text).toContain('**待应用:** 只读（read-only）');
+    expect(text).toContain('下条消息恢复或创建会话时应用');
+    expect(text).not.toContain('**当前:** 只读');
+  });
+
   it('切换成功（活跃会话）：立即生效文案', async () => {
     const setPermission = vi.fn(async () => ({ ok: true, appliedLive: true }));
     const cmd = permissionCommand({ manager: makeManager({ setPermission }), config: CONFIG });
 
     const result = await cmd.handler!(makeCmdCtx('read-only', []));
 
-    expect(setPermission).toHaveBeenCalledWith('c2c', 'u1', { sandbox: 'read-only', approval: 'ask' });
+    expect(setPermission).toHaveBeenCalledWith(
+      'c2c',
+      'u1',
+      { sandbox: 'read-only', approval: 'ask' },
+      { senderId: 'u1', replyTarget: { scope: 'c2c', targetId: 'u1', msgId: 'm1' } },
+    );
     expect(String(result)).toContain('权限已切换');
     expect(String(result)).toContain('当前会话立即生效');
   });
@@ -81,7 +109,7 @@ describe('/permission', () => {
 
     const result = await cmd.handler!(makeCmdCtx('workspace-write', []));
 
-    expect(String(result)).toContain('当前无活跃会话，发送消息创建会话时生效');
+    expect(String(result)).toContain('当前无活跃会话，下一条消息恢复或创建会话时应用');
   });
 
   it('danger-full-access：确认文案带显著高危警示', async () => {
@@ -100,7 +128,7 @@ describe('/permission', () => {
     const result = await cmd.handler!(makeCmdCtx('read-only', []));
 
     expect(String(result)).toContain('权限偏好已保存');
-    expect(String(result)).toContain('宿主策略模块不可用');
+    expect(String(result)).toContain('宿主未组合 sandbox/审批服务');
   });
 
   it('未知 preset：报错并列出可用项', async () => {

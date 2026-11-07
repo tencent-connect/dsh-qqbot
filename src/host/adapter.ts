@@ -15,7 +15,7 @@ export interface AdapterLogger {
 }
 
 export interface HostAdapter {
-  /** 会话事件读取：新宿主 snapshotEvents()，旧宿主 events getter */
+  /** 会话事件读取：新宿主 snapshotEvents()（上游已标记 deprecated），旧宿主 events getter；漂移统一收口于此 */
   sessionEvents(session: { snapshotEvents?: () => readonly unknown[]; events?: readonly unknown[] }): readonly unknown[];
   /** preset 作用域服务解析：旧宿主实例方法 / 新宿主模块函数 */
   serviceFor(agent: { ctx: unknown }, name: string): Promise<unknown | undefined>;
@@ -287,6 +287,12 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         logger?.warn?.('host adapter: session has no append, permission switch unavailable');
         return false;
       }
+      // 模块可解析不等于事件会生效：真正折叠 knob 的是宿主两个服务。
+      // headless/精简组合未注册时，事件只是 inert log，必须明确降级而非假成功。
+      if (safeGet(ctx, 'sandboxPolicy') === undefined || safeGet(ctx, 'approval') === undefined) {
+        logger?.warn?.('host adapter: sandboxPolicy/approval services not composed, permission switch unavailable');
+        return false;
+      }
       const sandboxMod = await importModule('@deepseek-ai/dsh-sandbox-policy', logger);
       const approvalMod = await importModule('@deepseek-ai/dsh-user-approval', logger);
       const setSandboxMode = sandboxMod?.setSandboxMode as
@@ -295,8 +301,16 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
       const setApprovalPolicy = approvalMod?.setApprovalPolicy as
         | ((session: unknown, policy: string) => void)
         | undefined;
-      if (typeof setSandboxMode !== 'function' || typeof setApprovalPolicy !== 'function') {
+      const sandboxModes = sandboxMod?.SANDBOX_MODES as readonly unknown[] | undefined;
+      const approvalPolicies = approvalMod?.APPROVAL_POLICIES as readonly unknown[] | undefined;
+      if (typeof setSandboxMode !== 'function' || typeof setApprovalPolicy !== 'function'
+        || !Array.isArray(sandboxModes) || !Array.isArray(approvalPolicies)) {
         logger?.warn?.('host adapter: permission policy modules unavailable, switch declined');
+        return false;
+      }
+      // 先校验两个值再 append，避免 sandbox 已写、approval 校验失败的半应用状态。
+      if (!sandboxModes.includes(knobs.sandbox) || !approvalPolicies.includes(knobs.approval)) {
+        logger?.warn?.(`host adapter: invalid permission knobs: ${knobs.sandbox}+${knobs.approval}`);
         return false;
       }
       try {

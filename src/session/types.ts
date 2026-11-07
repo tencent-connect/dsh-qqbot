@@ -140,6 +140,8 @@ export interface SessionGroupEntry {
   agentPreset?: string;
   /** 是否为当前会话 */
   isCurrent: boolean;
+  /** 是否已绑定到其他 QQ peer（完整列表可见，但禁止切入） */
+  occupiedByOther: boolean;
 }
 
 /** /sessions 的一个工作区分组 */
@@ -159,7 +161,7 @@ export interface SessionGroup {
 /** /sessions <id> 切换结果 */
 export interface SwitchSessionOutcome {
   ok: boolean;
-  reason?: 'unknown-session';
+  reason?: 'unknown-session' | 'not-on-disk' | 'occupied';
   /** 目标即当前会话（幂等成功） */
   alreadyCurrent?: boolean;
 }

@@ -110,6 +110,11 @@ export class ModelResolver {
     return this.prefs.findSessionKey(sessionId);
   }
 
+  /** sessionId → 全部绑定它的 sessionKey（用于拒绝跨 QQ peer 共用会话） */
+  findSessionKeys(sessionId: string): string[] {
+    return this.prefs.findSessionKeys(sessionId);
+  }
+
   /**
    * 记录指定 sessionKey 的最新 sessionId（fork 后调用）并持久化
    */

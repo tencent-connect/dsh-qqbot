@@ -4,6 +4,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { renderCmdInput } from './cmd-input.ts';
 
 export function modelCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
   return {
@@ -40,7 +41,7 @@ export function modelCommand({ manager, config, logger }: CommandDeps): Categori
           for (const m of models) {
             const modelPath = `${m.provider}/${m.id}`;
             const displayName = m.name ? `${m.name}` : modelPath;
-            lines.push(`<qqbot-cmd-input text="/model ${modelPath}" show="/model ${displayName}"/>`);
+            lines.push(renderCmdInput(`/model ${modelPath}`, `/model ${displayName}`));
           }
         }
 

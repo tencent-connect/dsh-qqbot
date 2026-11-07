@@ -116,7 +116,7 @@ export async function bootstrapGateway(
   };
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
-  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
+  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, manager, config, logger);
 
   const outbound = createOutboundHandler(
     manager, sender, config, logger, toolsRegistry, deliverablesDeliverer, turnTracker,

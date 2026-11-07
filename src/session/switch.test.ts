@@ -7,7 +7,7 @@
  * - resolveWorkspacePref：未登记偏好回退默认
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -46,6 +46,7 @@ function workspaceCtx(
       if (name === 'sessionPersistence') {
         return { stat: async (id: string) => (headers[id] ? { header: headers[id] } : undefined) };
       }
+      if (name === 'sandboxPolicy' || name === 'approval') return {};
       return undefined;
     },
     on: vi.fn(),
@@ -71,12 +72,19 @@ function fakeHandle(id: string): DshAgentHandle {
 
 const managers: Array<InstanceType<typeof SessionManager>> = [];
 
-function createManager(ctx: Context, events: unknown[] = []) {
+function createManager(
+  ctx: Context,
+  events: unknown[] = [],
+  overrides: {
+    live?: DshAgent;
+    resume?: (options: { resumeSessionId: string }) => Promise<DshAgentHandle>;
+  } = {},
+) {
   const registry = {
-    get: vi.fn(() => undefined),
-    resume: vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => {
+    get: vi.fn(() => overrides.live),
+    resume: vi.fn(overrides.resume ?? (async ({ resumeSessionId }: { resumeSessionId: string }) => {
       throw Object.assign(new Error(`session "${resumeSessionId}" not found`), { name: 'SessionPersistenceNotFoundError' });
-    }),
+    })),
     create: vi.fn(async (options: { sessionId: string }) => {
       const agent = fakeAgent(options.sessionId);
       (agent as { session: unknown }).session = { id: options.sessionId, snapshotEvents: () => events };
@@ -280,6 +288,20 @@ describe('resolveWorkspacePref（per-peer cwd）', () => {
     const createCall = (registry.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { meta?: { cwd?: string } };
     expect(createCall?.meta?.cwd).toBe(WS_A);
   });
+
+  it('header.cwd 是符号链接时仍命中宿主 realpath 工作区并同步偏好', async () => {
+    const alias = join(env.home, 'workspace-alias');
+    symlinkSync(env.home, alias, 'dir');
+    const { manager } = createManager(workspaceCtx([
+      { path: env.home, title: 'Real', sessionIds: ['session-link'] },
+    ], { 'session-link': { cwd: alias } }));
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-link');
+
+    expect(outcome.ok).toBe(true);
+    expect(prefs().getWorkspace(KEY)).toBe(env.home);
+    expect(manager.effectiveWorkspacePath(KEY)).toBe(env.home);
+  });
 });
 
 describe('permission（/permission 会话内切换）', () => {
@@ -292,13 +314,13 @@ describe('permission（/permission 会话内切换）', () => {
 
   it('getPermissionStatus：无会话无偏好 → default', () => {
     const { manager } = createManager(ctx());
-    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ source: 'default' });
+    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ source: 'default', active: false });
   });
 
   it('getPermissionStatus：无活跃会话 → per-peer 偏好', () => {
     prefs().setPermission(KEY, KNOBS); // 构造前写（内存副本构造时加载）
     const { manager } = createManager(ctx());
-    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ knobs: KNOBS, source: 'pref' });
+    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ knobs: KNOBS, source: 'pref', active: false });
   });
 
   it('getPermissionStatus：活跃会话事件优先于偏好', async () => {
@@ -309,6 +331,7 @@ describe('permission（/permission 会话内切换）', () => {
     expect(manager.getPermissionStatus('c2c', PEER)).toEqual({
       knobs: { sandbox: 'danger-full-access', approval: 'never' },
       source: 'session',
+      active: true,
     });
   });
 
@@ -349,5 +372,219 @@ describe('permission（/permission 会话内切换）', () => {
     expect(record.sessionId).toMatch(MINTED); // 会话照常创建
     const warns = (logger.warn as ReturnType<typeof vi.fn>).mock.calls.map(String);
     expect(warns.some((w) => w.includes('permission pref apply failed'))).toBe(true);
+  });
+});
+
+describe('审查回归：无活跃会话时 revive 切权限，普通 resume 保留会话权限', () => {
+  const KNOBS = { sandbox: 'read-only', approval: 'ask' };
+  const OLD_EVENTS = [
+    { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  ];
+
+  function appendableHandle(id: string, events: unknown[]) {
+    const agent = fakeAgent(id);
+    const append = vi.fn();
+    (agent as { session: unknown }).session = { id, snapshotEvents: () => events, append };
+    return { agent, dispose: vi.fn(async () => {}), append };
+  }
+
+  it('回收后执行 /permission：先 revive 旧会话，再立即覆盖旧 knob 事件', async () => {
+    prefs().setSessionId(KEY, 'session-old');
+    const handle = appendableHandle('session-old', OLD_EVENTS);
+    const { manager } = createManager(workspaceCtx([], {
+      'session-old': { cwd: WS_A },
+    }), [], { resume: async () => handle });
+
+    const outcome = await manager.setPermission('c2c', PEER, KNOBS, {
+      senderId: PEER,
+      replyTarget: REPLY,
+    });
+
+    expect(outcome).toEqual({ ok: true, appliedLive: true });
+    expect(manager.getSessionRecord('c2c', PEER)?.sessionId).toBe('session-old');
+    expect(handle.append).toHaveBeenCalledWith('sandbox/mode', { mode: 'read-only' });
+    expect(handle.append).toHaveBeenCalledWith('approval/policy', { policy: 'ask' });
+  });
+
+  it('revive 后当前事件已与目标一致：不重复 append', async () => {
+    prefs().setSessionId(KEY, 'session-old');
+    const handle = appendableHandle('session-old', [
+      { type: 'sandbox/mode', data: { mode: 'read-only' } },
+      { type: 'approval/policy', data: { policy: 'ask' } },
+    ]);
+    const { manager } = createManager(workspaceCtx([], {
+      'session-old': { cwd: WS_A },
+    }), [], { resume: async () => handle });
+
+    const outcome = await manager.setPermission('c2c', PEER, KNOBS, {
+      senderId: PEER,
+      replyTarget: REPLY,
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(handle.append).not.toHaveBeenCalled();
+  });
+
+  it('普通 resume 不用旧 pref 覆盖桌面端后来修改的权限（pref 仅是 create 默认）', async () => {
+    prefs().setSessionId(KEY, 'session-old');
+    prefs().setPermission(KEY, KNOBS);
+    const handle = appendableHandle('session-old', OLD_EVENTS);
+    const { manager } = createManager(workspaceCtx([], {
+      'session-old': { cwd: WS_A },
+    }), [], { resume: async () => handle });
+
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(handle.append).not.toHaveBeenCalled();
+  });
+});
+
+describe('审查回归：会话切换准入与占用保护', () => {
+  it('账目内但磁盘记录不存在 → not-on-disk，不写映射', async () => {
+    const { manager } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-missing'] },
+    ]));
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-missing');
+
+    expect(outcome).toEqual({ ok: false, reason: 'not-on-disk' });
+    expect(prefs().getSessionId(KEY)).toBeUndefined();
+  });
+
+  it('其他 QQ peer 已绑定目标 → occupied；列表锁定但保持可见', async () => {
+    const otherKey = 'qqbot:app1:c2c:another-user';
+    prefs().setSessionId(otherKey, 'session-bbb');
+    const { manager } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-bbb'] },
+    ], { 'session-bbb': { cwd: WS_A } }));
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-bbb');
+    expect(outcome).toEqual({ ok: false, reason: 'occupied' });
+    expect(prefs().getSessionId(KEY)).toBeUndefined();
+
+    const groups = await manager.listSessionGroups('c2c', PEER);
+    expect(groups[0]!.sessions[0]).toMatchObject({
+      sessionId: 'session-bbb',
+      occupiedByOther: true,
+    });
+  });
+
+  it('未归属其他 peer 的桌面会话仍可切入', async () => {
+    const { manager } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-desktop'] },
+    ], { 'session-desktop': { cwd: WS_A } }));
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-desktop');
+
+    expect(outcome.ok).toBe(true);
+    expect(prefs().getSessionId(KEY)).toBe('session-desktop');
+  });
+
+  it('两个 peer 并发抢同一会话：写映射前复查后只允许一个成功', async () => {
+    let releaseFirstStat!: () => void;
+    const firstStatGate = new Promise<void>((resolve) => { releaseFirstStat = resolve; });
+    let statCalls = 0;
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'workspaceRegistry') {
+          return { list: () => [{ path: WS_A, title: 'A', sessionIds: ['session-race'] }] };
+        }
+        if (name === 'sessionPersistence') {
+          return {
+            stat: async (id: string) => {
+              statCalls += 1;
+              if (id === 'session-race' && statCalls === 1) await firstStatGate;
+              return id === 'session-race' ? { header: { cwd: WS_A } } : undefined;
+            },
+          };
+        }
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+    const { manager } = createManager(ctx);
+
+    const first = manager.switchSession('c2c', 'peer-1', 'session-race');
+    await Promise.resolve();
+    const second = manager.switchSession('c2c', 'peer-2', 'session-race');
+    releaseFirstStat();
+    const outcomes = await Promise.all([first, second]);
+
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.reason === 'occupied')).toHaveLength(1);
+    expect(prefs().findSessionKeys('session-race')).toHaveLength(1);
+  });
+
+  it('/sessions new 支持组序号，无需把路径传给命令层', async () => {
+    const { manager } = createManager(workspaceCtx([
+      { path: WS_A, title: '含空格 项目', sessionIds: [] },
+    ]));
+
+    const outcome = await manager.startNewInWorkspace('c2c', PEER, '1');
+
+    expect(outcome).toEqual({ ok: true, path: WS_A });
+    expect(prefs().getWorkspace(KEY)).toBe(WS_A);
+  });
+});
+
+describe('审查回归：切换与在途 openSession 串行', () => {
+  it('切换等待在途打开；屏障后的消息最终恢复目标会话，不被旧 id 覆盖', async () => {
+    let resolveOld!: (handle: DshAgentHandle) => void;
+    const pendingOld = new Promise<DshAgentHandle>((resolve) => { resolveOld = resolve; });
+    prefs().setSessionId(KEY, 'session-old');
+    const { manager, registry } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-old', 'session-bbb'] },
+    ], {
+      'session-old': { cwd: WS_A },
+      'session-bbb': { cwd: WS_A },
+    }), [], {
+      resume: async ({ resumeSessionId }) => {
+        if (resumeSessionId === 'session-old') return pendingOld;
+        return fakeHandle(resumeSessionId);
+      },
+    });
+
+    const opening = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await vi.waitFor(() => expect(registry.resume).toHaveBeenCalledTimes(1));
+    const switching = manager.switchSession('c2c', PEER, 'session-bbb');
+    await Promise.resolve(); // 让切换先登记 mutation 屏障
+    const blockedMessage = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    await Promise.resolve();
+    expect(registry.resume).toHaveBeenCalledTimes(1); // 屏障后的消息没有提前打开旧会话
+
+    resolveOld(fakeHandle('session-old'));
+    const [opened, outcome, blocked] = await Promise.all([opening, switching, blockedMessage]);
+
+    expect(opened.sessionId).toBe('session-old');
+    expect(outcome.ok).toBe(true);
+    expect(blocked.sessionId).toBe('session-bbb');
+    expect(prefs().getSessionId(KEY)).toBe('session-bbb');
+    expect(registry.resume).toHaveBeenCalledTimes(2);
+  });
+
+  it('同一 tick 先 switch 后发消息：同步屏障让消息等待，最终打开目标而非旧会话', async () => {
+    prefs().setSessionId(KEY, 'session-old');
+    const { manager, registry } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-old', 'session-bbb'] },
+    ], {
+      'session-old': { cwd: WS_A },
+      'session-bbb': { cwd: WS_A },
+    }), [], {
+      resume: async ({ resumeSessionId }) => fakeHandle(resumeSessionId),
+    });
+
+    // 关键交错：不在两次调用之间 await，复现屏障晚装导致的旧 id 覆盖
+    const switching = manager.switchSession('c2c', PEER, 'session-bbb');
+    const opening = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const [outcome, opened] = await Promise.all([switching, opening]);
+
+    expect(outcome.ok).toBe(true);
+    expect(opened.sessionId).toBe('session-bbb');
+    expect(manager.getSessionRecord('c2c', PEER)?.sessionId).toBe('session-bbb');
+    expect(prefs().getSessionId(KEY)).toBe('session-bbb');
+    expect(registry.resume).toHaveBeenCalledTimes(1);
+    expect(registry.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: 'session-bbb' }));
   });
 });

@@ -1,9 +1,8 @@
 /**
- * applyPermissionKnobs 的真模块集成用例。
+ * applyPermissionKnobs 的模块契约用例。
  *
- * 独立成文件：vitest 中任何一次 vi.doMock 都会激活 mocker，污染同文件内
- * 后续的原生动态 import（adapter 的 fail-soft import 兜底会误触发）。
- * 本文件禁止使用 vi.doMock（除最后一个"模块不可解析"用例）。
+ * 独立成文件：vitest 的 vi.doMock 会污染同文件内后续原生动态 import。
+ * 本文件统一 mock 两个宿主策略模块，不依赖把可选宿主包装进 devDependencies。
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHostAdapter, _resetAdapterCache } from './adapter.ts';
@@ -21,15 +20,24 @@ function makeLogger() {
   return { info: vi.fn(), warn: vi.fn(), debug: vi.fn() } as never;
 }
 
-describe('host adapter: applyPermissionKnobs（真模块集成）', () => {
+describe('host adapter: applyPermissionKnobs（隔离模块契约）', () => {
   beforeEach(() => {
     _resetAdapterCache();
     vi.unstubAllGlobals();
+    vi.doMock('@deepseek-ai/dsh-sandbox-policy', () => ({
+      SANDBOX_MODES: ['read-only', 'workspace-write', 'danger-full-access'],
+      setSandboxMode: (session: { append: unknown }, mode: string) =>
+        (session.append as (...args: unknown[]) => void)('sandbox/mode', { mode }),
+    }));
+    vi.doMock('@deepseek-ai/dsh-user-approval', () => ({
+      APPROVAL_POLICIES: ['ask', 'never'],
+      setApprovalPolicy: (session: { append: unknown }, policy: string) =>
+        (session.append as (...args: unknown[]) => void)('approval/policy', { policy }),
+    }));
   });
 
-  it('经真模块函数追加 sandbox/mode 与 approval/policy 两个事件', async () => {
-    // devDeps 已装真包（导出即宿主唯一写路径），直接验证与真实函数的集成
-    const adapter = createHostAdapter(makeCtx({}));
+  it('经宿主模块函数追加 sandbox/mode 与 approval/policy 两个事件', async () => {
+    const adapter = createHostAdapter(makeCtx({ sandboxPolicy: {}, approval: {} }));
     const session = { append: vi.fn() };
 
     await expect(adapter.applyPermissionKnobs(session, { sandbox: 'read-only', approval: 'ask' })).resolves.toBe(true);
@@ -37,19 +45,21 @@ describe('host adapter: applyPermissionKnobs（真模块集成）', () => {
     expect(session.append).toHaveBeenCalledWith('approval/policy', { policy: 'ask' });
   });
 
-  it('非法 knob 值被宿主函数拒绝（验证抛错 → false，不抛出）', async () => {
+  it('非法 knob 值在 append 前拒绝（不留下半应用事件）', async () => {
     const logger = makeLogger();
-    const adapter = createHostAdapter(makeCtx({}), logger);
+    const adapter = createHostAdapter(makeCtx({ sandboxPolicy: {}, approval: {} }), logger);
     const session = { append: vi.fn() };
     await expect(adapter.applyPermissionKnobs(session, { sandbox: 'read-only', approval: 'bogus' })).resolves.toBe(false);
     expect(logger.warn).toHaveBeenCalled();
+    expect(session.append).not.toHaveBeenCalled();
   });
 
-  it('策略模块不可解析返回 false（fail-soft；本用例须保持在本文件最后）', async () => {
-    vi.doMock('@deepseek-ai/dsh-sandbox-policy', () => { throw new Error('module unavailable'); });
-    _resetAdapterCache();
-    const adapter = createHostAdapter(makeCtx({}));
+  it('模块可解析但宿主未组合 sandboxPolicy/approval 服务时降级（不假成功）', async () => {
+    const logger = makeLogger();
+    const adapter = createHostAdapter(makeCtx({}), logger);
     const session = { append: vi.fn() };
     await expect(adapter.applyPermissionKnobs(session, { sandbox: 'read-only', approval: 'ask' })).resolves.toBe(false);
+    expect(session.append).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('not composed'));
   });
 });

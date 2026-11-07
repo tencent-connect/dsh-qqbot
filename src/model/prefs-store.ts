@@ -114,6 +114,15 @@ export class PrefsStore {
     return this.sessionKeys.get(sessionId);
   }
 
+  /** 返回映射到同一会话的全部 sessionKey（跨 peer 占用保护需要识别多重绑定） */
+  findSessionKeys(sessionId: string): string[] {
+    const keys: string[] = [];
+    for (const [key, mappedId] of this.sessionIds.entries()) {
+      if (mappedId === sessionId) keys.push(key);
+    }
+    return keys;
+  }
+
   setSessionId(sessionKey: string, sessionId: string): void {
     this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);

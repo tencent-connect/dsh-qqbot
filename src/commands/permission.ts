@@ -13,6 +13,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { renderCmdInput } from './cmd-input.ts';
 import type { PermissionKnobs } from '../host/adapter.ts';
 
 interface PermissionPreset {
@@ -85,11 +86,15 @@ export function permissionCommand({ manager, config, logger }: CommandDeps): Cat
           return `未知权限: ${args}\n可用: ${PERMISSION_PRESETS.map((p) => p.name).join(' / ')} / reset`;
         }
 
-        const outcome = await manager.setPermission(scope, peerId, preset.knobs);
+        const msg = cmdCtx.message;
+        const outcome = await manager.setPermission(scope, peerId, preset.knobs, {
+          senderId: msg.senderId,
+          replyTarget: { scope, targetId: peerId, msgId: msg.messageId },
+        });
         if (!outcome.ok) {
           return [
             `⚠️ 权限偏好已保存（${preset.label}），但当前会话切换失败：`,
-            '宿主策略模块不可用（当前部署未组合 sandbox/审批能力）。',
+            '宿主未组合 sandbox/审批服务，或会话事件写入失败。',
             '新会话仍会按偏好创建。',
           ].join('\n');
         }
@@ -98,7 +103,7 @@ export function permissionCommand({ manager, config, logger }: CommandDeps): Cat
         if (preset.danger) {
           lines.push('', '⚠️ **高危**：完全访问且不再询问审批，误操作不可拦截。随时可用 /permission read-only 切回。');
         }
-        lines.push('', outcome.appliedLive ? '当前会话立即生效；/new 后的新会话沿用。' : '当前无活跃会话，发送消息创建会话时生效。');
+        lines.push('', outcome.appliedLive ? '当前会话立即生效；/new 后的新会话沿用。' : '当前无活跃会话，下一条消息恢复或创建会话时应用。');
         return lines.join('\n');
       }
 
@@ -107,23 +112,28 @@ export function permissionCommand({ manager, config, logger }: CommandDeps): Cat
       const sourceText = status.source === 'session'
         ? '当前会话生效值'
         : status.source === 'pref'
-          ? '新会话默认（当前无活跃会话）'
+          ? status.active
+            ? 'per-peer 偏好（当前会话无显式权限记录，宿主默认仍在生效）'
+            : 'per-peer 偏好（下条消息恢复或创建会话时应用）'
           : '宿主部署默认';
       const currentText = status.knobs ? displayKnobs(status.knobs) : '宿主部署默认';
+      const valueLabel = status.source === 'pref'
+        ? status.active ? '**偏好:**' : '**待应用:**'
+        : '**当前:**';
 
       const lines: string[] = [
         '### 🔐 会话权限',
         '',
-        `**当前:** ${currentText}`,
+        `${valueLabel} ${currentText}`,
         `来源: ${sourceText}`,
         '',
         '**可切换（点击生效）:**',
       ];
       for (const preset of PERMISSION_PRESETS) {
-        const dangerTag = preset.danger ? ' ⚠️高危' : '';
-        lines.push(`<qqbot-cmd-input text="/permission ${preset.name}" show="${preset.label} · ${preset.description}${dangerTag}"/>`);
+        const dangerTag = preset.danger ? '⚠️' : '';
+        lines.push(renderCmdInput(`/permission ${preset.name}`, `${preset.label}（${preset.name}）${dangerTag}`));
       }
-      lines.push('', '重置默认: `/permission reset`');
+      lines.push('', '重置默认: `/permission reset`', '', '> 档位按宿主默认权限表提供；部署若自定义 permissionPresets，以宿主配置为准。');
 
       await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
       return { kind: 'noop' as const };

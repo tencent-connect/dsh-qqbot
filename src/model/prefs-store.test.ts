@@ -210,4 +210,13 @@ describe('PrefsStore.findSessionKey 反向索引', () => {
 
     expect(store().findSessionKey('session-1')).toBe('k');
   });
+
+  it('findSessionKeys 返回同一会话的全部绑定（跨 peer 占用保护）', () => {
+    const s = store();
+    s.setSessionId('peer-a', 'session-shared');
+    s.setSessionId('peer-b', 'session-shared');
+
+    expect(s.findSessionKeys('session-shared').sort()).toEqual(['peer-a', 'peer-b']);
+    expect(store().findSessionKeys('session-shared').sort()).toEqual(['peer-a', 'peer-b']);
+  });
 });

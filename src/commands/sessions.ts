@@ -13,6 +13,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked, formatRelativeTime } from '../shared/index.ts';
+import { renderCmdInput } from './cmd-input.ts';
 
 /** 会话 id 展示短码（session-xxxxxxxx 截断到 16 字符） */
 function shortId(id: string): string {
@@ -26,7 +27,7 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
     // 管理类指令：私聊/群聊均可用，但仅限白名单用户（与 /model /preset 同构）
     scope: 'all',
     authorized: commandAllowlistAuth(config, logger),
-    description: '查看/切换会话（按工作区分组；用法: /sessions [序号|id] | /sessions new <工作区>）',
+    description: '查看/切换会话（按工作区分组；/sessions [序号|id]；/sessions new <组序号|工作区>）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
       const args = (cmdCtx.command?.raw ?? '').trim();
@@ -34,7 +35,7 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
       // ── /sessions new [工作区] ──
       if (args === 'new' || args.startsWith('new ')) {
         const ref = args.slice(3).trim();
-        if (!ref) return '用法: /sessions new <工作区路径或标题>（先发 /sessions 查看可用工作区）';
+        if (!ref) return '用法: /sessions new <组序号|工作区路径|标题>（先发 /sessions 查看列表）';
 
         const outcome = await manager.startNewInWorkspace(scope, peerId, ref);
         if (!outcome.ok) {
@@ -55,7 +56,11 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
           return '未找到会话。支持列表序号或会话 id 前缀；发 /sessions 查看列表。';
         }
         const outcome = await manager.switchSession(scope, peerId, target);
-        if (!outcome.ok) return '切换失败：目标会话不在宿主工作区账目内';
+        if (!outcome.ok) {
+          if (outcome.reason === 'occupied') return '切换失败：该会话已绑定其他 QQ 用户或群，不能切入';
+          if (outcome.reason === 'not-on-disk') return '切换失败：目标会话的磁盘记录已不存在';
+          return '切换失败：目标会话不在宿主工作区账目内';
+        }
         if (outcome.alreadyCurrent) return `当前就在会话 ${shortId(target)}`;
         return [
           `✅ 已切换到会话 ${shortId(target)}`,
@@ -73,27 +78,32 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
       }
 
       const lines: string[] = ['### 📂 会话列表', ''];
-      for (const group of groups) {
-        lines.push(`**${group.title}**${group.isCurrentWorkspace ? '（当前工作区）' : ''}`);
+      let displayIndex = 0;
+      for (const [groupIndex, group] of groups.entries()) {
+        lines.push(`**${groupIndex + 1}. ${group.title}**${group.isCurrentWorkspace ? '（当前工作区）' : ''}`);
         if (group.sessions.length === 0) {
           lines.push('（暂无会话）');
         }
         for (const session of group.sessions) {
+          displayIndex += 1;
           const meta = [
             formatRelativeTime(session.createdAt),
             session.agentPreset ?? '',
           ].filter(Boolean).join(' · ');
+          const suffix = meta ? ` · ${meta}` : '';
           if (session.isCurrent) {
-            lines.push(`● ${shortId(session.sessionId)}（当前）${meta ? ` · ${meta}` : ''}`);
+            lines.push(`● ${displayIndex}. ${shortId(session.sessionId)}（当前）${suffix}`);
+          } else if (session.occupiedByOther) {
+            lines.push(`🔒 ${displayIndex}. ${shortId(session.sessionId)}（其他 QQ 用户/群）${suffix}`);
           } else {
-            const show = `○ ${shortId(session.sessionId)}${meta ? ` · ${meta}` : ''}`;
-            lines.push(`<qqbot-cmd-input text="/sessions ${session.sessionId}" show="${show}"/>`);
+            const show = `○ ${displayIndex}. ${shortId(session.sessionId)}${suffix}`;
+            lines.push(renderCmdInput(`/sessions ${displayIndex}`, show));
           }
         }
         if (group.truncated > 0) {
           lines.push(`…另有 ${group.truncated} 个会话未展示（/sessions <id前缀> 直达）`);
         }
-        lines.push(`<qqbot-cmd-input text="/sessions new ${group.path}" show="＋ 在此工作区开新会话"/>`, '');
+        lines.push(renderCmdInput(`/sessions new ${groupIndex + 1}`, `＋ 组${groupIndex + 1} 开新会话`), '');
       }
 
       await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);

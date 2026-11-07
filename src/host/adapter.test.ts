@@ -235,6 +235,14 @@ describe('attachSessionToWorkspace', () => {
 
   // ── applyPermissionKnobs ──
 
+  it('applyPermissionKnobs：策略模块不可解析返回 false（fail-soft）', async () => {
+    vi.doMock('@deepseek-ai/dsh-sandbox-policy', () => { throw new Error('module unavailable'); });
+    _resetAdapterCache();
+    const adapter = createHostAdapter(makeCtx({ sandboxPolicy: {}, approval: {} }));
+    const session = { append: vi.fn() };
+    await expect(adapter.applyPermissionKnobs(session, { sandbox: 'read-only', approval: 'ask' })).resolves.toBe(false);
+  });
+
   it('applyPermissionKnobs：无 append 的会话返回 false（warn 不抛，不触模块导入）', async () => {
     const logger = makeLogger();
     const adapter = createHostAdapter(makeCtx({}), logger);

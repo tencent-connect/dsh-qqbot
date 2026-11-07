@@ -18,7 +18,7 @@ import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter, type PermissionKnobs } from '../host/adapter.ts';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, realpathSync } from 'node:fs';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
@@ -85,14 +85,12 @@ export function latestCompletedPrefixBoundary(events: readonly unknown[]): numbe
 
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
-  /**
-   * 同 key 正在进行的 getOrCreate（singleflight）。
-   *
-   * 斜杠命令与待答问题截获位于 concurrencyGuard 之前（见 gateway/middleware-setup），
-   * 与普通消息不串行：同 key 并发进入会各自 resume/create，产出两个 agent，
-   * 后写入 sessions 的覆盖前者且前者无人 dispose（泄漏）。
-   */
+  /** 同 key 正在进行的 getOrCreate（singleflight，保留并发打开共享结果的契约） */
   private inflight = new Map<string, Promise<SessionRecord>>();
+  /** 切换操作互斥链（/sessions、/permission、/model） */
+  private keyLocks = new Map<string, Promise<void>>();
+  /** 切换屏障：屏障存在期间，新消息不得进入 openSession 覆盖刚切换的映射 */
+  private mutations = new Map<string, Promise<void>>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -226,17 +224,18 @@ export class SessionManager {
    */
   async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
     const key = this.sessionKey(scope, peerId);
+    return this.withSessionLock(key, async () => {
+      this.modelResolver.setOverride(key, route);
 
-    this.modelResolver.setOverride(key, route);
+      const record = this.sessions.get(key);
+      if (!record) {
+        this.logger.info(`model pref saved (no active session): key=${key} → ${route.provider}/${route.model}`);
+        return;
+      }
 
-    const record = this.sessions.get(key);
-    if (!record) {
-      this.logger.info(`model pref saved (no active session): key=${key} → ${route.provider}/${route.model}`);
-      return;
-    }
-
-    await this.rebuildSession(record, { route });
-    this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model}`);
+      await this.rebuildSession(record, { route });
+      this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model}`);
+    });
   }
 
   /**
@@ -479,6 +478,43 @@ export class SessionManager {
     }
   }
 
+  /** 等待所有已开始的切换屏障（连续多个切换也会被逐一等待） */
+  private async waitForMutation(key: string): Promise<void> {
+    while (this.mutations.has(key)) {
+      await this.mutations.get(key);
+    }
+  }
+
+  /**
+   * 同 key 串行执行切换操作。先对普通消息设置屏障，再等待已经在途的
+   * openSession；因此 openSession 不会晚于切换提交并覆盖目标映射。
+   */
+  private async withSessionLock<T>(key: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.keyLocks.get(key) ?? Promise.resolve();
+    let releaseLock!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseLock = resolve; });
+    const tail = previous.then(() => gate);
+    this.keyLocks.set(key, tail);
+
+    // 必须在第一个 await 之前同步安装屏障：同一 tick 内先 /sessions、
+    // 后普通消息时，消息不得抢在切换前进入 openSession。
+    // 连续多个切换会后者覆盖 map；waitForMutation 的 while 会等到最后一个。
+    let releaseMutation!: () => void;
+    const mutation = new Promise<void>((resolve) => { releaseMutation = resolve; });
+    this.mutations.set(key, mutation);
+
+    await previous;
+    try {
+      await this.inflight.get(key)?.catch(() => {});
+      return await task();
+    } finally {
+      if (this.mutations.get(key) === mutation) this.mutations.delete(key);
+      releaseMutation();
+      releaseLock();
+      if (this.keyLocks.get(key) === tail) this.keyLocks.delete(key);
+    }
+  }
+
   /** 获取或恢复或创建会话（get → resume → create）；同 key 并发合并为一次 */
   async getOrCreate(
     scope: ChatScope,
@@ -487,8 +523,9 @@ export class SessionManager {
     replyTarget: ReplyTarget,
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
-    const existing = this.sessions.get(key);
+    await this.waitForMutation(key);
 
+    const existing = this.sessions.get(key);
     if (existing) {
       existing.replyTarget = replyTarget;
       existing.lastActivity = Date.now();
@@ -570,14 +607,9 @@ export class SessionManager {
         handle = created;
         this.persistSessionId(key, sessionId);
         this.logger.info(`created new session: key=${key} sessionId=${sessionId} preset=${agentPreset ?? 'none'}`);
-        // per-peer 权限偏好是新会话的默认 knob（resume 路径由事件重放恢复，无需重复 append）
-        const permPref = this.modelResolver.getPermission(key);
-        if (permPref) {
-          const applied = await this.host.applyPermissionKnobs(agent.session, permPref);
-          if (!applied) {
-            this.logger.warn(`permission pref apply failed (session keeps deployment default): key=${key}`);
-          }
-        }
+        // per-peer 权限偏好是新会话默认；resume/live 由 durable 事件恢复，避免覆盖
+        // 用户在桌面端后来做出的权限切换。无活跃会话的 /permission 会先 revive 再切换。
+        await this.applyPermissionPreference(key, agent);
       }
     }
 
@@ -597,14 +629,27 @@ export class SessionManager {
     this.attachPrompt(agent, scope);
     this.sessions.set(key, record);
 
-    // 挂载到对应工作区（侧边栏可见性）；fail-soft、异步执行，不阻塞消息处理。
-    // 宿主只在客户端 session.create RPC 时挂载会话，插件会话不走那条路径，
-    // 闲置回收后会从侧边栏消失（详见 host/adapter.ts 的 attachSessionToWorkspace）。
-    // cwd 必须与 meta.cwd 同源（workspaceDir()），否则 attachSession 的
-    // header.cwd 校验（realpath 后须等于工作区 path）会失败。
-    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir(key));
+    // 挂载到对应工作区后再返回：紧随其后的 /sessions 必须能看到当前会话。
+    // adapter 内部仍 fail-soft，失败只告警，不阻断消息处理。
+    // cwd 必须与 meta.cwd 同源，否则 header.cwd 的 realpath 校验会失败。
+    await this.host.attachSessionToWorkspace(sessionId, this.workspaceDir(key));
 
     return record;
+  }
+
+  /** 将 per-peer 权限偏好应用到新建会话（调用方已持有 key 锁；仅 create 分支调用） */
+  private async applyPermissionPreference(key: string, agent: DshAgent): Promise<void> {
+    const pref = this.modelResolver.getPermission(key);
+    if (!pref) return;
+    const current = this.host.readPermissionKnobs(agent.session);
+    if (current?.sandbox === pref.sandbox && current.approval === pref.approval) return;
+
+    const applied = await this.host.applyPermissionKnobs(agent.session, pref);
+    if (!applied) {
+      this.logger.warn(`permission pref apply failed (session keeps deployment default): key=${key}`);
+      return;
+    }
+    this.logger.info(`permission pref applied on session open: key=${key} → ${pref.sandbox}+${pref.approval}`);
   }
 
   /**
@@ -700,6 +745,12 @@ export class SessionManager {
 
   async remove(scope: ChatScope, peerId: string): Promise<void> {
     const key = this.sessionKey(scope, peerId);
+    await this.waitForMutation(key);
+    return this.removeUnlocked(key);
+  }
+
+  /** /new 的实际清理（调用方已持有 key 锁；/sessions new 复用避免重入死锁） */
+  private async removeUnlocked(key: string): Promise<void> {
     const record = this.sessions.get(key);
     this.modelResolver.setSessionId(key, mintSessionId());
 
@@ -733,11 +784,17 @@ export class SessionManager {
     return this.resolveWorkspacePref(key) ?? resolveAgentCwd(this.config.cwd);
   }
 
-  /** prefs 偏好命中且仍为已登记工作区才生效；未登记回退默认并 warn（每 key 一次） */
+  /** 文件发送/交付物按 QQ peer 取当前工作区，避免注册期固定 config.cwd */
+  workspacePathForPeer(scope: ChatScope, peerId: string): string {
+    return this.effectiveWorkspacePath(this.sessionKey(scope, peerId));
+  }
+
+  /** prefs 偏好命中且仍为已登记工作区才生效；返回宿主规范化后的真实路径 */
   private resolveWorkspacePref(key: string): string | undefined {
     const pref = this.modelResolver.getWorkspace(key);
     if (pref === undefined) return undefined;
-    if (this.isRegisteredWorkspace(pref)) return pref;
+    const registered = this.registeredWorkspacePath(pref);
+    if (registered !== undefined) return registered;
     if (!this.workspacePrefWarned.has(key)) {
       this.workspacePrefWarned.add(key);
       this.logger.warn(`per-peer workspace not registered, fallback to default: key=${key} dir=${pref}`);
@@ -745,9 +802,14 @@ export class SessionManager {
     return undefined;
   }
 
-  private isRegisteredWorkspace(path: string): boolean {
-    return this.host.listWorkspaces().some((workspace) => workspace.path === path);
+  /** 宿主 Workspace.path 是 realpath；header.cwd/prefs 可能含符号链接或尾斜杠，比较前统一规范化 */
+  private registeredWorkspacePath(path: string): string | undefined {
+    const canonical = canonicalPath(path);
+    return this.host.listWorkspaces().find(
+      (workspace) => canonicalPath(workspace.path) === canonical,
+    )?.path;
   }
+
 
   /** 目标会话是否在宿主某工作区账目内（/sessions 切换的准入校验） */
   isRegisteredSession(sessionId: string): boolean {
@@ -808,6 +870,14 @@ export class SessionManager {
 
   // ── /sessions：工作区分组的会话导航 ──
 
+  /** 会话被其他 QQ peer 绑定即占用；未归属的桌面会话允许切入 */
+  private isOccupiedByOther(key: string, sessionId: string): boolean {
+    for (const record of this.sessions.values()) {
+      if (record.sessionId === sessionId && record.sessionKey !== key) return true;
+    }
+    return this.modelResolver.findSessionKeys(sessionId).some((owner) => owner !== key);
+  }
+
   /** 列出宿主工作区（title + path），/sessions new 的错误提示用 */
   listWorkspaceRefs(): Array<{ title: string; path: string }> {
     return this.host.listWorkspaces().map((workspace) => ({ title: workspace.title, path: workspace.path }));
@@ -827,39 +897,38 @@ export class SessionManager {
     const workspaceCap = caps.workspaces ?? LIST_WORKSPACE_CAP;
     const sessionCap = caps.sessions ?? LIST_SESSION_CAP;
     const currentSessionId = this.sessions.get(key)?.sessionId ?? this.modelResolver.getSessionId(key);
-    const currentPath = this.effectiveWorkspacePath(key);
+    const currentPath = canonicalPath(this.effectiveWorkspacePath(key));
 
     const all = this.host.listWorkspaces();
     if (all.length === 0) return [];
 
     // 当前工作区排最前，其余保持注册表顺序（sort 稳定）
     const ordered = [...all].sort(
-      (a, b) => Number(b.path === currentPath) - Number(a.path === currentPath),
+      (a, b) => Number(canonicalPath(b.path) === currentPath) - Number(canonicalPath(a.path) === currentPath),
     );
 
-    const groups: SessionGroup[] = [];
-    for (const workspace of ordered.slice(0, workspaceCap)) {
+    // header 读取并行化，避免 5 组 × 8 条产生 40 次串行持久化 stat
+    return Promise.all(ordered.slice(0, workspaceCap).map(async (workspace): Promise<SessionGroup> => {
       const shown = workspace.sessionIds.slice(0, sessionCap);
       const truncated = workspace.sessionIds.length - shown.length;
-      const sessions: SessionGroupEntry[] = [];
-      for (const sessionId of shown) {
+      const sessions = await Promise.all(shown.map(async (sessionId): Promise<SessionGroupEntry> => {
         const header = await this.host.sessionHeader(sessionId);
-        sessions.push({
+        return {
           sessionId,
           createdAt: header?.createdAt,
           agentPreset: header?.agentPreset,
           isCurrent: sessionId === currentSessionId,
-        });
-      }
-      groups.push({
+          occupiedByOther: this.isOccupiedByOther(key, sessionId),
+        };
+      }));
+      return {
         path: workspace.path,
         title: workspace.title,
-        isCurrentWorkspace: workspace.path === currentPath,
+        isCurrentWorkspace: canonicalPath(workspace.path) === currentPath,
         sessions,
         truncated,
-      });
-    }
-    return groups;
+      };
+    }));
   }
 
   /**
@@ -889,32 +958,53 @@ export class SessionManager {
    */
   async switchSession(scope: ChatScope, peerId: string, targetSessionId: string): Promise<SwitchSessionOutcome> {
     const key = this.sessionKey(scope, peerId);
-    if (!this.isRegisteredSession(targetSessionId)) {
-      this.logger.warn(`switch to unregistered session refused: key=${key} target=${targetSessionId}`);
-      return { ok: false, reason: 'unknown-session' };
-    }
+    return this.withSessionLock(key, async () => {
+      if (!this.isRegisteredSession(targetSessionId)) {
+        this.logger.warn(`switch to unregistered session refused: key=${key} target=${targetSessionId}`);
+        return { ok: false as const, reason: 'unknown-session' as const };
+      }
+      const record = this.sessions.get(key);
+      const currentId = record?.sessionId ?? this.modelResolver.getSessionId(key);
+      if (currentId === targetSessionId) return { ok: true as const, alreadyCurrent: true };
 
-    const record = this.sessions.get(key);
-    const currentId = record?.sessionId ?? this.modelResolver.getSessionId(key);
-    if (currentId === targetSessionId) return { ok: true, alreadyCurrent: true };
+      if (this.isOccupiedByOther(key, targetSessionId)) {
+        this.logger.warn(`switch to session occupied by another peer refused: key=${key} target=${targetSessionId}`);
+        return { ok: false as const, reason: 'occupied' as const };
+      }
 
-    this.modelResolver.setSessionId(key, targetSessionId);
-    const header = await this.host.sessionHeader(targetSessionId);
-    if (header?.cwd !== undefined && this.isRegisteredWorkspace(header.cwd)) {
-      this.modelResolver.setWorkspace(key, header.cwd);
-    } else {
-      this.modelResolver.clearWorkspace(key);
-    }
-    this.workspaceDirs.delete(key);
+      // 账目存在不等于日志仍在盘上；明确缺失时拒绝，避免 resume 失败后以同 id
+      // 新建空白会话、静默顶掉用户想切回的历史。旧宿主无 stat 时保持既有降级。
+      const exists = await this.host.sessionExists(targetSessionId);
+      if (exists === false) {
+        this.logger.warn(`switch to session missing on disk refused: key=${key} target=${targetSessionId}`);
+        return { ok: false as const, reason: 'not-on-disk' as const };
+      }
 
-    if (record) {
-      this.sessions.delete(key);
-      this.releasePrompt(record.agent);
-      record.agent.cancel({ kind: 'user' });
-      await record.handle.dispose().catch(() => {});
-    }
-    this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
-    return { ok: true };
+      // 磁盘校验有 await；不同 peer 可能同时抢同一个未归属会话。
+      // 写映射前同步复查，后到的 peer 必须被拒绝（check+set 之间不再 yield）。
+      if (this.isOccupiedByOther(key, targetSessionId)) {
+        this.logger.warn(`session became occupied during switch: key=${key} target=${targetSessionId}`);
+        return { ok: false as const, reason: 'occupied' as const };
+      }
+      this.modelResolver.setSessionId(key, targetSessionId);
+      const header = await this.host.sessionHeader(targetSessionId);
+      const workspace = header?.cwd !== undefined ? this.registeredWorkspacePath(header.cwd) : undefined;
+      if (workspace !== undefined) {
+        this.modelResolver.setWorkspace(key, workspace);
+      } else {
+        this.modelResolver.clearWorkspace(key);
+      }
+      this.workspaceDirs.delete(key);
+
+      if (record) {
+        this.sessions.delete(key);
+        this.releasePrompt(record.agent);
+        record.agent.cancel({ kind: 'user' });
+        await record.handle.dispose().catch(() => {});
+      }
+      this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
+      return { ok: true as const };
+    });
   }
 
   /**
@@ -923,19 +1013,28 @@ export class SessionManager {
    */
   async startNewInWorkspace(scope: ChatScope, peerId: string, workspaceRef: string): Promise<StartNewOutcome> {
     const key = this.sessionKey(scope, peerId);
-    const workspace = this.host.listWorkspaces().find(
-      (candidate) => candidate.path === workspaceRef || candidate.title === workspaceRef,
-    );
-    if (!workspace) {
-      this.logger.warn(`new session in unknown workspace refused: key=${key} ref=${workspaceRef}`);
-      return { ok: false, reason: 'unknown-workspace' };
-    }
+    return this.withSessionLock(key, async () => {
+      let ref = workspaceRef.trim();
+      // QQ 按钮只传组序号，不把绝对路径塞进 cmd-input 的 text 属性
+      if (/^\d+$/.test(ref)) {
+        const groups = await this.listSessionGroups(scope, peerId);
+        const index = Number(ref);
+        ref = index >= 1 && index <= groups.length ? groups[index - 1]!.path : '';
+      }
+      const workspace = this.host.listWorkspaces().find(
+        (candidate) => candidate.path === ref || candidate.title === ref,
+      );
+      if (!workspace) {
+        this.logger.warn(`new session in unknown workspace refused: key=${key} ref=${workspaceRef}`);
+        return { ok: false as const, reason: 'unknown-workspace' as const };
+      }
 
-    this.modelResolver.setWorkspace(key, workspace.path);
-    this.workspaceDirs.delete(key);
-    await this.remove(scope, peerId); // 铸新 id + 释放当前 agent
-    this.logger.info(`new session in workspace: key=${key} -> ${workspace.path}`);
-    return { ok: true, path: workspace.path };
+      this.modelResolver.setWorkspace(key, workspace.path);
+      this.workspaceDirs.delete(key);
+      await this.removeUnlocked(key); // 铸新 id + 释放当前 agent（同锁，不重入）
+      this.logger.info(`new session in workspace: key=${key} -> ${workspace.path}`);
+      return { ok: true as const, path: workspace.path };
+    });
   }
 
   // ── /permission：会话内权限切换 ──
@@ -947,16 +1046,16 @@ export class SessionManager {
   getPermissionStatus(
     scope: ChatScope,
     peerId: string,
-  ): { knobs?: PermissionKnobs; source: 'session' | 'pref' | 'default' } {
+  ): { knobs?: PermissionKnobs; source: 'session' | 'pref' | 'default'; active: boolean } {
     const key = this.sessionKey(scope, peerId);
     const record = this.sessions.get(key);
     if (record) {
       const knobs = this.host.readPermissionKnobs(record.agent.session);
-      if (knobs) return { knobs, source: 'session' };
+      if (knobs) return { knobs, source: 'session', active: true };
     }
     const pref = this.modelResolver.getPermission(key);
-    if (pref) return { knobs: pref, source: 'pref' };
-    return { source: 'default' };
+    if (pref) return { knobs: pref, source: 'pref', active: record !== undefined };
+    return { source: 'default', active: record !== undefined };
   }
 
   /**
@@ -964,22 +1063,43 @@ export class SessionManager {
    * 同时持久化为 per-peer 偏好，/new 后的新会话沿用（knob 事件随旧会话归档）。
    * 宿主策略模块不可用（最小组合）时 live 应用失败，偏好仍已保存。
    */
-  async setPermission(scope: ChatScope, peerId: string, knobs: PermissionKnobs): Promise<SetPermissionOutcome> {
+  async setPermission(
+    scope: ChatScope,
+    peerId: string,
+    knobs: PermissionKnobs,
+    revive?: { senderId: string; replyTarget: ReplyTarget },
+  ): Promise<SetPermissionOutcome> {
     const key = this.sessionKey(scope, peerId);
-    this.modelResolver.setPermission(key, knobs);
+    return this.withSessionLock(key, async () => {
+      this.modelResolver.setPermission(key, knobs);
 
-    const record = this.sessions.get(key);
-    if (!record) {
-      this.logger.info(`permission pref saved (no active session): key=${key} → ${knobs.sandbox}+${knobs.approval}`);
-      return { ok: true, appliedLive: false };
-    }
-    const applied = await this.host.applyPermissionKnobs(record.agent.session, knobs);
-    if (!applied) {
-      this.logger.warn(`permission apply failed on live session: key=${key}`);
-      return { ok: false, reason: 'apply-failed' };
-    }
-    this.logger.info(`permission switched: key=${key} → ${knobs.sandbox}+${knobs.approval}`);
-    return { ok: true, appliedLive: true };
+      let record = this.sessions.get(key);
+      if (!record && revive) {
+        try {
+          // 不等待下一条消息：命令本身先恢复/创建会话，再立即 append knob。
+          // mutation 屏障已阻止新消息进入 openSession，这里直接复用打开流程。
+          record = await this.openSession(key, scope, peerId, revive.senderId, revive.replyTarget);
+        } catch (err) {
+          this.logger.warn(`permission revive failed: key=${key} err=${errorText(err)}`);
+          return { ok: false as const, reason: 'apply-failed' as const };
+        }
+      }
+      if (!record) {
+        this.logger.info(`permission pref saved (applies on next session open): key=${key} → ${knobs.sandbox}+${knobs.approval}`);
+        return { ok: true as const, appliedLive: false };
+      }
+
+      const current = this.host.readPermissionKnobs(record.agent.session);
+      const applied = current?.sandbox === knobs.sandbox && current.approval === knobs.approval
+        ? true
+        : await this.host.applyPermissionKnobs(record.agent.session, knobs);
+      if (!applied) {
+        this.logger.warn(`permission apply failed on live session: key=${key}`);
+        return { ok: false as const, reason: 'apply-failed' as const };
+      }
+      this.logger.info(`permission switched: key=${key} → ${knobs.sandbox}+${knobs.approval}`);
+      return { ok: true as const, appliedLive: true };
+    });
   }
 
   /**
@@ -1005,6 +1125,15 @@ export class SessionManager {
 
   get size(): number {
     return this.sessions.size;
+  }
+}
+
+/** realpath 规范化；路径不存在时保留原值（由后续存在性/登记校验处理） */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
   }
 }
 
