@@ -171,6 +171,15 @@ export interface StartNewOutcome {
   path?: string;
 }
 
+/** /permission 切换结果 */
+export interface SetPermissionOutcome {
+  ok: boolean;
+  /** apply-failed：宿主策略模块不可用或会话写入失败 */
+  reason?: 'apply-failed';
+  /** 是否已作用于活跃会话（false = 仅保存为新会话默认） */
+  appliedLive?: boolean;
+}
+
 /** 会话状态信息（/status 用） */
 export interface SessionStatus {
   active: boolean;

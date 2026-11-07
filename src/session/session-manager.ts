@@ -17,7 +17,7 @@ import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
 import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
-import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
+import { createHostAdapter, type HostAdapter, type PermissionKnobs } from '../host/adapter.ts';
 import { mkdirSync } from 'node:fs';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
@@ -42,6 +42,7 @@ import type {
   SessionGroupEntry,
   SwitchSessionOutcome,
   StartNewOutcome,
+  SetPermissionOutcome,
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
@@ -569,6 +570,14 @@ export class SessionManager {
         handle = created;
         this.persistSessionId(key, sessionId);
         this.logger.info(`created new session: key=${key} sessionId=${sessionId} preset=${agentPreset ?? 'none'}`);
+        // per-peer 权限偏好是新会话的默认 knob（resume 路径由事件重放恢复，无需重复 append）
+        const permPref = this.modelResolver.getPermission(key);
+        if (permPref) {
+          const applied = await this.host.applyPermissionKnobs(agent.session, permPref);
+          if (!applied) {
+            this.logger.warn(`permission pref apply failed (session keeps deployment default): key=${key}`);
+          }
+        }
       }
     }
 
@@ -927,6 +936,59 @@ export class SessionManager {
     await this.remove(scope, peerId); // 铸新 id + 释放当前 agent
     this.logger.info(`new session in workspace: key=${key} -> ${workspace.path}`);
     return { ok: true, path: workspace.path };
+  }
+
+  // ── /permission：会话内权限切换 ──
+
+  /**
+   * 当前生效的权限 knob：活跃会话事件（实际值）> per-peer 偏好（新会话默认）。
+   * 两者皆无 → source 'default'（跟随宿主部署配置）。
+   */
+  getPermissionStatus(
+    scope: ChatScope,
+    peerId: string,
+  ): { knobs?: PermissionKnobs; source: 'session' | 'pref' | 'default' } {
+    const key = this.sessionKey(scope, peerId);
+    const record = this.sessions.get(key);
+    if (record) {
+      const knobs = this.host.readPermissionKnobs(record.agent.session);
+      if (knobs) return { knobs, source: 'session' };
+    }
+    const pref = this.modelResolver.getPermission(key);
+    if (pref) return { knobs: pref, source: 'pref' };
+    return { source: 'default' };
+  }
+
+  /**
+   * 切换权限：活跃会话立即 append knob 事件生效（durable，重启重放保留）；
+   * 同时持久化为 per-peer 偏好，/new 后的新会话沿用（knob 事件随旧会话归档）。
+   * 宿主策略模块不可用（最小组合）时 live 应用失败，偏好仍已保存。
+   */
+  async setPermission(scope: ChatScope, peerId: string, knobs: PermissionKnobs): Promise<SetPermissionOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    this.modelResolver.setPermission(key, knobs);
+
+    const record = this.sessions.get(key);
+    if (!record) {
+      this.logger.info(`permission pref saved (no active session): key=${key} → ${knobs.sandbox}+${knobs.approval}`);
+      return { ok: true, appliedLive: false };
+    }
+    const applied = await this.host.applyPermissionKnobs(record.agent.session, knobs);
+    if (!applied) {
+      this.logger.warn(`permission apply failed on live session: key=${key}`);
+      return { ok: false, reason: 'apply-failed' };
+    }
+    this.logger.info(`permission switched: key=${key} → ${knobs.sandbox}+${knobs.approval}`);
+    return { ok: true, appliedLive: true };
+  }
+
+  /**
+   * 清除 per-peer 权限偏好（/permission reset）：新会话回到宿主部署默认。
+   * 活跃会话已 append 的 knob 事件是 durable 日志，无法回收——当前会话保持
+   * 现状直到 /new（命令文案已说明）。
+   */
+  clearPermission(scope: ChatScope, peerId: string): boolean {
+    return this.modelResolver.clearPermission(this.sessionKey(scope, peerId));
   }
 
   async disposeAll(): Promise<void> {

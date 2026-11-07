@@ -71,13 +71,17 @@ function fakeHandle(id: string): DshAgentHandle {
 
 const managers: Array<InstanceType<typeof SessionManager>> = [];
 
-function createManager(ctx: Context) {
+function createManager(ctx: Context, events: unknown[] = []) {
   const registry = {
     get: vi.fn(() => undefined),
     resume: vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => {
       throw Object.assign(new Error(`session "${resumeSessionId}" not found`), { name: 'SessionPersistenceNotFoundError' });
     }),
-    create: vi.fn(async (options: { sessionId: string }) => fakeHandle(options.sessionId)),
+    create: vi.fn(async (options: { sessionId: string }) => {
+      const agent = fakeAgent(options.sessionId);
+      (agent as { session: unknown }).session = { id: options.sessionId, snapshotEvents: () => events };
+      return { agent, dispose: vi.fn(async () => {}) };
+    }),
   } as unknown as DshAgentRegistry;
   const config = ConfigSchema({
     appId: APP_ID,
@@ -275,5 +279,75 @@ describe('resolveWorkspacePref（per-peer cwd）', () => {
 
     const createCall = (registry.create as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as { meta?: { cwd?: string } };
     expect(createCall?.meta?.cwd).toBe(WS_A);
+  });
+});
+
+describe('permission（/permission 会话内切换）', () => {
+  const KNOBS = { sandbox: 'read-only', approval: 'ask' };
+  const KNOB_EVENTS = [
+    { type: 'sandbox/mode', data: { mode: 'danger-full-access' } },
+    { type: 'approval/policy', data: { policy: 'never' } },
+  ];
+  const ctx = () => workspaceCtx([]);
+
+  it('getPermissionStatus：无会话无偏好 → default', () => {
+    const { manager } = createManager(ctx());
+    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ source: 'default' });
+  });
+
+  it('getPermissionStatus：无活跃会话 → per-peer 偏好', () => {
+    prefs().setPermission(KEY, KNOBS); // 构造前写（内存副本构造时加载）
+    const { manager } = createManager(ctx());
+    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({ knobs: KNOBS, source: 'pref' });
+  });
+
+  it('getPermissionStatus：活跃会话事件优先于偏好', async () => {
+    prefs().setPermission(KEY, KNOBS);
+    const { manager } = createManager(ctx(), KNOB_EVENTS);
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(manager.getPermissionStatus('c2c', PEER)).toEqual({
+      knobs: { sandbox: 'danger-full-access', approval: 'never' },
+      source: 'session',
+    });
+  });
+
+  it('setPermission：无活跃会话 → 写偏好，appliedLive=false', async () => {
+    const { manager } = createManager(ctx());
+
+    const outcome = await manager.setPermission('c2c', PEER, KNOBS);
+
+    expect(outcome).toEqual({ ok: true, appliedLive: false });
+    expect(prefs().getPermission(KEY)).toEqual(KNOBS);
+  });
+
+  it('setPermission：活跃会话无 append（最小组合）→ apply-failed，偏好仍保存', async () => {
+    const { manager } = createManager(ctx());
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY); // fake session 无 append
+
+    const outcome = await manager.setPermission('c2c', PEER, KNOBS);
+
+    expect(outcome).toEqual({ ok: false, reason: 'apply-failed' });
+    expect(prefs().getPermission(KEY)).toEqual(KNOBS); // 偏好已落盘
+  });
+
+  it('clearPermission：清除偏好；无偏好返回 false', async () => {
+    prefs().setPermission(KEY, KNOBS);
+    const { manager } = createManager(ctx());
+
+    expect(manager.clearPermission('c2c', PEER)).toBe(true);
+    expect(prefs().getPermission(KEY)).toBeUndefined();
+    expect(manager.clearPermission('c2c', PEER)).toBe(false);
+  });
+
+  it('create 分支应用 per-peer 偏好：无 append 时 warn 但会话正常创建（fail-soft）', async () => {
+    prefs().setPermission(KEY, KNOBS); // 构造前写
+    const { manager, logger } = createManager(ctx());
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(record.sessionId).toMatch(MINTED); // 会话照常创建
+    const warns = (logger.warn as ReturnType<typeof vi.fn>).mock.calls.map(String);
+    expect(warns.some((w) => w.includes('permission pref apply failed'))).toBe(true);
   });
 });

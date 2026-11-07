@@ -12,6 +12,7 @@ import { newCommand, compactCommand } from './session.ts';
 import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
 import { sessionsCommand } from './sessions.ts';
+import { permissionCommand } from './permission.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
 import { pingCommand, versionCommand, stopCommand, meCommand } from './misc.ts';
@@ -27,6 +28,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     modelCommand(deps),
     presetCommand(deps),
     sessionsCommand(deps),
+    permissionCommand(deps),
     stopCommand(deps),
     // QQBot 特有
     pingCommand(),
