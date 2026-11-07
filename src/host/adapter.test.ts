@@ -178,4 +178,67 @@ describe('attachSessionToWorkspace', () => {
     await expect(adapter.attachSessionToWorkspace('sess-1', '/proj')).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalled();
   });
+
+  // ── listWorkspaces ──
+
+  it('listWorkspaces：映射 path/title/sessionIds；缺 title 回退 path，非法条目跳过', () => {
+    const registry = {
+      list: () => [
+        { path: '/proj-a', title: 'A 项目', sessionIds: ['session-1', 'session-2'] },
+        { path: '/proj-b', sessionIds: [123, 'session-3'] },        // 无 title + 混入非字符串 id
+        { title: '无路径' },                                          // 无 path → 跳过
+        null,
+      ],
+    };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }));
+    expect(adapter.listWorkspaces()).toEqual([
+      { path: '/proj-a', title: 'A 项目', sessionIds: ['session-1', 'session-2'] },
+      { path: '/proj-b', title: '/proj-b', sessionIds: ['session-3'] },
+    ]);
+  });
+
+  it('listWorkspaces：注册表未挂载 / 无 list / 抛错均返回空数组（不抛）', () => {
+    const none = createHostAdapter(makeCtx({}));
+    expect(none.listWorkspaces()).toEqual([]);
+
+    const noList = createHostAdapter(makeCtx({ workspaceRegistry: { create: vi.fn() } }));
+    expect(noList.listWorkspaces()).toEqual([]);
+
+    const failing = createHostAdapter(makeCtx({ workspaceRegistry: { list: () => { throw new Error('EIO'); } } }));
+    expect(failing.listWorkspaces()).toEqual([]);
+  });
+
+  // ── readPermissionKnobs ──
+
+  it('readPermissionKnobs：取最后一条 sandbox/mode 与 approval/policy（最后者胜）', () => {
+    const adapter = createHostAdapter(makeCtx({}));
+    const session = {
+      snapshotEvents: () => [
+        { type: 'sandbox/mode', data: { mode: 'read-only' } },
+        { type: 'approval/policy', data: { policy: 'ask' } },
+        { type: 'assistant/message', data: {} },
+        { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+        { type: 'approval/policy', data: { policy: 'never' } },
+      ],
+    };
+    expect(adapter.readPermissionKnobs(session)).toEqual({ sandbox: 'workspace-write', approval: 'never' });
+  });
+
+  it('readPermissionKnobs：仅一类事件 → 另一侧为空串；无事件 → undefined', () => {
+    const adapter = createHostAdapter(makeCtx({}));
+    const onlySandbox = { snapshotEvents: () => [{ type: 'sandbox/mode', data: { mode: 'read-only' } }] };
+    expect(adapter.readPermissionKnobs(onlySandbox)).toEqual({ sandbox: 'read-only', approval: '' });
+
+    expect(adapter.readPermissionKnobs({ snapshotEvents: () => [] })).toBeUndefined();
+    expect(adapter.readPermissionKnobs({})).toBeUndefined();
+  });
+
+  // ── applyPermissionKnobs ──
+
+  it('applyPermissionKnobs：无 append 的会话返回 false（warn 不抛，不触模块导入）', async () => {
+    const logger = makeLogger();
+    const adapter = createHostAdapter(makeCtx({}), logger);
+    await expect(adapter.applyPermissionKnobs({}, { sandbox: 'read-only', approval: 'ask' })).resolves.toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
 });

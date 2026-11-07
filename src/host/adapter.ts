@@ -41,13 +41,52 @@ export interface HostAdapter {
    * `attachSession` 幂等，创建与恢复路径都可安全调用；升级后老会话自动补挂。
    */
   attachSessionToWorkspace(sessionId: string, cwd: string): Promise<void>;
+  /**
+   * 列出宿主已登记的全部工作区（含各自会话账目）。注册表未挂载或形态
+   * 不符返回空数组（headless 组合属预期降级）；本方法只读、同步。
+   */
+  listWorkspaces(): WorkspaceSummary[];
+  /**
+   * 向会话追加 sandbox/mode 与 approval/policy 两个 knob 事件（宿主模块函数
+   * 是唯一写路径，事件 durable 可重放，下一受限调用生效）。模块不可解析、
+   * 会话无 append 或写入失败返回 false（fail-soft，不抛）。
+   */
+  applyPermissionKnobs(session: unknown, knobs: PermissionKnobs): Promise<boolean>;
+  /**
+   * 读会话当前生效的权限 knob：扫描事件流取最后一条 sandbox/mode 与
+   * approval/policy。两类事件都无则返回 undefined（部署默认）。
+   */
+  readPermissionKnobs(session: unknown): PermissionKnobs | undefined;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
 
-/** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
+/**
+ * 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层）。
+ * `cwd`/`createdAt` 供 /sessions 列表展示（对齐 dsh-session SessionHeader）。
+ */
 export interface SessionHeaderLike {
   agentPreset?: string;
+  /** 会话创建时的绝对工作目录（durable，attachSession 按它校验） */
+  cwd?: string;
+  /** 创建时间（Unix epoch ms） */
+  createdAt?: number;
+}
+
+/** 工作区摘要（/sessions 分组列表用；对齐 dsh-workspace Workspace 的只读投影） */
+export interface WorkspaceSummary {
+  /** 规范化目录路径（realpath，create 后不再改写） */
+  readonly path: string;
+  /** 显示标题（缺省为路径末段） */
+  readonly title: string;
+  /** 该工作区的会话有序账目（attach 前插，人工可排序） */
+  readonly sessionIds: readonly string[];
+}
+
+/** 权限 knob 组合（sandbox 模式 + 审批策略，对齐宿主两个 policy 模块的事件载荷） */
+export interface PermissionKnobs {
+  sandbox: string;
+  approval: string;
 }
 
 /** 工作区实体最小契约（对齐 dsh-workspace Workspace） */
@@ -93,6 +132,17 @@ function workspaceRegistry(ctx: Context): WorkspaceRegistryLike | undefined {
   return typeof registry?.create === 'function' ? registry : undefined;
 }
 
+/** workspaceRegistry 的 list 投影（只读，/sessions 分组列表用） */
+interface WorkspaceListLike {
+  list?(): unknown[];
+}
+
+/** 取出可 list 的 workspaceRegistry；形态不匹配返回 undefined */
+function listCapableRegistry(ctx: Context): WorkspaceListLike | undefined {
+  const registry = safeGet(ctx, 'workspaceRegistry') as WorkspaceListLike | undefined;
+  return typeof registry?.list === 'function' ? registry : undefined;
+}
+
 /** 模块级函数的动态 import 结果缓存（spec 变量路径绕开本地依赖类型检查） */
 const moduleCache = new Map<string, Record<string, unknown> | undefined>();
 
@@ -122,6 +172,9 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
   capabilities.push(workspaceRegistry(ctx)
     ? 'workspaceRegistry.create(可用)'
     : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
+  capabilities.push(listCapableRegistry(ctx)
+    ? 'workspaceRegistry.list(可用)'
+    : 'workspaceRegistry.list(不可用，/sessions 分组列表降级)');
 
   let resolveFn: ((agent: { ctx: unknown }, name: string) => unknown | undefined) | undefined;
   const presets = safeGet(ctx, 'agentPresets') as
@@ -202,6 +255,76 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         // 仅影响侧边栏展示，绝不打断消息处理；但属异常（cwd 不匹配/目录缺失等），warn 留痕
         logger?.warn?.(`host adapter: workspace attach failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+
+    listWorkspaces(): WorkspaceSummary[] {
+      const registry = listCapableRegistry(ctx);
+      if (!registry) return [];
+      try {
+        const list = registry.list?.() ?? [];
+        const out: WorkspaceSummary[] = [];
+        for (const raw of list) {
+          const workspace = raw as { path?: unknown; title?: unknown; sessionIds?: unknown };
+          if (!workspace || typeof workspace.path !== 'string' || !workspace.path) continue;
+          out.push({
+            path: workspace.path,
+            title: typeof workspace.title === 'string' && workspace.title ? workspace.title : workspace.path,
+            sessionIds: Array.isArray(workspace.sessionIds)
+              ? workspace.sessionIds.filter((id): id is string => typeof id === 'string')
+              : [],
+          });
+        }
+        return out;
+      } catch (err) {
+        logger?.warn?.(`host adapter: list workspaces failed: ${err instanceof Error ? err.message : String(err)}`);
+        return [];
+      }
+    },
+
+    async applyPermissionKnobs(session, knobs) {
+      const appendable = session as { append?: (...args: unknown[]) => unknown } | null | undefined;
+      if (typeof appendable?.append !== 'function') {
+        logger?.warn?.('host adapter: session has no append, permission switch unavailable');
+        return false;
+      }
+      const sandboxMod = await importModule('@deepseek-ai/dsh-sandbox-policy', logger);
+      const approvalMod = await importModule('@deepseek-ai/dsh-user-approval', logger);
+      const setSandboxMode = sandboxMod?.setSandboxMode as
+        | ((session: unknown, mode: string) => void)
+        | undefined;
+      const setApprovalPolicy = approvalMod?.setApprovalPolicy as
+        | ((session: unknown, policy: string) => void)
+        | undefined;
+      if (typeof setSandboxMode !== 'function' || typeof setApprovalPolicy !== 'function') {
+        logger?.warn?.('host adapter: permission policy modules unavailable, switch declined');
+        return false;
+      }
+      try {
+        setSandboxMode(session, knobs.sandbox);
+        setApprovalPolicy(session, knobs.approval);
+        return true;
+      } catch (err) {
+        logger?.warn?.(`host adapter: apply permission knobs failed: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    },
+
+    readPermissionKnobs(session) {
+      const events = this.sessionEvents(
+        session as { snapshotEvents?: () => readonly unknown[]; events?: readonly unknown[] },
+      );
+      let sandbox: string | undefined;
+      let approval: string | undefined;
+      for (const raw of events) {
+        const event = raw as { type?: string; data?: { mode?: unknown; policy?: unknown } };
+        if (event?.type === 'sandbox/mode' && typeof event.data?.mode === 'string') {
+          sandbox = event.data.mode;
+        } else if (event?.type === 'approval/policy' && typeof event.data?.policy === 'string') {
+          approval = event.data.policy;
+        }
+      }
+      if (sandbox === undefined && approval === undefined) return undefined;
+      return { sandbox: sandbox ?? '', approval: approval ?? '' };
     },
 
     async buildForkSeed(events, boundary) {
