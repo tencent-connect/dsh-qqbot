@@ -163,7 +163,7 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
 | `/model` | 查看或切换模型 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
-| `/sessions` | 按工作区分组查看会话，点击切换会话或在指定工作区开新会话 |
+| `/sessions` | 按工作区分组查看会话，点击序号切换会话或在指定工作区开新会话；其他 QQ 用户/群占用的会话会锁定 |
 | `/permission` | 查看或切换会话权限（read-only / workspace-write / danger-full-access） |
 | `/stop` | 中止当前生成 |
 | `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |

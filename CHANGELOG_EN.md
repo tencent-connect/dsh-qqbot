@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
-- **New `/sessions` command**: lists sessions grouped by workspace (mirroring the desktop sidebar's workspace→session tree); click to switch to any session or start a new one in a chosen workspace — context and the on-disk working directory follow the switch.
+- **New `/sessions` command**: lists sessions grouped by workspace (mirroring the desktop sidebar's workspace→session tree); click an index to switch sessions or start a new one in a chosen workspace — context and the on-disk working directory follow the switch. Sessions already bound to another QQ user or group are marked and cannot be switched into.
 - **New `/permission` command**: view or switch the current session's permission (read-only / workspace-write / danger-full-access); takes effect immediately, survives restarts, and carries over to new sessions started via `/new`; dangerous combinations such as `danger-full-access` come with a prominent warning.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
 - **Turns that did not start in QQ are pushed to QQ**: continuing a bound session from the desktop, or a turn the host starts itself (a schedule, injected context, and the like), delivers the reply to the matching DM or group. It no longer spends the passive-reply quota of the previous QQ message, and it does not attach to that old message. Messages that arrive in QQ stay passive replies, and streaming is unchanged. Proactive messages must be enabled on the QQ Open Platform, or the send fails.
