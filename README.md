@@ -177,6 +177,7 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 | `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |
 | `/bot-version` | 查看版本信息 |
 | `/bot-status` | 查看当前会话状态 |
+| `/sendfile` | 发送本机文件到当前私聊（路径受 `sendFile.restrictPaths` 白名单约束） |
 | `/bot-help` | 查看所有指令 |
 
 ## 核心模块
