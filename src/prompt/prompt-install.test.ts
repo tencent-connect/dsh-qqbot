@@ -29,10 +29,10 @@ function entry(o: Partial<QQPromptEntry> = {}): QQPromptEntry {
 }
 
 describe('installQQPrompt (DSH section/context 注册)', () => {
-  it('registers 3 sections + 2 contexts; dispose clears', () => {
+  it('registers 4 sections + 2 contexts; dispose clears', () => {
     const sp = fakeSystemPrompt();
     const h = installQQPrompt(sp.ctx, entry());
-    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
+    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:question-style', 'qqbot:rules']);
     expect([...sp.contexts.keys()]).toEqual(['qqbot:turn-meta', 'qqbot:background']);
     h.dispose();
     expect(sp.sections.size).toBe(0); expect(sp.contexts.size).toBe(0);
@@ -52,7 +52,7 @@ describe('installQQPrompt (DSH section/context 注册)', () => {
     const sp = fakeSystemPrompt();
     installQQPrompt(sp.ctx, entry({ personaCard: () => '', extraPrompts: () => ({}) }));
     expect(sp.renderSections()).toContain('QQ');
-    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
+    expect([...sp.sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:question-style', 'qqbot:rules']);
   });
   it('lazily reads persona/extra so edits apply without reinstall', () => {
     const sp = fakeSystemPrompt(); let extra = 'OLDEX'; let persona = '# X' + NL + 'OLDPER';

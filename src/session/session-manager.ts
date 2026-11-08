@@ -143,6 +143,7 @@ export class SessionManager {
         scope,
         personaCard: () => '',
         extraPrompts: () => ({ group: this.config.groupPrompt, direct: this.config.directPrompt }),
+        questionStyleEnabled: () => this.config.questionStylePrompt !== false,
       }));
     } catch (err) {
       this.logger.warn(`qq prompt install failed (session keeps working without it): ${errorText(err)}`);
