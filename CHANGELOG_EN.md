@@ -10,12 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **Pairing codes for allowlists**: generate a 10-minute code in account settings and have users send it to the bot in the matching chat to join the DM/group/command roster; one code admits multiple people, with manual OpenID bulk-adding and copy/export as well. After an identity is removed, codes issued before the removal can no longer re-add it.
+- **Independent slash-command access**: new `access.commandMode` (open / allowlist / disabled) checks commands by sender identity, managed separately from the chat admission allowlists.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
 - **Turns that did not start in QQ are pushed to QQ**: continuing a bound session from the desktop, or a turn the host starts itself (a schedule, injected context, and the like), delivers the reply to the matching DM or group. It no longer spends the passive-reply quota of the previous QQ message, and it does not attach to that old message. Messages that arrive in QQ stay passive replies, and streaming is unchanged. Proactive messages must be enabled on the QQ Open Platform, or the send fails.
 - **Idle eviction can be disabled**: setting `sessionIdleTimeout` to `0` stops proactive eviction (the default stays 30 minutes).
 
 ### ⚠️ Behavior Changes
 
+- **Slash commands open by default**: `/preset`, `/model`, and other admin commands were previously limited to allowlisted users; with `access.commandMode` they are open to everyone by default — set it to `allowlist` and configure the command roster to keep them restricted.
 - **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
 
 ### Fixed

@@ -120,6 +120,16 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.c2cAllow` | string[] | `[]` | Direct-chat allowlist (user openid) |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
 | `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
+| `access.commandMode` | `open`/`allowlist`/`disabled` | `open` | Slash-command mode; the allowlist is checked per sender OpenID |
+
+Slash commands share the same open / allowlist / disabled modes as chats: a message first passes the chat admission rules, then the command is authorized by sender identity. Approval and question buttons keep their own authorization. The command roster lives in a separate identity file, so switching the mode never drops the list.
+
+All three rosters (direct chat, group, commands) support three ways to add members: **pairing codes**, **manual bulk-adding by OpenID**, and **copy/export**. Note that OpenIDs are not QQ numbers or group numbers; use a pairing code when the OpenID is unavailable.
+
+- **Pairing code**: generate one in account settings and have the user send it to the bot in the matching chat. The same code admits multiple people; sending it in the wrong scene does not invalidate it.
+- **Revocation**: after an identity is removed, pairing codes issued before the removal can no longer re-add it; re-authorization requires a fresh code.
+
+The config API returns `config.accessRevision`; submit it together with `access` updates. If the roster or mode changed since your read, the update returns 409 instead of overwriting the newer grants.
 
 ### Proactive delivery (proactiveDelivery)
 

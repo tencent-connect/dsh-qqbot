@@ -75,6 +75,7 @@ export function latestCompletedPrefixBoundary(events: readonly unknown[]): numbe
 }
 
 export class SessionManager {
+  accountAccess?: import('../runtime/account-service.ts').AccountAccessService;
   private sessions = new Map<string, SessionRecord>();
   /**
    * 同 key 正在进行的 getOrCreate（singleflight）。
