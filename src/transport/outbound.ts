@@ -191,6 +191,9 @@ class OutboundRouter {
         this.logger,
         this.shouldStream(plan),
       );
+      // 标题头随 buffer 创建注入一次：本回合内标题视为固定（turn/start 重建时刷新）
+      const header = this.manager.replyHeaderLine(sessionId);
+      if (header !== undefined) buffer.setPrefix(header);
       this.buffers.set(sessionId, buffer);
     }
     buffer.append(text);
@@ -229,7 +232,10 @@ class OutboundRouter {
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
 
-    this.trackText(sessionId, this.send(plan.target, fullText, 'sendMarkdown'));
+    // 无流式 buffer（群聊/主动推送/流式关闭）时直接发送：标题头一并前置
+    const header = this.manager.replyHeaderLine(sessionId);
+    const text = header !== undefined ? header + '\n\n' + fullText : fullText;
+    this.trackText(sessionId, this.send(plan.target, text, 'sendMarkdown'));
     this.buffers.delete(sessionId);
   }
 

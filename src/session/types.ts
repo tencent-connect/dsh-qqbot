@@ -3,6 +3,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
+import type { DigestMessage } from '../shared/session-title.ts';
 
 /** AgentSetup hook 类型 */
 export type AgentSetup = (agentCtx: Context) => Promise<void> | void;
@@ -168,6 +169,10 @@ export interface SwitchSessionOutcome {
   alreadyCurrent?: boolean;
   /** 目标会话显示标题（确认文案用；缺省由命令层回退 id 短码） */
   title?: string;
+  /** 切换后最近对话摘要（无历史则缺省） */
+  recentMessages?: DigestMessage[];
+  /** 摘要之前的历史消息数（「更早 N 条」提示） */
+  earlierMessages?: number;
 }
 
 /** /sessions new <工作区> 结果 */
@@ -190,6 +195,8 @@ export interface SetPermissionOutcome {
 export interface SessionStatus {
   active: boolean;
   sessionId?: string;
+  /** 会话显示标题（活跃会话内存折叠；无标题回退 id） */
+  title?: string;
   provider?: string;
   model?: string;
   preset?: string;

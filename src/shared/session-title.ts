@@ -56,3 +56,47 @@ export function clipTitle(text: string, cap: number): string {
   const chars = Array.from(text);
   return chars.length <= cap ? text : chars.slice(0, cap - 1).join('') + '…';
 }
+
+/** 切换确认附带的最近对话条目 */
+export interface DigestMessage {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
+/** 摘要条数（用户拍板 5 条）与单条裁剪长度 */
+export const DIGEST_MESSAGE_COUNT = 5;
+export const DIGEST_MESSAGE_CLIP = 60;
+
+/**
+ * 兼容两种 durable 事件形态提取文本：
+ * user/message 的 data 即消息本体（data.content）；
+ * assistant/message 的 data 包裹 message（data.message.content）。
+ */
+function textOfMessageEvent(data: unknown): string | undefined {
+  const source = data as { content?: unknown; message?: { content?: unknown } } | null | undefined;
+  if (!source) return undefined;
+  if (source.content !== undefined) return textOfContent(source.content);
+  if (source.message !== undefined) return textOfContent(source.message.content);
+  return undefined;
+}
+
+/**
+ * 提取最近 N 条 user/assistant 文本消息。
+ * total = 可提取文本的消息总数（含未展示部分，供"更早 M 条"计数）；
+ * 无文本的消息（纯图片等）跳过，不占名额。
+ */
+export function extractRecentMessages(
+  events: readonly unknown[],
+  count: number = DIGEST_MESSAGE_COUNT,
+): { recent: DigestMessage[]; total: number } {
+  const collected: DigestMessage[] = [];
+  for (const raw of events) {
+    const event = raw as { type?: string; data?: unknown } | null;
+    if (!event || typeof event.type !== 'string') continue;
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') continue;
+    const text = textOfMessageEvent(event.data);
+    if (text === undefined) continue;
+    collected.push({ role: event.type === 'user/message' ? 'user' : 'assistant', text });
+  }
+  return { recent: collected.slice(-count), total: collected.length };
+}

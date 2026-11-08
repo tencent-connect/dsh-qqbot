@@ -70,10 +70,19 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
           return '切换失败：目标会话不在宿主工作区账目内';
         }
         if (outcome.alreadyCurrent) return `当前就在会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`;
-        return [
-          `✅ 已切换到会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`,
-          '发送消息继续该会话（上下文与文件现场一并切换）。',
-        ].join('\n');
+        const lines: string[] = [`✅ 已切换到会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`];
+        if (outcome.recentMessages !== undefined && outcome.recentMessages.length > 0) {
+          lines.push('── 最近对话 ──');
+          for (const message of outcome.recentMessages) {
+            const icon = message.role === 'user' ? '🧑' : '🤖';
+            lines.push(`${icon} ${clipTitle(message.text, 60)}`);
+          }
+          if ((outcome.earlierMessages ?? 0) > 0) {
+            lines.push(`（更早 ${outcome.earlierMessages} 条消息）`);
+          }
+        }
+        lines.push('发送消息继续该会话（上下文与文件现场一并切换）。');
+        return lines.join('\n');
       }
 
       // ── 无参数：分组列表 ──

@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **Switching shows recent conversation**: a `/sessions` switch confirmation now includes the target session's last 5 messages (with an "N earlier" hint), so you preview the context before continuing instead of switching blind.
+- **Replies carry a session title header**: every reply starts with a `▸ Title` line (matching the desktop session name), keeping you oriented across long conversations; it is omitted until a title exists, survives streaming retries, and `/bot-status` shows the title too.
 - **New `/sessions` command**: lists sessions grouped by workspace (mirroring the desktop sidebar's workspace→session tree); click an index to switch sessions or start a new one in a chosen workspace — context and the on-disk working directory follow the switch. Sessions already bound to another QQ user or group are marked and cannot be switched into. Rows show the session title (the host `session/title` projection, falling back to the first user message or the session id) so names match the desktop.
 - **New `/permission` command**: view or switch the current session's permission (read-only / workspace-write / danger-full-access); takes effect immediately, survives restarts, and carries over to new sessions started via `/new`; dangerous combinations such as `danger-full-access` come with a prominent warning.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.

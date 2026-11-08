@@ -19,7 +19,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter, type PermissionKnobs } from '../host/adapter.ts';
 import { mkdirSync, realpathSync } from 'node:fs';
-import { foldSessionDisplayTitle } from '../shared/session-title.ts';
+import { foldSessionDisplayTitle, clipTitle } from '../shared/session-title.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
@@ -374,9 +374,13 @@ export class SessionManager {
     const record = this.getSessionRecord(scope, peerId);
     const route = this.getEffectiveModel(scope, peerId);
 
+    const title = record !== undefined
+      ? foldSessionDisplayTitle(this.host.sessionEvents(record.agent.session))
+      : undefined;
     return {
       active: !!record,
       sessionId: record?.sessionId,
+      ...(title !== undefined ? { title } : {}),
       provider: route?.provider,
       model: route?.model,
       preset: record?.agentPreset,
@@ -1015,8 +1019,15 @@ export class SessionManager {
         await record.handle.dispose().catch(() => {});
       }
       this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
-      const title = await this.host.sessionTitle(targetSessionId);
-      return { ok: true as const, ...(title !== undefined ? { title } : {}) };
+      const digest = await this.host.sessionDigest(targetSessionId);
+      return {
+        ok: true as const,
+        ...(digest?.title !== undefined ? { title: digest.title } : {}),
+        ...(digest && digest.recent.length > 0 ? {
+          recentMessages: [...digest.recent],
+          earlierMessages: Math.max(0, digest.totalMessages - digest.recent.length),
+        } : {}),
+      };
     });
   }
 
@@ -1122,6 +1133,18 @@ export class SessionManager {
    */
   clearPermission(scope: ChatScope, peerId: string): boolean {
     return this.modelResolver.clearPermission(this.sessionKey(scope, peerId));
+  }
+
+  /**
+   * 回复标题头（`▸ 标题`）：出站链路每回合注入一次。
+   * 标题来自 live agent 的内存事件实时折叠（不缓存，标题更新下一回合自然生效）；
+   * 无 live agent 或无标题返回 undefined——调用方干净降级，不带前缀。
+   */
+  replyHeaderLine(sessionId: string): string | undefined {
+    const agent = this.agents.get(sessionId);
+    if (!agent) return undefined;
+    const title = foldSessionDisplayTitle(this.host.sessionEvents(agent.session));
+    return title !== undefined ? `▸ ${clipTitle(title, 40)}` : undefined;
   }
 
   async disposeAll(): Promise<void> {

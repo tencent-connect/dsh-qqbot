@@ -3,6 +3,7 @@
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer, formatRelativeTime } from '../shared/index.ts';
+import { clipTitle } from '../shared/session-title.ts';
 
 /** /bot-status — 查看当前会话状态 */
 export function statusCommand({ manager }: CommandDeps): CategorizedCommand {
@@ -18,7 +19,7 @@ export function statusCommand({ manager }: CommandDeps): CategorizedCommand {
       const modelInfo = status.model ? `${status.provider}/${status.model}` : '宿主默认';
       return [
         '📊 会话状态',
-        `会话: ${status.sessionId ? status.sessionId.slice(0, 8) : '—'}`,
+        `会话: ${status.title ? clipTitle(status.title, 40) : status.sessionId ? status.sessionId.slice(0, 8) : '—'}`,
         `模型: ${modelInfo}`,
         `Preset: ${status.preset ?? '无'}`,
         `消息数: ${status.messageCount ?? 0}`,

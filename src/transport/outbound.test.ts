@@ -56,6 +56,7 @@ function setup(opts?: {
   const record = 'record' in (opts ?? {}) ? opts!.record : createRecord(c2cTarget);
   const manager = {
     findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
   } as unknown as SessionManager;
   const outbound = createOutboundHandler(
     manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer,
@@ -248,6 +249,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn(() => record),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const deliver = vi.fn().mockResolvedValue(undefined);
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger(), undefined, { deliver });
@@ -320,6 +322,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const config = createConfig();
     const tracker = createTurnTracker(manager, config, createLogger(), inputs);
@@ -348,6 +351,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
 
@@ -390,6 +394,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
 
@@ -421,6 +426,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
 
@@ -447,6 +453,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     const record = createRecord(c2cTarget);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const config = createConfig();
     const tracker = createTurnTracker(manager, config, createLogger(), inputs);
@@ -486,6 +493,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     const record = createRecord(target);
     const manager = {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    replyHeaderLine: vi.fn(() => undefined),
     } as unknown as SessionManager;
     const config = createConfig(externalTurns ? { proactiveDelivery: { externalTurns } } : undefined);
     const outbound = createOutboundHandler(manager, bot, config, createLogger());
@@ -515,7 +523,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
   });
 
   it('非 QQ 会话的回合不进入状态表', () => {
-    const manager = { findBySessionId: vi.fn(() => undefined) } as unknown as SessionManager;
+    const manager = { findBySessionId: vi.fn(() => undefined), replyHeaderLine: vi.fn(() => undefined) } as unknown as SessionManager;
     const config = createConfig();
     const tracker = createTurnTracker(manager, config, createLogger());
     const outbound = createOutboundHandler(
@@ -532,6 +540,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     const deliver = vi.fn().mockResolvedValue(undefined);
     const manager = {
       findBySessionId: vi.fn(() => undefined),
+      replyHeaderLine: vi.fn(() => undefined),
       deliveryAddress: vi.fn((id: string) => (id === 'sess-qq' ? { scope: 'c2c', targetId: 'user1' } : undefined)),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger(), undefined, { deliver });
@@ -552,7 +561,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     const inputs = new QqInputRegistry();
     inputs.register('msg-qq');
     const record = createRecord(c2cTarget);
-    const manager = { findBySessionId: vi.fn(() => record) } as unknown as SessionManager;
+    const manager = { findBySessionId: vi.fn(() => record), replyHeaderLine: vi.fn(() => undefined) } as unknown as SessionManager;
     const config = createConfig();
     const tracker = createTurnTracker(manager, config, createLogger(), inputs);
     const outbound = createOutboundHandler(
@@ -566,5 +575,73 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
 
     expect(inputs.has('msg-qq')).toBe(false);
     expect(tracker.activeTurns).toBe(0);
+  });
+});
+
+describe('OutboundRouter 标题头注入', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('流式路径：buffer 创建时注入标题头，首帧 update 含前缀', async () => {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(c2cTarget); // c2c + msgId 才走流式；tracker 需能解析地址
+    const manager = {
+      findBySessionId: vi.fn(() => record),
+      replyHeaderLine: vi.fn(() => '▸ 流式标题'),
+    } as unknown as SessionManager;
+    const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
+
+    outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeStreamFrame('sess-qq', delta('a1', '内容'));
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(session.update).toHaveBeenCalledWith('▸ 流式标题\n\n内容');
+  });
+
+  it('直接发送路径（群聊不流式）：assistant/message 文本前置标题头', async () => {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(groupTarget);
+    const manager = {
+      findBySessionId: vi.fn(() => record),
+      replyHeaderLine: vi.fn(() => '▸ 群聊标题'),
+    } as unknown as SessionManager;
+    const outbound = createOutboundHandler(manager, bot, createConfig({ streaming: true }), createLogger());
+
+    outbound.routeSessionEvent(
+      { header: { id: 'sess-qq' } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '回复正文' }] } }, turn: 1 },
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(
+      groupTarget,
+      '▸ 群聊标题\n\n回复正文',
+    );
+  });
+
+  it('无标题（新会话首轮）：不带前缀，输出不变', async () => {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(groupTarget);
+    const manager = {
+      findBySessionId: vi.fn(() => record),
+      replyHeaderLine: vi.fn(() => undefined),
+    } as unknown as SessionManager;
+    const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
+
+    outbound.routeSessionEvent(
+      { header: { id: 'sess-qq' } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '裸回复' }] } }, turn: 1 },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(groupTarget, '裸回复');
   });
 });

@@ -6,7 +6,12 @@
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { foldSessionDisplayTitle, TITLE_SCAN_EVENT_CAP } from '../shared/session-title.ts';
+import {
+  foldSessionDisplayTitle,
+  extractRecentMessages,
+  TITLE_SCAN_EVENT_CAP,
+  type DigestMessage,
+} from '../shared/session-title.ts';
 
 /** 日志最小接口 */
 export interface AdapterLogger {
@@ -64,6 +69,11 @@ export interface HostAdapter {
    * undefined（fail-soft，调用方回退 id 短码）。
    */
   sessionTitle(sessionId: string): Promise<string | undefined>;
+  /**
+   * 读一个已存储会话的完整显示信息（标题 + 最近对话）：一次全量只读读取。
+   * 无只读句柄、会话不存在或读取失败返回 undefined（fail-soft，调用方仅省略摘要）。
+   */
+  sessionDigest(sessionId: string): Promise<SessionDigest | undefined>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
@@ -94,6 +104,16 @@ export interface WorkspaceSummary {
 export interface PermissionKnobs {
   sandbox: string;
   approval: string;
+}
+
+/** 一个已存储会话的显示信息：标题 + 最近对话摘要（/sessions 切换确认用） */
+export interface SessionDigest {
+  /** session/title 投影 > 首条消息摘要（缺省 undefined） */
+  readonly title: string | undefined;
+  /** 尾部最近 N 条 user/assistant 文本 */
+  readonly recent: readonly DigestMessage[];
+  /** 可提取文本的消息总数（含未展示，供「更早 M 条」计数） */
+  readonly totalMessages: number;
 }
 
 /** 工作区实体最小契约（对齐 dsh-workspace Workspace） */
@@ -360,6 +380,33 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         return foldSessionDisplayTitle(read.events ?? []);
       } catch (err) {
         logger?.warn?.(`host adapter: session title read failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      } finally {
+        try {
+          await handle.close();
+        } catch {
+          // 只读句柄关闭失败无副作用，吞掉避免盖过真实结果
+        }
+      }
+    },
+
+    async sessionDigest(sessionId) {
+      const persistence = readCapablePersistence(ctx);
+      if (!persistence) return undefined;
+      let handle: SessionReadHandleLike;
+      try {
+        handle = await persistence.open(sessionId, 'read');
+      } catch {
+        return undefined;
+      }
+      try {
+        // 全量读取（无长度上限）：摘要需要尾部消息，标题顺带折叠，一次 I/O 完成
+        const read = await handle.read(0);
+        const events = read.events ?? [];
+        const { recent, total } = extractRecentMessages(events);
+        return { title: foldSessionDisplayTitle(events), recent, totalMessages: total };
+      } catch (err) {
+        logger?.warn?.(`host adapter: session digest read failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
         return undefined;
       } finally {
         try {

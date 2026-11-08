@@ -669,4 +669,53 @@ describe('会话显示标题（/sessions 列表项）', () => {
     const current = await manager.switchSession('c2c', PEER, 'session-aaa');
     expect(current).toMatchObject({ ok: true, alreadyCurrent: true });
   });
+
+  it('switchSession 附带最近对话摘要与更早计数（无历史则缺省）', async () => {
+    prefs().setSessionId(KEY, 'session-bbb');
+    const dialog = [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '问1' }] } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '答1' }] } } },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '问2' }] } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '答2' }] } } },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '问3' }] } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '答3' }] } } },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '问4' }] } },
+    ];
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-bbb', 'session-dialog', 'session-blank'] }],
+      {
+        'session-bbb': { cwd: WS_A },
+        'session-dialog': { cwd: WS_A },
+        'session-blank': { cwd: WS_A },
+      },
+      { 'session-dialog': dialog },
+    ));
+
+    const withHistory = await manager.switchSession('c2c', PEER, 'session-dialog');
+    expect(withHistory.recentMessages).toHaveLength(5); // 尾部 5 条：问2..问4
+    expect(withHistory.recentMessages?.[0]).toMatchObject({ role: 'user', text: '问2' });
+    expect(withHistory.recentMessages?.[4]).toMatchObject({ role: 'user', text: '问4' });
+    expect(withHistory.earlierMessages).toBe(2); // total=7，7-5=2（问1、答1）
+
+    const blank = await manager.switchSession('c2c', PEER, 'session-blank');
+    expect(blank.recentMessages).toBeUndefined();
+    expect(blank.earlierMessages).toBeUndefined();
+  });
+
+  it('getStatus：活跃会话返回内存折叠标题', async () => {
+    prefs().setSessionId(KEY, 'session-live');
+    prefs().setWorkspace(KEY, WS_A);
+    const liveAgent = fakeAgent('session-live');
+    (liveAgent as { session: unknown }).session = {
+      id: 'session-live',
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '状态标题' } }],
+    };
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-live'] }],
+      { 'session-live': { cwd: WS_A } },
+    ), [], { live: liveAgent });
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(manager.getStatus('c2c', PEER)).toMatchObject({ active: true, title: '状态标题' });
+  });
 });

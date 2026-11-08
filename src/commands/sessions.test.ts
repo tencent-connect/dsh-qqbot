@@ -84,6 +84,51 @@ describe('/sessions 命令', () => {
     expect(String(result)).toContain('当前部署无工作区服务');
   });
 
+  it('序号切换：确认文案附带最近对话摘要与更早计数', async () => {
+    const manager = makeManager({
+      switchSession: vi.fn(async () => ({
+        ok: true,
+        title: '登录页优化',
+        recentMessages: [
+          { role: 'user', text: '表单校验不生效' },
+          { role: 'assistant', text: '检查 zod schema 调用时机' },
+          { role: 'user', text: '好的我试试' },
+        ],
+        earlierMessages: 12,
+      })),
+    });
+    const cmd = sessionsCommand({ manager, config: CONFIG });
+
+    const result = await cmd.handler!(makeCmdCtx('2', []), {} as never);
+
+    const text = String(result);
+    expect(text).toContain('✅ 已切换到会话 登录页优化');
+    expect(text).toContain('── 最近对话 ──');
+    expect(text).toContain('🧑 表单校验不生效');
+    expect(text).toContain('🤖 检查 zod schema 调用时机');
+    expect(text).toContain('（更早 12 条消息）');
+    expect(text).toContain('发送消息继续该会话');
+  });
+
+  it('序号切换：无历史时省略摘要块；更早 0 条不提示', async () => {
+    const withZero = makeManager({
+      switchSession: vi.fn(async () => ({
+        ok: true,
+        recentMessages: [{ role: 'user', text: '唯一一条' }],
+        earlierMessages: 0,
+      })),
+    });
+    const zero = await sessionsCommand({ manager: withZero, config: CONFIG }).handler!(makeCmdCtx('2', []), {} as never);
+    expect(String(zero)).toContain('🧑 唯一一条');
+    expect(String(zero)).not.toContain('更早');
+
+    const noHistory = makeManager({
+      switchSession: vi.fn(async () => ({ ok: true, title: '空会话' })),
+    });
+    const blank = await sessionsCommand({ manager: noHistory, config: CONFIG }).handler!(makeCmdCtx('2', []), {} as never);
+    expect(String(blank)).not.toContain('最近对话');
+  });
+
   it('序号切换：解析并切换目标，确认文案优先显示标题', async () => {
     const manager = makeManager({
       switchSession: vi.fn(async () => ({ ok: true, title: '目标会话标题' })),

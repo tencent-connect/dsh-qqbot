@@ -290,6 +290,48 @@ describe('attachSessionToWorkspace', () => {
     expect(read).toHaveBeenCalledWith(0, TITLE_SCAN_EVENT_CAP);
   });
 
+  // ── sessionDigest ──
+
+  it('sessionDigest：全量读取（无长度上限），一次返回标题 + 尾部摘要 + 总数', async () => {
+    const events = [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '首条' }] } },
+      { type: 'session/title', data: { title: '标题A' } },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '第二问' }] } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '第二答' }] } } },
+    ];
+    const read = vi.fn().mockResolvedValue({ events });
+    const open = vi.fn().mockResolvedValue({ read, close: vi.fn().mockResolvedValue(undefined) });
+    const adapter = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined, open } }));
+
+    await expect(adapter.sessionDigest('session-1')).resolves.toEqual({
+      title: '标题A',
+      recent: [
+        { role: 'user', text: '首条' },
+        { role: 'user', text: '第二问' },
+        { role: 'assistant', text: '第二答' },
+      ],
+      totalMessages: 3,
+    });
+    expect(read).toHaveBeenCalledWith(0); // 无长度上限
+    expect(open).toHaveBeenCalledWith('session-1', 'read');
+  });
+
+  it('sessionDigest：open 失败 / 无 open 能力 / 空日志 均返回 undefined（不抛）', async () => {
+    const failing = createHostAdapter(makeCtx({
+      sessionPersistence: { stat: async () => undefined, open: async () => { throw new Error('writer-held'); } },
+    }));
+    await expect(failing.sessionDigest('session-1')).resolves.toBeUndefined();
+
+    const noOpen = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined } }));
+    await expect(noOpen.sessionDigest('session-1')).resolves.toBeUndefined();
+
+    const empty = createHostAdapter(makeCtx({
+      sessionPersistence: { stat: async () => undefined, open: async () => ({ read: async () => ({ events: [] }), close: async () => {} }) },
+    }));
+    const digest = await empty.sessionDigest('session-1');
+    expect(digest).toEqual({ title: undefined, recent: [], totalMessages: 0 });
+  });
+
   // ── applyPermissionKnobs ──
 
   it('applyPermissionKnobs：策略模块不可解析返回 false（fail-soft）', async () => {

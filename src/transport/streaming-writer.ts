@@ -22,6 +22,8 @@ export interface StreamingWriterDeps {
 
 export class StreamingWriter {
   private fullText = '';
+  /** 回复标题头（如 `▸ 标题`）：置于全部文本之前；reset 不清除（attempt 重写仍保留定位） */
+  private prefix = '';
   private session: StreamSessionLike | null = null;
   private sentChunkCount = 0;
   private failed = false;
@@ -34,6 +36,11 @@ export class StreamingWriter {
 
   public constructor(deps: StreamingWriterDeps) {
     this.deps = deps;
+  }
+
+  /** 设置标题头（须在首个增量 append 前调用） */
+  public setPrefix(prefix: string): void {
+    this.prefix = prefix;
   }
 
   /** 是否应降级为静态发送：从未成功发送过任何分片 */
@@ -129,9 +136,10 @@ export class StreamingWriter {
     this.chain = this.chain.then(() => this.pushUpdate());
   }
 
-  /** 推送当前累积文本（首次 openStream + update 全量） */
+  /** 推送当前累积文本（首次 openStream + update 全量；含标题头前缀） */
   private async pushUpdate(): Promise<void> {
     if (this.aborted || this.failed || !this.fullText) return;
+    const payload = this.prefix !== '' ? this.prefix + '\n\n' + this.fullText : this.fullText;
 
     if (!this.session) {
       try {
@@ -148,7 +156,7 @@ export class StreamingWriter {
     }
 
     try {
-      await this.session.update(this.fullText);
+      await this.session.update(payload);
       this.sentChunkCount++;
     } catch (err) {
       // update 失败：不标记 failed（session 已打开，finish 会 complete 关闭）
