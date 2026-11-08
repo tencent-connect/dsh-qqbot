@@ -19,6 +19,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter, type PermissionKnobs } from '../host/adapter.ts';
 import { mkdirSync, realpathSync } from 'node:fs';
+import { foldSessionDisplayTitle } from '../shared/session-title.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
@@ -911,14 +912,20 @@ export class SessionManager {
     return Promise.all(ordered.slice(0, workspaceCap).map(async (workspace): Promise<SessionGroup> => {
       const shown = workspace.sessionIds.slice(0, sessionCap);
       const truncated = workspace.sessionIds.length - shown.length;
+      const currentRecord = this.sessions.get(key);
       const sessions = await Promise.all(shown.map(async (sessionId): Promise<SessionGroupEntry> => {
         const header = await this.host.sessionHeader(sessionId);
+        // 当前活跃会话直接折叠内存事件（零 I/O）；其余走持久层前缀读取
+        const title = currentRecord?.sessionId === sessionId
+          ? foldSessionDisplayTitle(this.host.sessionEvents(currentRecord.agent.session))
+          : await this.host.sessionTitle(sessionId);
         return {
           sessionId,
           createdAt: header?.createdAt,
           agentPreset: header?.agentPreset,
           isCurrent: sessionId === currentSessionId,
           occupiedByOther: this.isOccupiedByOther(key, sessionId),
+          ...(title !== undefined ? { title } : {}),
         };
       }));
       return {
@@ -965,7 +972,12 @@ export class SessionManager {
       }
       const record = this.sessions.get(key);
       const currentId = record?.sessionId ?? this.modelResolver.getSessionId(key);
-      if (currentId === targetSessionId) return { ok: true as const, alreadyCurrent: true };
+      if (currentId === targetSessionId) {
+        const liveTitle = record !== undefined
+          ? foldSessionDisplayTitle(this.host.sessionEvents(record.agent.session))
+          : await this.host.sessionTitle(targetSessionId);
+        return { ok: true as const, alreadyCurrent: true, ...(liveTitle !== undefined ? { title: liveTitle } : {}) };
+      }
 
       if (this.isOccupiedByOther(key, targetSessionId)) {
         this.logger.warn(`switch to session occupied by another peer refused: key=${key} target=${targetSessionId}`);
@@ -1003,7 +1015,8 @@ export class SessionManager {
         await record.handle.dispose().catch(() => {});
       }
       this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
-      return { ok: true as const };
+      const title = await this.host.sessionTitle(targetSessionId);
+      return { ok: true as const, ...(title !== undefined ? { title } : {}) };
     });
   }
 

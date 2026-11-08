@@ -6,6 +6,7 @@
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { foldSessionDisplayTitle, TITLE_SCAN_EVENT_CAP } from '../shared/session-title.ts';
 
 /** 日志最小接口 */
 export interface AdapterLogger {
@@ -57,6 +58,12 @@ export interface HostAdapter {
    * approval/policy。两类事件都无则返回 undefined（部署默认）。
    */
   readPermissionKnobs(session: unknown): PermissionKnobs | undefined;
+  /**
+   * 读一个已存储会话的显示标题：前缀事件折叠（session/title > 首条
+   * user/message 摘要）。无持久层只读句柄、会话不存在或读取失败返回
+   * undefined（fail-soft，调用方回退 id 短码）。
+   */
+  sessionTitle(sessionId: string): Promise<string | undefined>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
@@ -105,14 +112,24 @@ export interface WorkspaceRegistryLike {
 const WORKSPACE_TITLE = 'QQBot';
 
 /**
- * 持久化服务的最小只读契约。
+ * 持久化服务的最小只读契约（stat 面）。
  *
  * 只用 `stat`：它不读事件日志、不取写所有权，且**会话不存在时返回 `undefined`
- * 而非抛错**，正好是存在性判定需要的语义。不用 `open`（会争写所有权）、不用
- * `list`（全量扫描）。
+ * 而非抛错**，正好是存在性判定需要的语义。
  */
 interface SessionPersistenceLike {
   stat(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+}
+
+/** 只读句柄的最小契约（标题读取用；对齐宿主 SessionHandle 的 read/close） */
+interface SessionReadHandleLike {
+  read(offset?: number, length?: number): Promise<{ events?: readonly unknown[] }>;
+  close(): Promise<void>;
+}
+
+/** 可 open 只读句柄的持久化服务（标题读取需要） */
+interface ReadCapablePersistence {
+  open(id: string, access: 'read'): Promise<SessionReadHandleLike>;
 }
 
 /**
@@ -124,6 +141,12 @@ interface SessionPersistenceLike {
 function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
   return typeof persistence?.stat === 'function' ? persistence : undefined;
+}
+
+/** 取出可 open 只读句柄的持久化服务；形态不匹配返回 undefined */
+function readCapablePersistence(ctx: Context): ReadCapablePersistence | undefined {
+  const persistence = safeGet(ctx, 'sessionPersistence') as ReadCapablePersistence | undefined;
+  return typeof persistence?.open === 'function' ? persistence : undefined;
 }
 
 /** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
@@ -320,6 +343,30 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
       } catch (err) {
         logger?.warn?.(`host adapter: apply permission knobs failed: ${err instanceof Error ? err.message : String(err)}`);
         return false;
+      }
+    },
+
+    async sessionTitle(sessionId) {
+      const persistence = readCapablePersistence(ctx);
+      if (!persistence) return undefined;
+      let handle: SessionReadHandleLike;
+      try {
+        handle = await persistence.open(sessionId, 'read');
+      } catch {
+        return undefined; // 会话不存在 / 后端故障 / 句柄形态漂移：标题缺失不该阻断列表
+      }
+      try {
+        const read = await handle.read(0, TITLE_SCAN_EVENT_CAP);
+        return foldSessionDisplayTitle(read.events ?? []);
+      } catch (err) {
+        logger?.warn?.(`host adapter: session title read failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      } finally {
+        try {
+          await handle.close();
+        } catch {
+          // 只读句柄关闭失败无副作用，吞掉避免盖过真实结果
+        }
       }
     },
 

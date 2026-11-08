@@ -16,9 +16,10 @@ const GROUPS = [
     isCurrentWorkspace: true,
     truncated: 0,
     sessions: [
-      { sessionId: 'session-current', createdAt: 1_700_000_000_000, agentPreset: 'standard', isCurrent: true, occupiedByOther: false },
-      { sessionId: 'session-free', createdAt: 1_700_000_100_000, agentPreset: 'code', isCurrent: false, occupiedByOther: false },
-      { sessionId: 'session-occupied', createdAt: 1_700_000_200_000, isCurrent: false, occupiedByOther: true },
+      { sessionId: 'session-current', createdAt: 1_700_000_000_000, agentPreset: 'standard', isCurrent: true, occupiedByOther: false, title: '当前会话标题' },
+      { sessionId: 'session-free', createdAt: 1_700_000_100_000, agentPreset: 'code', isCurrent: false, occupiedByOther: false, title: '可切换会话标题' },
+      { sessionId: 'session-occupied', createdAt: 1_700_000_200_000, isCurrent: false, occupiedByOther: true, title: '被占用会话标题' },
+      { sessionId: 'session-plain', createdAt: 1_700_000_300_000, isCurrent: false, occupiedByOther: false },
     ],
   },
   {
@@ -60,8 +61,10 @@ describe('/sessions 命令', () => {
     expect(result).toEqual({ kind: 'noop' });
     const text = sent.join('\n');
     expect(text).toContain('1. 含空格 项目**（当前工作区）');
-    expect(text).toContain('● 1. session-current（当前）');
-    expect(text).toContain('🔒 3. session-occupied（其他 QQ 用户/群）');
+    expect(text).toContain('● 1. 当前会话标题（当前）');
+    expect(text).toContain('🔒 3. 被占用会话标题（其他 QQ 用户/群）');
+    // 无标题条目回退 id 短码（在编码后的 show 属性内）
+    expect(text).toContain(encodeURIComponent('○ 4. session-plain'));
     expect(text).toContain('…另有 2 个会话未展示');
     expect(text).toContain('text="' + encodeURIComponent('/sessions 2') + '"');
     expect(text).toContain('text="' + encodeURIComponent('/sessions new 1') + '"');
@@ -81,15 +84,18 @@ describe('/sessions 命令', () => {
     expect(String(result)).toContain('当前部署无工作区服务');
   });
 
-  it('序号切换：解析并切换目标，提示上下文与文件现场一并切换', async () => {
-    const manager = makeManager();
+  it('序号切换：解析并切换目标，确认文案优先显示标题', async () => {
+    const manager = makeManager({
+      switchSession: vi.fn(async () => ({ ok: true, title: '目标会话标题' })),
+    });
     const cmd = sessionsCommand({ manager, config: CONFIG });
 
     const result = await cmd.handler!(makeCmdCtx('2', []), {} as never);
 
     expect(manager.resolveSessionTarget).toHaveBeenCalledWith('c2c', 'u1', '2');
     expect(manager.switchSession).toHaveBeenCalledWith('c2c', 'u1', 'session-free');
-    expect(String(result)).toContain('已切换到会话');
+    expect(String(result)).toContain('已切换到会话 目标会话标题');
+    expect(String(result)).not.toContain('session-free');
   });
 
   it('未知目标 / 占用 / 磁盘缺失分别给出准确错误', async () => {

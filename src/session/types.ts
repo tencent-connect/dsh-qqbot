@@ -142,6 +142,8 @@ export interface SessionGroupEntry {
   isCurrent: boolean;
   /** 是否已绑定到其他 QQ peer（完整列表可见，但禁止切入） */
   occupiedByOther: boolean;
+  /** 显示标题（session/title 投影 > 首条消息摘要；缺省回退 id 短码） */
+  title?: string;
 }
 
 /** /sessions 的一个工作区分组 */
@@ -164,6 +166,8 @@ export interface SwitchSessionOutcome {
   reason?: 'unknown-session' | 'not-on-disk' | 'occupied';
   /** 目标即当前会话（幂等成功） */
   alreadyCurrent?: boolean;
+  /** 目标会话显示标题（确认文案用；缺省由命令层回退 id 短码） */
+  title?: string;
 }
 
 /** /sessions new <工作区> 结果 */

@@ -33,10 +33,11 @@ const WS_B = '/tmp/ws-b';
 const MINTED = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REPLY: ReplyTarget = { scope: 'c2c', targetId: PEER, msgId: 'm1' };
 
-/** 工作区账目替身：workspaceRegistry.list + sessionPersistence.stat */
+/** 工作区账目替身：workspaceRegistry.list + sessionPersistence.stat/open（标题前缀读取） */
 function workspaceCtx(
   workspaces: Array<{ path: string; title: string; sessionIds: string[] }>,
   headers: Record<string, { cwd?: string; agentPreset?: string; createdAt?: number }> = {},
+  eventsBySession: Record<string, unknown[]> = {},
 ): Context {
   return {
     get: (name: string) => {
@@ -44,7 +45,13 @@ function workspaceCtx(
         return { create: vi.fn(), list: () => workspaces };
       }
       if (name === 'sessionPersistence') {
-        return { stat: async (id: string) => (headers[id] ? { header: headers[id] } : undefined) };
+        return {
+          stat: async (id: string) => (headers[id] ? { header: headers[id] } : undefined),
+          open: async (id: string) => ({
+            read: async () => ({ events: eventsBySession[id] ?? [] }),
+            close: async () => {},
+          }),
+        };
       }
       if (name === 'sandboxPolicy' || name === 'approval') return {};
       return undefined;
@@ -586,5 +593,80 @@ describe('审查回归：切换与在途 openSession 串行', () => {
     expect(prefs().getSessionId(KEY)).toBe('session-bbb');
     expect(registry.resume).toHaveBeenCalledTimes(1);
     expect(registry.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: 'session-bbb' }));
+  });
+});
+
+describe('会话显示标题（/sessions 列表项）', () => {
+  const EVENTS = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: '帮我优化登录页' }] } },
+    { type: 'session/title', data: { title: '登录页优化' } },
+  ];
+
+  it('列表条目带标题：持久层前缀折叠 session/title', async () => {
+    prefs().setSessionId(KEY, 'session-ccc');
+    prefs().setWorkspace(KEY, WS_B);
+    const { manager } = createManager(workspaceCtx([
+      { path: WS_A, title: 'A', sessionIds: ['session-aaa'] },
+      { path: WS_B, title: 'B', sessionIds: ['session-ccc'] },
+    ], {
+      'session-aaa': { cwd: WS_A },
+      'session-ccc': { cwd: WS_B },
+    }, {
+      'session-aaa': [{ type: 'session/title', data: { title: '脚本助手' } }],
+      'session-ccc': EVENTS,
+    }));
+
+    const groups = await manager.listSessionGroups('c2c', PEER);
+
+    const flat = groups.flatMap((g) => g.sessions);
+    expect(flat.find((s) => s.sessionId === 'session-aaa')).toMatchObject({ title: '脚本助手' });
+    expect(flat.find((s) => s.sessionId === 'session-ccc')).toMatchObject({ title: '登录页优化' });
+  });
+
+  it('无标题事件时回退首条用户消息摘要', async () => {
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-plain'] }],
+      { 'session-plain': { cwd: WS_A } },
+      { 'session-plain': [{ type: 'user/message', data: { content: [{ type: 'text', text: '查一下线上报错' }] } }] },
+    ));
+
+    const groups = await manager.listSessionGroups('c2c', PEER);
+
+    expect(groups[0]!.sessions[0]).toMatchObject({ title: '查一下线上报错' });
+  });
+
+  it('当前活跃会话从内存事件折叠标题（零持久层 I/O）', async () => {
+    prefs().setSessionId(KEY, 'session-live');
+    prefs().setWorkspace(KEY, WS_A);
+    const liveAgent = fakeAgent('session-live');
+    (liveAgent as { session: unknown }).session = {
+      id: 'session-live',
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '内存标题' } }],
+    };
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-live'] }],
+      { 'session-live': { cwd: WS_A } },
+      // 持久层事件故意为空：若误走持久读取将拿不到标题
+    ), [], { live: liveAgent });
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    const groups = await manager.listSessionGroups('c2c', PEER);
+
+    expect(groups[0]!.sessions[0]).toMatchObject({ sessionId: 'session-live', isCurrent: true, title: '内存标题' });
+  });
+
+  it('switchSession 结果带目标标题，幂等分支带当前标题', async () => {
+    prefs().setSessionId(KEY, 'session-bbb');
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-bbb', 'session-aaa'] }],
+      { 'session-bbb': { cwd: WS_A }, 'session-aaa': { cwd: WS_A } },
+      { 'session-aaa': [{ type: 'session/title', data: { title: '目标会话' } }] },
+    ));
+
+    const switched = await manager.switchSession('c2c', PEER, 'session-aaa');
+    expect(switched).toMatchObject({ ok: true, title: '目标会话' });
+
+    const current = await manager.switchSession('c2c', PEER, 'session-aaa');
+    expect(current).toMatchObject({ ok: true, alreadyCurrent: true });
   });
 });

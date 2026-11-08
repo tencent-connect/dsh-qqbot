@@ -13,11 +13,19 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked, formatRelativeTime } from '../shared/index.ts';
+import { clipTitle } from '../shared/session-title.ts';
 import { renderCmdInput } from './cmd-input.ts';
 
 /** 会话 id 展示短码（session-xxxxxxxx 截断到 16 字符） */
 function shortId(id: string): string {
   return id.length > 16 ? id.slice(0, 16) : id;
+}
+
+/** 行显示名：宿主标题（session/title 投影或首条消息摘要）> id 短码兜底 */
+function displayName(session: { sessionId: string; title?: string }): string {
+  return session.title !== undefined && session.title !== ''
+    ? clipTitle(session.title, 40)
+    : shortId(session.sessionId);
 }
 
 export function sessionsCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
@@ -61,9 +69,9 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
           if (outcome.reason === 'not-on-disk') return '切换失败：目标会话的磁盘记录已不存在';
           return '切换失败：目标会话不在宿主工作区账目内';
         }
-        if (outcome.alreadyCurrent) return `当前就在会话 ${shortId(target)}`;
+        if (outcome.alreadyCurrent) return `当前就在会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`;
         return [
-          `✅ 已切换到会话 ${shortId(target)}`,
+          `✅ 已切换到会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`,
           '发送消息继续该会话（上下文与文件现场一并切换）。',
         ].join('\n');
       }
@@ -91,12 +99,13 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
             session.agentPreset ?? '',
           ].filter(Boolean).join(' · ');
           const suffix = meta ? ` · ${meta}` : '';
+          const name = displayName(session);
           if (session.isCurrent) {
-            lines.push(`● ${displayIndex}. ${shortId(session.sessionId)}（当前）${suffix}`);
+            lines.push(`● ${displayIndex}. ${name}（当前）${suffix}`);
           } else if (session.occupiedByOther) {
-            lines.push(`🔒 ${displayIndex}. ${shortId(session.sessionId)}（其他 QQ 用户/群）${suffix}`);
+            lines.push(`🔒 ${displayIndex}. ${name}（其他 QQ 用户/群）${suffix}`);
           } else {
-            const show = `○ ${displayIndex}. ${shortId(session.sessionId)}${suffix}`;
+            const show = `○ ${displayIndex}. ${name}${suffix}`;
             lines.push(renderCmdInput(`/sessions ${displayIndex}`, show));
           }
         }

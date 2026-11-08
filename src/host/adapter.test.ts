@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHostAdapter, _resetAdapterCache } from './adapter.ts';
+import { TITLE_SCAN_EVENT_CAP } from '../shared/session-title.ts';
 
 /** 最小 ctx：可控的 get() */
 function makeCtx(services: Record<string, unknown>) {
@@ -231,6 +232,62 @@ describe('attachSessionToWorkspace', () => {
 
     expect(adapter.readPermissionKnobs({ snapshotEvents: () => [] })).toBeUndefined();
     expect(adapter.readPermissionKnobs({})).toBeUndefined();
+  });
+
+  // ── sessionTitle ──
+
+  it('sessionTitle：经只读句柄前缀读取，折叠最后一条 session/title', async () => {
+    const events = [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '帮我写个脚本' }] } },
+      { type: 'session/title', data: { title: '旧标题' } },
+      { type: 'session/title', data: { title: '脚本助手' } },
+    ];
+    const open = vi.fn().mockResolvedValue({
+      read: vi.fn().mockResolvedValue({ events }),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    const adapter = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined, open } }));
+
+    await expect(adapter.sessionTitle('session-1')).resolves.toBe('脚本助手');
+    expect(open).toHaveBeenCalledWith('session-1', 'read');
+  });
+
+  it('sessionTitle：无标题事件时回退首条用户消息文本（空白折叠）', async () => {
+    const events = [
+      { type: 'turn/start' },
+      { type: 'user/message', data: { content: [{ type: 'text', text: '  优化 ' }, { type: 'text', text: '登录页\n样式' }] } },
+    ];
+    const open = vi.fn().mockResolvedValue({
+      read: vi.fn().mockResolvedValue({ events }),
+      close: vi.fn().mockResolvedValue(undefined),
+    });
+    const adapter = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined, open } }));
+
+    await expect(adapter.sessionTitle('session-1')).resolves.toBe('优化 登录页 样式');
+  });
+
+  it('sessionTitle：open 失败 / 无 open 能力 / 空事件 均返回 undefined（不抛）', async () => {
+    const failing = createHostAdapter(makeCtx({
+      sessionPersistence: { stat: async () => undefined, open: async () => { throw new Error('writer-held'); } },
+    }));
+    await expect(failing.sessionTitle('session-1')).resolves.toBeUndefined();
+
+    const noOpen = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined } }));
+    await expect(noOpen.sessionTitle('session-1')).resolves.toBeUndefined();
+
+    const empty = createHostAdapter(makeCtx({
+      sessionPersistence: { stat: async () => undefined, open: async () => ({ read: async () => ({ events: [] }), close: async () => {} }) },
+    }));
+    await expect(empty.sessionTitle('session-1')).resolves.toBeUndefined();
+  });
+
+  it('sessionTitle：read 读取的前缀事件数受 TITLE_SCAN_EVENT_CAP 约束', async () => {
+    const read = vi.fn().mockResolvedValue({ events: [] });
+    const adapter = createHostAdapter(makeCtx({
+      sessionPersistence: { stat: async () => undefined, open: async () => ({ read, close: async () => {} }) },
+    }));
+    await adapter.sessionTitle('session-1');
+    expect(read).toHaveBeenCalledWith(0, TITLE_SCAN_EVENT_CAP);
   });
 
   // ── applyPermissionKnobs ──
