@@ -2,6 +2,7 @@ src/
 dev.ts
 cordis.dev.yml
 tsconfig.json
+vitest.config.ts
 docs/
 .env
 .env.example

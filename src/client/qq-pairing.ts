@@ -90,7 +90,8 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   }, [status, code, windowCodes, onChange]);
 
   // 所有 hooks 之后再按绑定态短路，避免 hook 数量不一致（React #310）。
-  if (!enabled) return h('div', { className: 'imqq-pair' }, h('div', { className: 'imqq-pairToolbar' }, h('strong', null, title)),
+  if (!enabled) return h('div', { className: 'imqq-pair' },
+    h('div', { className: 'imqq-pairHeader' }, h('div', { className: 'imqq-pairTitle' }, h('strong', null, title))),
     h('p', { className: 'imqq-pairHint' }, '先完成 QQ 机器人绑定，才能配置认领。'));
 
   const issue = (): void => {

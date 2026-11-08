@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import type { ClaimedMember } from '../shared/pairing-protocol.ts';
@@ -50,28 +50,28 @@ export class MemberStore {
     this.save({ version: 1, appId, owners, profiles: memberProfiles });
   }
 
-  ownerIds(): string[] { return this.load().owners; }
-  memberProfiles(): Record<string, MemberProfile> { return this.load().profiles; }
+  ownerIds(): string[] { return [...this.load().owners]; }
+  memberProfiles(): Record<string, MemberProfile> { return { ...this.load().profiles }; }
   setMemberProfile(openid: string, profile: MemberProfile): void {
     if (!text(openid).trim()) throw new TypeError('QQ 成员身份无效');
-    const state = this.load();
-    state.profiles = { ...state.profiles, [openid]: memberProfile(profile) };
-    this.save(state);
+    const current = this.load();
+    this.save({ ...current, profiles: { ...current.profiles, [openid]: memberProfile(profile) } });
   }
   setMemberNickname(openid: string, nickname: string): void {
     const previous = this.memberProfiles()[openid];
     this.setMemberProfile(openid, { nickname, scene: previous?.scene ?? 'c2c', sceneName: previous?.sceneName ?? '', claimedAt: previous?.claimedAt ?? Date.now() });
   }
   claimOwner(openid: string, profile: MemberProfile): void {
-    const state = this.load();
-    state.owners = ownerIds([...state.owners, openid]);
-    state.profiles = { ...state.profiles, [openid]: memberProfile(profile) };
-    this.save(state);
+    const current = this.load();
+    this.save({
+      ...current,
+      owners: ownerIds([...current.owners, openid]),
+      profiles: { ...current.profiles, [openid]: memberProfile(profile) },
+    });
   }
   revokeOwner(openid: string): void {
-    const state = this.load();
-    state.owners = state.owners.filter(id => id !== openid);
-    this.save(state);
+    const current = this.load();
+    this.save({ ...current, owners: current.owners.filter(id => id !== openid) });
   }
 
   /** Read a previously saved display name without importing or rewriting its Session or policy. */
@@ -103,10 +103,34 @@ export class MemberStore {
         return key.startsWith(prefix) && id.trim().length > 0 && id.length <= 1024 && !id.includes('\0');
       })));
   }
-  private load(): MemberState {
+  /**
+   * 解析结果缓存，以文件身份（ino + mtime + size）为键；其他实例的写入靠 stat 变化检测重读。
+   * atomicWrite 经 rename 落盘，每次写入都换 inode，因此 ino 能覆盖秒级 mtime 文件系统上
+   * 「同一秒写入等长内容」的误命中。缓存的 state 只读，变更方法一律构造新对象。
+   */
+  private cache?: { ino: number; mtimeMs: number; size: number; state: Readonly<MemberState> };
+
+  private load(): Readonly<MemberState> {
+    const stats = statSync(this.path); // 文件缺失时抛错：已初始化的名单不可再生
+    const hit = this.cache;
+    if (hit !== undefined && hit.ino === stats.ino && hit.mtimeMs === stats.mtimeMs && hit.size === stats.size) {
+      return hit.state;
+    }
     const data = object(JSON.parse(readFileSync(this.path, 'utf8')));
     if (data.version !== 1 || data.appId !== this.appId) throw new TypeError('QQ 名单账号或版本无效');
-    return { version: 1, appId: this.appId, owners: ownerIds(data.owners), profiles: profiles(data.profiles) };
+    const state: MemberState = { version: 1, appId: this.appId, owners: ownerIds(data.owners), profiles: profiles(data.profiles) };
+    for (const profile of Object.values(state.profiles)) Object.freeze(profile);
+    Object.freeze(state.owners);
+    this.cache = { ino: stats.ino, mtimeMs: stats.mtimeMs, size: stats.size, state: Object.freeze(state) };
+    return state;
   }
-  private save(state: MemberState): void { atomicWrite(this.path, [JSON.stringify(state)]); }
+
+  private save(state: MemberState): void {
+    try {
+      atomicWrite(this.path, [JSON.stringify(state)]);
+    } finally {
+      // 成功或失败都失效：失败时内存不得领先磁盘（授权状态以落盘为准）
+      this.cache = undefined;
+    }
+  }
 }

@@ -1,20 +1,38 @@
 import { commandAccessError } from '../commands/auth.ts';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { MemberStore } from './member-store.ts';
 import { PairingService } from './pairing-service.ts';
 import { openidTail, parseWhitelistEntries, type ClaimedMember, type ManualPairResult, type PairChallenge, type PairPurpose, type PairStatusWire } from '../shared/pairing-protocol.ts';
 import type { ChatScope, Logger } from '../types.ts';
-import type { ImQQBotConfig } from '../config.ts';
+import type { AccessControlConfig, ImQQBotConfig } from '../config.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { updateProfileConfig, readProfileAccess, readProfileAccessSnapshot } from '../setup/persist.ts';
+
+/** 配对码随机源：均匀分布于 [0, 1)。配对码是白名单授权凭据，必须使用密码学随机数。 */
+const secureRandom = (): number => randomBytes(4).readUInt32BE(0) / 2 ** 32;
+
+/** 可注入依赖（测试与存储替换）；缺省使用基于文件的实现。 */
+export interface AccountAccessDeps {
+  /**
+   * 配对码随机源，缺省为密码学随机。
+   * 只在使用默认 PairingService 时生效；同时注入 `pairing` 时会被忽略。
+   */
+  random?: () => number;
+  store?: MemberStore;
+  pairing?: PairingService;
+}
+
 export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
-  constructor(readonly config: ImQQBotConfig, readonly logger: Logger) {
-    this.pairing = new PairingService({ stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`) });
-    this.store = new MemberStore(PLUGIN_HOME, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
+  constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}) {
+    this.pairing = deps.pairing ?? new PairingService({
+      stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
+      random: deps.random ?? secureRandom,
+    });
+    this.store = deps.store ?? new MemberStore(PLUGIN_HOME, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
   }
   // ── 配对码认领（Web 生成码 / QQ 核销） ──────────────────────────────
   /** Web：为一种名单生成限时配对批次，替换时旧码失效。 */
@@ -171,8 +189,17 @@ export class AccountAccessService {
     const field = purpose === 'allow-group' ? 'groupAllow' : 'c2cAllow';
     const next = { ...access, [field]: change(access[field]) };
     const persisted = updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision });
-    if (persisted) this.config.access = next;
+    if (persisted) this.syncConfigAccess(next);
     return persisted;
+  }
+
+  /**
+   * 把最新 access 写回宿主持有的 config 对象。这是刻意的 HMR 窗口同步：
+   * updateProfileConfig 触发宿主重载之前，旧 fiber 仍在服务 QQ 请求，
+   * 必须立即看到新名单，否则会按旧名单放行/拒绝。
+   */
+  private syncConfigAccess(access: AccessControlConfig): void {
+    this.config.access = access;
   }
 
   currentAccess() {

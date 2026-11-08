@@ -37,6 +37,13 @@ describe('pairing service', () => {
     expect(openidTail('AAABBBCCCDDD')).toBe('…CDDD');
   });
 
+  it('derives codes from the injected random source (authorization credential entropy)', () => {
+    const picks = [0, 0.5, 31.9 / 32, 0, 0.5, 31.9 / 32];
+    let draw = 0;
+    const svc = new PairingService({ now: () => 0, random: () => picks[draw++ % picks.length] });
+    expect(svc.issue('owner').code).toBe('2JZ2JZ');
+  });
+
   it('replaces only its own code and leaves other windows and purposes active', () => {
     const svc = new PairingService();
     const first = svc.issue('allow-c2c'); const other = svc.issue('allow-group');

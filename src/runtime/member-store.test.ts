@@ -118,4 +118,33 @@ describe('account-only identity storage', () => {
     expect(() => members.ownerIds()).toThrow();
     expect(() => members.claimOwner('alice', profile)).toThrow(); expect(existsSync(memberPath())).toBe(false);
   });
+
+  it.each(['claim', 'revoke'] as const)('keeps memory consistent with disk when a %s write fails', operation => {
+    const members = new MemberStore(root, 'app');
+    if (operation === 'revoke') members.claimOwner('alice', profile);
+    expect(members.ownerIds()).toEqual(operation === 'revoke' ? ['alice'] : []);
+    vi.spyOn(files, 'atomicWrite').mockImplementationOnce(() => { throw new Error('disk full'); });
+    const mutate = () => (operation === 'claim' ? members.claimOwner('mallory', profile) : members.revokeOwner('alice'));
+    expect(mutate).toThrow('disk full');
+    const persisted = operation === 'revoke' ? ['alice'] : [];
+    expect(members.ownerIds()).toEqual(persisted);
+    expect(new MemberStore(root, 'app').ownerIds()).toEqual(persisted);
+  });
+
+  it('does not let callers mutate cached identity state', () => {
+    const members = new MemberStore(root, 'app'); members.claimOwner('alice', profile);
+    members.ownerIds().push('mallory');
+    expect(() => { (members.memberProfiles().alice as { nickname: string }).nickname = 'X'; }).toThrow();
+    expect(members.ownerIds()).toEqual(['alice']);
+    expect(members.memberProfiles().alice?.nickname).toBe('Alice');
+  });
+
+  it('serves repeated reads from cache and rereads after another instance writes', () => {
+    const members = new MemberStore(root, 'app'); members.ownerIds();
+    const read = vi.spyOn(JSON, 'parse');
+    members.ownerIds(); members.memberProfiles();
+    expect(read).not.toHaveBeenCalled();
+    new MemberStore(root, 'app').claimOwner('bob', profile);
+    expect(members.ownerIds()).toEqual(['bob']);
+  });
 });

@@ -19,8 +19,10 @@ function fixture() {
   const config = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const store = new MemberStore(join(profile.dir, 'data'), config.appId);
-  const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService,
-    { config, logger, store, pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }) });
+  const service = new AccountAccessService(config, logger, {
+    store,
+    pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }),
+  });
   return { service, store };
 }
 
