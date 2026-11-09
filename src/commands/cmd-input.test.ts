@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderCmdInput } from './cmd-input.ts';
+import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
 
 describe('renderCmdInput（QQ 官方 urlencode + 100 字符约束）', () => {
   it('text/show 均 urlencode，空格、中文、引号、&、+、% 不进入原始属性', () => {
@@ -25,5 +25,17 @@ describe('renderCmdInput（QQ 官方 urlencode + 100 字符约束）', () => {
     expect(rendered).not.toContain('<qqbot-cmd-input');
     // 原始值未超 100，但 urlencode 后超限时同样不得生成标签
     expect(renderCmdInput('中'.repeat(20), '按钮')).toBe('按钮');
+  });
+});
+
+describe('renderCmdEnter（点击直接发送）', () => {
+  it('仅 text 属性，urlencode 且编码后 <=100', () => {
+    const rendered = renderCmdEnter('/sessions 2');
+    expect(rendered).toBe('<qqbot-cmd-enter text="%2Fsessions%202"/>');
+  });
+
+  it('编码后超限退化为转义纯文本，不生成标签', () => {
+    const rendered = renderCmdEnter('中'.repeat(40));
+    expect(rendered).not.toContain('<qqbot-cmd-enter');
   });
 });

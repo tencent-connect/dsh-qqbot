@@ -13,7 +13,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
-import { renderCmdInput } from './cmd-input.ts';
+import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
 import type { PermissionKnobs } from '../host/adapter.ts';
 
 interface PermissionPreset {
@@ -131,7 +131,11 @@ export function permissionCommand({ manager, config, logger }: CommandDeps): Cat
       ];
       for (const preset of PERMISSION_PRESETS) {
         const dangerTag = preset.danger ? '⚠️' : '';
-        lines.push(renderCmdInput(`/permission ${preset.name}`, `${preset.label}（${preset.name}）${dangerTag}`));
+        const show = `${preset.label}（${preset.name}）${dangerTag}`;
+        // 私聊用回车指令（点击即切换）；群聊不支持 cmd-enter，保留插入式
+        lines.push(scope === 'c2c'
+          ? `${show} ${renderCmdEnter(`/permission ${preset.name}`)}`
+          : renderCmdInput(`/permission ${preset.name}`, show));
       }
       lines.push('', '重置默认: `/permission reset`', '', '> 档位按宿主默认权限表提供；部署若自定义 permissionPresets，以宿主配置为准。');
 

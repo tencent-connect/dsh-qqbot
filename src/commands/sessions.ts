@@ -14,7 +14,7 @@ import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked, formatRelativeTime } from '../shared/index.ts';
 import { clipTitle } from '../shared/session-title.ts';
-import { renderCmdInput } from './cmd-input.ts';
+import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
 
 /** 会话 id 展示短码（session-xxxxxxxx 截断到 16 字符） */
 function shortId(id: string): string {
@@ -115,13 +115,18 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
             lines.push(`🔒 ${displayIndex}. ${name}（其他 QQ 用户/群）${suffix}`);
           } else {
             const show = `○ ${displayIndex}. ${name}${suffix}`;
-            lines.push(renderCmdInput(`/sessions ${displayIndex}`, show));
+            // 私聊用回车指令（点击即切换）；群聊不支持 cmd-enter，保留插入式
+            lines.push(scope === 'c2c'
+              ? `${show} ${renderCmdEnter(`/sessions ${displayIndex}`)}`
+              : renderCmdInput(`/sessions ${displayIndex}`, show));
           }
         }
         if (group.truncated > 0) {
           lines.push(`…另有 ${group.truncated} 个会话未展示（/sessions <id前缀> 直达）`);
         }
-        lines.push(renderCmdInput(`/sessions new ${groupIndex + 1}`, `＋ 组${groupIndex + 1} 开新会话`), '');
+        lines.push(scope === 'c2c'
+          ? `＋ 组${groupIndex + 1} 开新会话 ${renderCmdEnter(`/sessions new ${groupIndex + 1}`)}`
+          : renderCmdInput(`/sessions new ${groupIndex + 1}`, `＋ 组${groupIndex + 1} 开新会话`), '');
       }
 
       await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);

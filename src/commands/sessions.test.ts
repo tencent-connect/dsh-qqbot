@@ -42,12 +42,12 @@ function makeManager(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
-function makeCmdCtx(raw: string, sent: string[], senderId = 'u1') {
+function makeCmdCtx(raw: string, sent: string[], senderId = 'u1', kind: 'c2c' | 'group' = 'c2c') {
   return {
-    message: { senderId, kind: 'c2c' },
+    message: { senderId, kind, ...(kind === 'group' ? { groupOpenid: senderId } : {}) },
     command: { raw },
     bot: { sendMarkdown: async (_t: unknown, content: string) => { sent.push(content); } },
-    replyTarget: { scope: 'c2c', targetId: senderId },
+    replyTarget: { scope: kind, targetId: senderId },
   } as never;
 }
 
@@ -63,18 +63,32 @@ describe('/sessions 命令', () => {
     expect(text).toContain('1. 含空格 项目**（当前工作区）');
     expect(text).toContain('● 1. 当前会话标题（当前）');
     expect(text).toContain('🔒 3. 被占用会话标题（其他 QQ 用户/群）');
-    // 无标题条目回退 id 短码（在编码后的 show 属性内）
-    expect(text).toContain(encodeURIComponent('○ 4. session-plain'));
+    // 无标题条目回退 id 短码（私聊下行信息为明文 + cmd-enter 按钮）
+    expect(text).toContain('○ 4. session-plain');
     expect(text).toContain('…另有 2 个会话未展示');
-    expect(text).toContain('text="' + encodeURIComponent('/sessions 2') + '"');
-    expect(text).toContain('text="' + encodeURIComponent('/sessions new 1') + '"');
-    expect(text).toContain('text="' + encodeURIComponent('/sessions new 2') + '"');
+    // 私聊：会话行与新建按钮用 cmd-enter（点击直接发送），命令文本仍编码且守卫长度
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/sessions 2') + '"/>');
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/sessions new 1') + '"/>');
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/sessions new 2') + '"/>');
+    expect(text).toContain('○ 2. 可切换会话标题');
     // 绝对路径不得进入任何 QQ 标签；含空格/中文路径也不破坏渲染
     expect(text).not.toContain('text="/sessions new /tmp/');
     expect(text).not.toContain(encodeURIComponent('/sessions new /tmp/'));
     for (const match of text.matchAll(/(?:text|show)="([^"]*)"/g)) {
       expect(match[1]!.length).toBeLessThanOrEqual(100);
     }
+  });
+
+  it('群聊：cmd-enter 不被平台支持，会话行与新建按钮回退 cmd-input（插入式）', async () => {
+    const sent: string[] = [];
+    const cmd = sessionsCommand({ manager: makeManager(), config: CONFIG });
+
+    await cmd.handler!(makeCmdCtx('', sent, 'u1', 'group'), {} as never);
+
+    const text = sent.join('\n');
+    expect(text).not.toContain('qqbot-cmd-enter');
+    expect(text).toContain('<qqbot-cmd-input text="' + encodeURIComponent('/sessions 2') + '"');
+    expect(text).toContain('<qqbot-cmd-input text="' + encodeURIComponent('/sessions new 1') + '"');
   });
 
   it('宿主无工作区服务：明确降级提示', async () => {

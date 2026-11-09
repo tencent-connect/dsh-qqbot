@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **One-tap list actions in DMs**: in private chats the `/sessions` rows, new-session buttons, and `/permission` presets now use enter-command tags (`qqbot-cmd-enter`) — tapping runs the command immediately instead of inserting it for a manual send; group chats keep the insert-into-input interaction because the platform does not support the enter tag there.
 - **Switching shows recent conversation**: a `/sessions` switch confirmation now includes the target session's last 5 messages (with an "N earlier" hint), so you preview the context before continuing instead of switching blind.
 - **Replies carry a session title header**: every reply starts with a `▸ Title` line (matching the desktop session name), keeping you oriented across long conversations; it is omitted until a title exists, survives streaming retries, and `/bot-status` shows the title too.
 - **New `/sessions` command**: lists sessions grouped by workspace (mirroring the desktop sidebar's workspace→session tree); click an index to switch sessions or start a new one in a chosen workspace — context and the on-disk working directory follow the switch. Sessions already bound to another QQ user or group are marked and cannot be switched into. Rows show the session title (the host `session/title` projection, falling back to the first user message or the session id) so names match the desktop.

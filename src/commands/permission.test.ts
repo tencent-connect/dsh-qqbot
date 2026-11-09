@@ -25,9 +25,9 @@ function makeManager(overrides: Record<string, unknown> = {}) {
 }
 
 /** cmdCtx 桩：sendMarkdownChunked 依赖 bot.sendMarkdown + replyTarget */
-function makeCmdCtx(raw: string, sent: string[]) {
+function makeCmdCtx(raw: string, sent: string[], kind: 'c2c' | 'group' = 'c2c') {
   return {
-    message: { senderId: 'u1', kind: 'c2c', messageId: 'm1' },
+    message: { senderId: 'u1', kind, messageId: 'm1', ...(kind === 'group' ? { groupOpenid: 'u1' } : {}) },
     command: { raw },
     bot: { sendMarkdown: async (_t: unknown, content: string) => { sent.push(content); } },
     replyTarget: { scope: 'c2c', targetId: 'u1' },
@@ -48,15 +48,30 @@ describe('/permission', () => {
     const text = sent.join('\n');
     expect(text).toContain('工作区可写（workspace-write）');
     expect(text).toContain('当前会话生效值');
-    expect(text).toContain(encodeURIComponent('/permission read-only'));
-    expect(text).toContain(encodeURIComponent('/permission workspace-write'));
-    expect(text).toContain(encodeURIComponent('/permission danger-full-access'));
+    // 私聊：preset 按钮用 cmd-enter（点击直接发送）
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/permission read-only') + '"/>');
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/permission workspace-write') + '"/>');
+    expect(text).toContain('<qqbot-cmd-enter text="' + encodeURIComponent('/permission danger-full-access') + '"/>');
     expect(text).toContain('/permission reset');
-    expect(text).toContain(encodeURIComponent('⚠️'));
+    expect(text).toContain('⚠️'); // 私聊下 label 为明文行 + cmd-enter 按钮
     // 所有 text/show 均按更严格的「编码后 <=100」约束输出
     for (const match of text.matchAll(/(?:text|show)="([^"]*)"/g)) {
       expect(match[1]!.length).toBeLessThanOrEqual(100);
     }
+  });
+
+  it('群聊：preset 按钮回退 cmd-input（插入式）', async () => {
+    const sent: string[] = [];
+    const manager = makeManager({
+      getPermissionStatus: () => ({ knobs: { sandbox: 'workspace-write', approval: 'ask' }, source: 'session', active: true }),
+    });
+    const cmd = permissionCommand({ manager, config: CONFIG });
+
+    await cmd.handler!(makeCmdCtx('', sent, 'group'), {} as never);
+
+    const text = sent.join('\n');
+    expect(text).not.toContain('qqbot-cmd-enter');
+    expect(text).toContain('<qqbot-cmd-input text="' + encodeURIComponent('/permission read-only') + '"');
   });
 
   it('无参数且无偏好：显示宿主部署默认', async () => {
