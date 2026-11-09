@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QQBot, runMiddlewareChain, type Middleware, type MiddlewareContext, type QQBotInboundMessage } from '@tencent-connect/qqbot-nodejs';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { MemberStore } from '../runtime/member-store.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { PairingService } from '../runtime/pairing-service.ts';
@@ -35,9 +36,10 @@ function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, c
   const manager = { accountAccess: service } as SessionManager;
   const bot = new QQBot({ appId: config.appId, appSecret: config.appSecret, logger });
   const chain: Middleware[] = [];
+  let active = true;
   vi.spyOn(bot, 'use').mockImplementation((...middleware) => { chain.push(...middleware); return bot; });
   const send = vi.spyOn(bot, 'sendText').mockResolvedValue({ id: 'reply', timestamp: '' });
-  setupMiddlewares(bot, config, manager, logger, new ReplyIdCache());
+  setupMiddlewares(bot, config, manager, logger, new ReplyIdCache(), () => active);
   const agent = vi.fn();
   async function receive(content: string, options: { group?: boolean; mentioned?: boolean; id?: string; name?: string; senderId?: string; groupId?: string } = {}) {
     const group = options.group ?? false;
@@ -69,10 +71,36 @@ function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, c
     }], context)) agent();
     return context;
   }
-  return { service, store, send, agent, receive, logger, expire: () => { now += 11 * 60_000; } };
+  return {
+    service, store, send, agent, receive, logger,
+    expire: () => { now += 11 * 60_000; },
+    deactivate: () => { active = false; },
+  };
 }
 
 describe('pairing before conversation admission', () => {
+  it.each([false, true])('ignores a valid pairing code and commands from an inactive gateway (group=%s)', async group => {
+    const f = fixture();
+    const code = f.service.issuePairCode(group ? 'allow-group' : 'allow-c2c').code;
+    f.deactivate();
+    expect((await f.receive(code, { group, mentioned: group })).stopReason).toBe('gateway-inactive');
+    expect((await f.receive('/bot-ping', { group, mentioned: group })).stopReason).toBe('gateway-inactive');
+    expect(f.service.pairStatus().challenges[0]?.claims).toEqual([]);
+    expect(f.send).not.toHaveBeenCalled();
+    expect(f.agent).not.toHaveBeenCalled();
+  });
+
+  it('checks the active generation again before redeeming a recognized pairing code', async () => {
+    const f = fixture();
+    const code = f.service.issuePairCode('allow-c2c').code;
+    vi.spyOn(f.service, 'isActivePairCode').mockImplementationOnce(() => {
+      f.deactivate();
+      return true;
+    });
+    expect((await f.receive(code)).stopReason).toBe('gateway-inactive');
+    expect(f.service.pairStatus().allowC2c).toEqual([]);
+    expect(f.send).not.toHaveBeenCalled();
+  });
   it.each([false, true])('admits two previously unknown identities with the same code (group=%s) without running an Agent', async group => {
     const f = fixture(); const code = f.service.issuePairCode(group ? 'allow-group' : 'allow-c2c').code;
     await f.receive(code, { group, mentioned: group, senderId: 'first', groupId: 'first-group', name: '小明' });
@@ -170,6 +198,47 @@ describe('pairing before conversation admission', () => {
     expect(readProfileAccess(undefined, profile.dir).groupAllow).toEqual(['team']);
     expect(f.agent).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])('drops messages released by the SDK queue after the gateway stops (group=%s)', async group => {
+  const entered = vi.fn();
+  const held = Promise.withResolvers<void>();
+  const f = fixture(async ctx => {
+    entered(ctx.message.content);
+    if (ctx.message.content === 'hold') await held.promise;
+  });
+  expect(f.service.addManualMember(group ? 'allow-group' : 'allow-c2c', group ? 'team' : 'sender').ok).toBe(true);
+  const first = f.receive('hold', { group, mentioned: group });
+  let queued: ReturnType<typeof f.receive> | undefined;
+  try {
+    await vi.waitFor(() => expect(entered).toHaveBeenCalledOnce());
+    queued = f.receive('queued', { group, mentioned: group });
+    await vi.waitFor(() => expect(f.logger.debug).toHaveBeenCalledWith(expect.stringContaining('[concurrency] queued message')));
+    f.deactivate();
+  } finally {
+    held.resolve();
+    await first;
+    if (queued) expect((await queued).stopReason).toBe('gateway-inactive');
+  }
+  expect(entered).toHaveBeenCalledExactlyOnceWith('hold');
+});
+
+it('does not append group context if the gateway stops between reading and recording history', async () => {
+  const f = fixture();
+  const group = 'team-stopping';
+  expect(f.service.addManualMember('allow-group', group).ok).toBe(true);
+  const history = getHistoryStore();
+  const list = vi.spyOn(history, 'list').mockImplementationOnce(() => {
+    f.deactivate();
+    return [];
+  });
+  try {
+    expect((await f.receive('old context', { group: true, mentioned: true, groupId: group })).stopReason)
+      .toBe('gateway-inactive');
+    expect(await history.list(historyGroupKey(f.service.config.appId, group), 5)).toEqual([]);
+  } finally {
+    list.mockRestore();
+  }
 });
 
 it.each([false, true])('rechecks admission before handing a queued message to Inbox (group=%s)', async group => {

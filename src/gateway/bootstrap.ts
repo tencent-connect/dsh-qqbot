@@ -64,6 +64,7 @@ export async function bootstrapGateway(
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
   let active = true;
+  const isActive = () => active;
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
   const allowTarget = (target: ReplyTarget) => {
     if (!active) return false;
@@ -91,10 +92,11 @@ export async function bootstrapGateway(
 
   // ── 中间件链 ──
   const replyIds = new ReplyIdCache();
-  setupMiddlewares(bot, config, manager, logger, replyIds);
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
+    if (mCtx.signal.aborted || !allowTarget(mCtx.replyTarget)) return;
     const msg = mCtx.message;
     // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
     replyIds.cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
@@ -135,8 +137,11 @@ export async function bootstrapGateway(
   // session/event 按会话作用域派发。根作用域监听不带 global 收不到
   // 桌面恢复出来的 agent，主动回合的 user/message 会直接丢。
   // 全局监听下非 QQ 会话在 TurnTracker.begin 即被过滤，不进入回合状态表。
+  const routeSessionEvent: typeof outbound.routeSessionEvent = (...args) => {
+    if (active) outbound.routeSessionEvent(...args);
+  };
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
-    .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void, { global: true });
+    .on('session/event', routeSessionEvent as (...args: unknown[]) => void, { global: true });
 
   // ── 出站流式：agent/assistant-stream → 流式帧路由 ──
   // 实时流式走瞬态 agent/assistant-stream（chunk 不进 session log）。
@@ -144,6 +149,7 @@ export async function bootstrapGateway(
   // approval/request），帧到达后自行按 agent.id 路由，非 QQ 会话在 router 内忽略。
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
     .on('agent/assistant-stream', (payload: unknown) => {
+      if (!active) return;
       const parsed = parseStreamFrame(payload);
       if (parsed !== undefined) outbound.routeStreamFrame(parsed.agentId, parsed.delta);
     }, { global: true });
@@ -160,14 +166,16 @@ export async function bootstrapGateway(
 
   // ── 按钮点击回调（interaction）：统一分发到问答/审批通道 ──
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
-    // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
-    const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
-    const targetId = scope === 'group' ? (event.group_openid ?? event.user_openid) : event.user_openid;
-    // 记录互动事件 id，作为后续被动回复候选（event_id）
-    replyIds.cacheEventId(scope, targetId, event.id);
+    if (!active || !event.id) return;
+    const scope: ChatScope = event.scene === 'group' || event.group_openid ? 'group' : 'c2c';
+    const targetId = scope === 'group' ? event.group_openid : event.user_openid;
+    let matched = false;
+    if (targetId && allowTarget({ scope, targetId })) {
+      replyIds.cacheEventId(scope, targetId, event.id);
+      matched = dispatchInteraction(event, manager);
+    }
 
-    const matched = dispatchInteraction(event, manager);
-    await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
+    if (active) await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
   });
 
   bot.on('error', (err: unknown) => {
@@ -204,7 +212,7 @@ export async function bootstrapGateway(
   registerDescribeImageTool(ctx, config.vision, logger);
 
   // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker, () => active);
+  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker, isActive);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
@@ -216,10 +224,16 @@ export async function bootstrapGateway(
 
       return async () => {
         active = false;
-        outbound.dispose();
         logger.info('Shutting down');
-        await manager.disposeAll();
-        bot.stop();
+        const cleanups = [
+          () => bot.stop(),
+          () => outbound.dispose(),
+          () => questionChannel.uninstall(),
+          () => manager.disposeAll(),
+        ];
+        const results = await Promise.allSettled(cleanups.map(cleanup => Promise.resolve().then(cleanup)));
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
       };
     }, 'im-qqbot.lifecycle');
 }

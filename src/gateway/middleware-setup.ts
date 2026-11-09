@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { Middleware, QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { Middleware, MiddlewareContext, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -35,8 +35,19 @@ export function setupMiddlewares(
   manager: SessionManager,
   logger: Logger,
   replyIds: ReplyIdCache,
+  isActive: () => boolean,
 ): void {
-  // 1. 错误兜底（最外层洋葱皮）
+  const stopIfInactive = (ctx: MiddlewareContext): boolean => {
+    if (isActive()) return false;
+    ctx.stop('gateway-inactive');
+    return true;
+  };
+  const requireActive: Middleware = async (ctx, next) => {
+    if (!stopIfInactive(ctx)) await next();
+  };
+  bot.use(requireActive);
+
+  // 1. 错误兜底
   bot.use(errorHandler());
 
   // 2. 消息过滤：bot 回声 + 消息去重
@@ -55,6 +66,7 @@ export function setupMiddlewares(
       return;
     }
     await mention(ctx, async () => limit(ctx, async () => {
+      if (stopIfInactive(ctx)) return;
       try {
         const result = service.beginClaimFromMessage(
           ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
@@ -63,7 +75,9 @@ export function setupMiddlewares(
         await ctx.bot.sendText(ctx.replyTarget, result.message);
       } catch (err) {
         logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
-        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
+        if (isActive()) {
+          try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
+        }
       }
       ctx.stop('claim-result');
     }));
@@ -82,9 +96,15 @@ export function setupMiddlewares(
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
   //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
+  const history = getHistoryStore();
   bot.use(historyBuffer({
     limit: config.historyLimit,
-    store: getHistoryStore(),
+    store: {
+      list: (key, limit) => history.list(key, limit),
+      append: (key, entry, limit) => {
+        if (isActive()) return history.append(key, entry, limit);
+      },
+    },
     recordOnSkip: true,
     groupKey: (ctx) => {
       const gid = ctx.message.groupOpenid;
@@ -92,6 +112,7 @@ export function setupMiddlewares(
       return historyGroupKey(config.appId, gid);
     },
   }));
+  bot.use(requireActive);
 
   // 5. 群聊 @bot 门控
   bot.use(mention);
@@ -131,6 +152,7 @@ export function setupMiddlewares(
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
   }));
+  bot.use(requireActive);
   bot.use(admit);
 
   // 10. C2C 输入状态指示
