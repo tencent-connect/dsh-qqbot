@@ -63,6 +63,7 @@ export function bootstrapGateway(
   accountAccess = new AccountAccessService(config, logger),
   mediaRoot?: string,
   prefs?: PrefsStore,
+  receiving?: (target: ReplyTarget) => boolean,
 ): GatewayRuntime {
   const manager = new SessionManager(ctx, agents, config, logger, prefs);
 
@@ -74,7 +75,7 @@ export function bootstrapGateway(
   const isActive = () => active;
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
   const allowTarget = (target: ReplyTarget) => {
-    if (!active) return false;
+    if (!active || receiving?.(target) === false) return false;
     try {
       return accountAccess.allowsConversation(target.scope, target.targetId);
     } catch {
@@ -99,7 +100,7 @@ export function bootstrapGateway(
 
   // ── 中间件链 ──
   const replyIds = new ReplyIdCache();
-  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot);
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {

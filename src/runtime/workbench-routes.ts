@@ -41,14 +41,15 @@ async function readPatch(request: Request): Promise<WorkbenchRobotPatch> {
   return patch;
 }
 
-function json(data: unknown, status = 200): Response {
+export function workbenchJson(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
-export function registerWorkbenchRoutes(
+export function registerWorkbenchFetch(
   ctx: Context,
-  listRobots: () => readonly WorkbenchRobot[],
-  saveRobot?: (patch: WorkbenchRobotPatch) => WorkbenchRobot | Promise<WorkbenchRobot>,
+  path: string,
+  methods: readonly ('GET' | 'POST')[],
+  handle: (request: Request, assertWritable: () => void) => Promise<Response>,
 ): void {
   ctx.inject(['connection'], scope => {
     const connection = scope.get('connection') as { fetch?: ConnectionFetchRegistry } | undefined;
@@ -59,30 +60,21 @@ export function registerWorkbenchRoutes(
     scope.effect(() => {
       let active = true;
       const unregister = registry.register({
-        path: WORKBENCH_ROBOTS_PATH,
-        methods: saveRobot ? ['GET', 'POST'] : ['GET'],
+        path,
+        methods,
         requestBody: 'buffered',
         fetch: async request => {
-          if (!active) return json({ error: 'QQ 插件已重载，请刷新后重试。' }, 503);
+          const assertActive = () => {
+            if (!active) throw new WorkbenchRequestError(503, 'QQ 插件已重载，请刷新后重试。');
+            if (request.signal.aborted) throw new WorkbenchRequestError(400, '请求已取消。');
+          };
           try {
-            if (request.method === 'GET') {
-              const response: WorkbenchRobotsResponse = { robots: listRobots().map(publicRobot) };
-              return json(response);
-            }
-            if (request.method !== 'POST' || !saveRobot) return json({ error: '不支持的请求方法。' }, 405);
-            let patch: WorkbenchRobotPatch;
-            try {
-              patch = await readPatch(request);
-            } catch (error) {
-              return json({ error: error instanceof Error && !(error instanceof SyntaxError) ? error.message : '机器人配置格式无效。' }, 400);
-            }
-            if (!active) return json({ error: 'QQ 插件已重载，请刷新后重试。' }, 503);
-            if (request.signal.aborted) return json({ error: '请求已取消。' }, 400);
-            return json({ robot: publicRobot(await saveRobot(patch)) });
+            assertActive();
+            return await handle(request, assertActive);
           } catch (error) {
-            if (error instanceof WorkbenchRequestError) return json({ error: error.message }, error.status);
-            if (error instanceof RobotConfigConflictError) return json({ error: error.message }, 409);
-            return json({ error: '机器人配置暂时不可用，请检查运行状态。' }, 503);
+            if (error instanceof WorkbenchRequestError) return workbenchJson({ error: error.message }, error.status);
+            if (error instanceof RobotConfigConflictError) return workbenchJson({ error: error.message }, 409);
+            return workbenchJson({ error: 'QQ 工作台数据暂时不可用，请检查运行状态。' }, 503);
           }
         },
       });
@@ -90,6 +82,28 @@ export function registerWorkbenchRoutes(
         active = false;
         return unregister();
       };
-    }, 'im-qqbot.workbench-robots');
+    }, `im-qqbot.workbench:${path}`);
+  });
+}
+
+export function registerWorkbenchRoutes(
+  ctx: Context,
+  listRobots: () => readonly WorkbenchRobot[],
+  saveRobot?: (patch: WorkbenchRobotPatch) => WorkbenchRobot | Promise<WorkbenchRobot>,
+): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_ROBOTS_PATH, saveRobot ? ['GET', 'POST'] : ['GET'], async (request, assertWritable) => {
+    if (request.method === 'GET') {
+      const response: WorkbenchRobotsResponse = { robots: listRobots().map(publicRobot) };
+      return workbenchJson(response);
+    }
+    if (request.method !== 'POST' || !saveRobot) return workbenchJson({ error: '不支持的请求方法。' }, 405);
+    let patch: WorkbenchRobotPatch;
+    try {
+      patch = await readPatch(request);
+    } catch (error) {
+      return workbenchJson({ error: error instanceof Error && !(error instanceof SyntaxError) ? error.message : '机器人配置格式无效。' }, 400);
+    }
+    assertWritable();
+    return workbenchJson({ robot: publicRobot(await saveRobot(patch)) });
   });
 }

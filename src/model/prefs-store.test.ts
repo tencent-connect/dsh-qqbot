@@ -182,3 +182,38 @@ describe('PrefsStore.findSessionKey 反向索引', () => {
     expect(store().findSessionKey('session-1')).toBe('k');
   });
 });
+
+describe('QQ Session history', () => {
+  it('retains replaced and cleared bindings without giving them a current delivery address', () => {
+    const a = store();
+    const peer = 'qqbot:A:c2c:same';
+    a.setSessionId(peer, 'legacy');
+    a.setSessionId(peer, 'replacement');
+    a.clearSessionId(peer);
+    a.setSessionId('qqbot:B:c2c:same', 'other-bot');
+    a.setSessionId('qqbot:A:group:same', 'group');
+
+    const restored = store();
+    expect(restored.listSessionBindings('A')).toEqual([
+      { key: 'qqbot:A:group:same', current: 'group', history: [] },
+      { key: peer, current: undefined, history: ['legacy', 'replacement'] },
+    ]);
+    for (const sessionId of ['legacy', 'replacement']) {
+      expect(restored.findSessionKey(sessionId)).toBeUndefined();
+      expect(restored.findKnownSessionKey(sessionId)).toBe(peer);
+    }
+    expect(restored.findKnownSessionKey('other-bot')).toBe('qqbot:B:c2c:same');
+  });
+
+  it('keeps on-disk history when a stale writer replaces the same current binding', () => {
+    const first = store();
+    const peer = 'qqbot:A:c2c:same';
+    first.setSessionId(peer, 'first');
+    const stale = store();
+    first.setSessionId(peer, 'second');
+    stale.setSessionId(peer, 'third');
+    expect(store().listSessionBindings('A')).toEqual([
+      { key: peer, current: 'third', history: ['first', 'second'] },
+    ]);
+  });
+});

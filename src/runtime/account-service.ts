@@ -28,6 +28,12 @@ export interface AccountAccessDeps {
   };
 }
 
+export function allowsConversation(access: AccessControlConfig, scope: ChatScope, openid: string): boolean {
+  const mode = scope === 'group' ? access.groupMode : access.c2cMode;
+  const allow = scope === 'group' ? access.groupAllow : access.c2cAllow;
+  return mode === 'open' || (mode === 'allowlist' && allow.includes(openid));
+}
+
 export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
@@ -219,10 +225,7 @@ export class AccountAccessService {
     return readProfileAccess(this.config.access, getProfileDir() ?? undefined, this.config.appId);
   }
   allowsConversation(scope: ChatScope, openid: string): boolean {
-    const access = this.currentAccess();
-    const mode = scope === 'group' ? access.groupMode : access.c2cMode;
-    const allow = scope === 'group' ? access.groupAllow : access.c2cAllow;
-    return mode === 'open' || (mode === 'allowlist' && allow.includes(openid));
+    return allowsConversation(this.currentAccess(), scope, openid);
   }
   commandAccessError(actor?: string): string | undefined {
     const mode = this.currentAccess().commandMode;

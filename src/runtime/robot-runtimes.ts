@@ -8,11 +8,12 @@ import { PrefsStore } from '../model/prefs-store.ts';
 import type { DshAgentRegistry } from '../session/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import type { WorkbenchRobot, WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
-import type { Logger } from '../types.ts';
+import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { registerAccountRoutes } from './account-routes.ts';
 import { AccountAccessService } from './account-service.ts';
 import { RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
 import { WorkbenchRequestError } from './workbench-routes.ts';
+import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -23,6 +24,7 @@ interface GatewaySlot {
 
 export class RobotRuntimes {
   readonly prefs: PrefsStore;
+  readonly conversationSettings: ConversationSettingsStore;
   private readonly slots = new Map<string, GatewaySlot>();
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
@@ -35,6 +37,7 @@ export class RobotRuntimes {
     private readonly store?: RobotConfigStore,
   ) {
     this.prefs = new PrefsStore(undefined, { onError: message => logger.warn(message) });
+    this.conversationSettings = new ConversationSettingsStore(join(PLUGIN_HOME, 'conversation-settings.json'));
     ctx.effect(() => () => {
       this.closed = true;
       for (const slot of this.slots.values()) this.deactivate(slot);
@@ -42,7 +45,7 @@ export class RobotRuntimes {
     registerSendFileTool(ctx, {
       runtimes: () => [...this.slots.values()].flatMap(slot => slot.runtime ? [slot.runtime] : []),
       ownerOf: sessionId => {
-        const key = this.prefs.findSessionKey(sessionId);
+        const key = this.prefs.findKnownSessionKey(sessionId);
         if (key !== undefined) return /^qqbot:([^:]+):/.exec(key)?.[1];
         return [...this.slots.values()].find(slot => slot.runtime?.manager.findBySessionId(sessionId))?.config.appId;
       },
@@ -69,6 +72,24 @@ export class RobotRuntimes {
 
   list(): WorkbenchRobot[] {
     return this.records().map(record => this.view(record));
+  }
+
+  conversationAccount(appId: string) {
+    const record = this.records().find(item => item.appId === appId);
+    if (!record) return undefined;
+    const manager = this.slots.get(appId)?.runtime?.manager;
+    const members = (record.kind === 'primary' ? this.primary?.access : manager?.accountAccess)?.store;
+    const profiles = members?.memberProfiles();
+    return {
+      access: record.kind === 'additional' ? record.access : this.primary!.access.currentAccess(),
+      liveSessionId: (scope: ChatScope, openId: string) => manager?.getSessionRecord(scope, openId)?.sessionId,
+      peerName: (scope: ChatScope, openId: string) => {
+        const profile = profiles && Object.hasOwn(profiles, openId) ? profiles[openId] : undefined;
+        if (profile?.scene === scope && profile.nickname) return profile.nickname.slice(0, 300);
+        const legacy = members?.peerName(scope, openId);
+        return legacy?.alias || legacy?.name || '';
+      },
+    };
   }
 
   async save(patch: WorkbenchRobotPatch): Promise<WorkbenchRobot> {
@@ -197,7 +218,15 @@ export class RobotRuntimes {
       name: 'im-qqbot.account',
       apply: (child: Context) => {
         if (this.closed || slot.stopped) return;
-        slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs);
+        const receiving = ({ scope, targetId }: ReplyTarget): boolean => {
+          try {
+            return this.conversationSettings.get(peerKey(config.appId, scope, targetId)).receiving;
+          } catch {
+            this.logger.warn('im-qqbot: peer settings unavailable; QQ conversation denied');
+            return false;
+          }
+        };
+        slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs, receiving);
       },
     });
     await slot.fiber.await();

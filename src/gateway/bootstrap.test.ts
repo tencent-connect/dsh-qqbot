@@ -7,8 +7,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ConfigSchema, type AccessControlConfig } from '../config.ts';
 import { encodeButtonData } from '../features/button-utils.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
+import { ApprovalChannel } from '../features/approval-channel.ts';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
+import { assertDeliveryAllowed } from '../transport/delivery-context.ts';
 import { ReplyIdCache } from '../transport/msgid-cache.ts';
+import { TurnTracker } from '../transport/turn-tracker.ts';
+import type { ReplyTarget } from '../types.ts';
 import { bootstrapGateway } from './bootstrap.ts';
 
 const sandbox = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -24,7 +28,7 @@ afterEach(() => {
   sandbox.dir = undefined;
 });
 
-async function gateway(access: Partial<AccessControlConfig> = {}) {
+async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (target: ReplyTarget) => boolean) {
   sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-gateway-'));
   const options = ConfigSchema({
     appId: 'gateway-test', appSecret: 'fixture', sessionIdleTimeout: 0,
@@ -47,12 +51,12 @@ async function gateway(access: Partial<AccessControlConfig> = {}) {
   const dispatch = vi.spyOn(QuestionChannel.prototype, 'handleInteraction').mockReturnValue(true);
   const cache = vi.spyOn(ReplyIdCache.prototype, 'cacheEventId');
   const dispose = vi.spyOn(SessionManager.prototype, 'disposeAll');
-  await bootstrapGateway(ctx, { get: vi.fn() } as unknown as DshAgentRegistry, options, logger);
+  const runtime = bootstrapGateway(ctx, { get: vi.fn() } as unknown as DshAgentRegistry, options, logger, undefined, undefined, undefined, receiving);
   const callback = on.mock.calls.find(([event]) => event === 'interaction')?.[1] as
     ((ctx: unknown, event: InteractionEvent) => Promise<void>);
 
   return {
-    stop, ack, dispatch, cache, dispose, ask, questions,
+    stop, ack, dispatch, cache, dispose, ask, questions, runtime,
     unload: () => effects.get('im-qqbot.lifecycle')!(),
     click: (input: Partial<InteractionEvent>) => callback({}, {
       id: 'button', type: 1, version: 1,
@@ -93,6 +97,35 @@ it('rejects unauthorized groups before caching or dispatching even without scene
   expect(f.dispatch).not.toHaveBeenCalled();
   expect(f.ack.mock.calls).toEqual([['button', 3]]);
   await f.unload();
+});
+
+it('rechecks peer pause for native delivery and rejects question and approval callbacks', async () => {
+  let paused = false;
+  const f = await gateway({ c2cMode: 'open' }, () => !paused);
+  try {
+    vi.spyOn(f.runtime.manager, 'deliveryAddress').mockReturnValue({ scope: 'c2c', targetId: 'member' });
+    const approvals = vi.spyOn(ApprovalChannel.prototype, 'handleInteraction');
+    const turns = f.runtime.targets;
+    expect(turns).toBeInstanceOf(TurnTracker);
+    if (!(turns instanceof TurnTracker)) throw new Error('missing TurnTracker');
+    turns.begin('session', 1);
+    turns.note('session', { id: 'native-message', source: { kind: 'user' } });
+    const bound = turns.targetFor('session');
+    expect(bound).toBeDefined();
+    if (!bound) throw new Error('missing delivery target');
+    expect(() => assertDeliveryAllowed(bound)).not.toThrow();
+
+    paused = true;
+    expect(turns.targetFor('session')).toBeUndefined();
+    expect(() => assertDeliveryAllowed(bound)).toThrow('no longer authorized');
+    await f.click({ user_openid: 'member' });
+    await f.click({ user_openid: 'member', data: { type: 1, resolved: { button_data: encodeButtonData({ t: 'approval', d: 'allow' }) } } });
+    expect(f.dispatch).not.toHaveBeenCalled();
+    expect(approvals).not.toHaveBeenCalled();
+    expect(f.ack.mock.calls).toEqual([['button', 3], ['button', 3]]);
+  } finally {
+    await f.unload();
+  }
 });
 
 it('restores the question service and disposes Sessions even if SDK stop throws', async () => {

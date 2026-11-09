@@ -15,6 +15,7 @@ import { QqInputRegistry } from '../transport/qq-input-origin.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
+import type { ReplyTarget } from '../types.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
@@ -23,7 +24,10 @@ afterEach(() => {
   profile.dir = undefined;
 });
 
-function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, config: ImQQBotConfig) => Promise<void>) {
+function fixture(
+  onInbound?: (ctx: MiddlewareContext, manager: SessionManager, config: ImQQBotConfig) => Promise<void>,
+  receiving?: (target: ReplyTarget) => boolean,
+) {
   profile.dir = mkdtempSync(join(tmpdir(), 'qq-pair-admission-'));
   const config = ConfigSchema({ appId: '12345', appSecret: 'fixture', access: {
     c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'disabled',
@@ -39,7 +43,7 @@ function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, c
   let active = true;
   vi.spyOn(bot, 'use').mockImplementation((...middleware) => { chain.push(...middleware); return bot; });
   const send = vi.spyOn(bot, 'sendText').mockResolvedValue({ id: 'reply', timestamp: '' });
-  setupMiddlewares(bot, config, manager, logger, new ReplyIdCache(), () => active);
+  setupMiddlewares(bot, config, manager, logger, new ReplyIdCache(), () => active, undefined, receiving);
   const agent = vi.fn();
   async function receive(content: string, options: { group?: boolean; mentioned?: boolean; id?: string; name?: string; senderId?: string; groupId?: string } = {}) {
     const group = options.group ?? false;
@@ -198,6 +202,37 @@ describe('pairing before conversation admission', () => {
     expect(readProfileAccess(undefined, profile.dir).groupAllow).toEqual(['team']);
     expect(f.agent).not.toHaveBeenCalled();
   });
+});
+
+it.each([false, true])('blocks paused peers before /new and rechecks messages waiting in the SDK queue (group=%s)', async group => {
+  const entered = vi.fn();
+  const held = Promise.withResolvers<void>();
+  const targetId = group ? 'team' : 'sender';
+  let paused = false;
+  const f = fixture(async ctx => {
+    entered(ctx.message.content);
+    if (ctx.message.content === 'hold') await held.promise;
+  }, target => target.targetId !== targetId || !paused);
+  const purpose = group ? 'allow-group' : 'allow-c2c';
+  const options = { group, mentioned: group };
+  expect(f.service.addManualMember(purpose, targetId).ok).toBe(true);
+  paused = true;
+  expect((await f.receive('/new', options)).stopReason).toBe('conversation-paused');
+  expect(f.send).not.toHaveBeenCalled();
+  paused = false;
+  const first = f.receive('hold', options);
+  let queued: ReturnType<typeof f.receive> | undefined;
+  try {
+    await vi.waitFor(() => expect(entered).toHaveBeenCalledOnce());
+    queued = f.receive('queued', options);
+    await vi.waitFor(() => expect(f.logger.debug).toHaveBeenCalledWith(expect.stringContaining('[concurrency] queued message')));
+    paused = true;
+  } finally {
+    held.resolve();
+    await first;
+    if (queued) expect((await queued).stopReason).toBe('conversation-paused');
+  }
+  expect(entered).toHaveBeenCalledExactlyOnceWith('hold');
 });
 
 it.each([false, true])('drops messages released by the SDK queue after the gateway stops (group=%s)', async group => {

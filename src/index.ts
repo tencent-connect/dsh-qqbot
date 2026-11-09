@@ -9,6 +9,7 @@ import { ensureVisionInputModal, registerDescribeImageTool } from './media/visio
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
 import { registerWorkbenchRoutes } from './runtime/workbench-routes.ts';
+import { registerWorkbenchConversations } from './runtime/workbench-conversations.ts';
 import type { Logger } from './types.ts';
 
 export const name = 'im-qqbot';
@@ -25,6 +26,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const store = profileDir ? new RobotConfigStore(join(profileDir, 'qqbot-robots.json')) : undefined;
   const robots = new RobotRuntimes(ctx, agents, logger, store);
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
+  registerWorkbenchConversations(ctx, robots, logger);
 
   const appId = resolveEnv(config.appId, 'QQBOT_APPID');
   const appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');

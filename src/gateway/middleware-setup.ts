@@ -21,7 +21,7 @@ import {
 } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
@@ -37,16 +37,23 @@ export function setupMiddlewares(
   replyIds: ReplyIdCache,
   isActive: () => boolean,
   mediaRoot?: string,
+  receiving?: (target: ReplyTarget) => boolean,
 ): void {
-  const stopIfInactive = (ctx: MiddlewareContext): boolean => {
-    if (isActive()) return false;
-    ctx.stop('gateway-inactive');
-    return true;
+  const blocked = (ctx: MiddlewareContext): boolean => {
+    if (!isActive()) {
+      ctx.stop('gateway-inactive');
+      return true;
+    }
+    if (receiving?.(ctx.replyTarget) === false) {
+      ctx.stop('conversation-paused');
+      return true;
+    }
+    return false;
   };
-  const requireActive: Middleware = async (ctx, next) => {
-    if (!stopIfInactive(ctx)) await next();
+  const requireReceiving: Middleware = async (ctx, next) => {
+    if (!blocked(ctx)) await next();
   };
-  bot.use(requireActive);
+  bot.use(requireReceiving);
 
   // 1. 错误兜底
   bot.use(errorHandler());
@@ -67,7 +74,7 @@ export function setupMiddlewares(
       return;
     }
     await mention(ctx, async () => limit(ctx, async () => {
-      if (stopIfInactive(ctx)) return;
+      if (blocked(ctx)) return;
       try {
         const result = service.beginClaimFromMessage(
           ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
@@ -103,7 +110,8 @@ export function setupMiddlewares(
     store: {
       list: (key, limit) => history.list(key, limit),
       append: (key, entry, limit) => {
-        if (isActive()) return history.append(key, entry, limit);
+        const targetId = key.slice(config.appId.length + 1);
+        if (isActive() && receiving?.({ scope: 'group', targetId }) !== false) return history.append(key, entry, limit);
       },
     },
     recordOnSkip: true,
@@ -113,7 +121,7 @@ export function setupMiddlewares(
       return historyGroupKey(config.appId, gid);
     },
   }));
-  bot.use(requireActive);
+  bot.use(requireReceiving);
 
   // 5. 群聊 @bot 门控
   bot.use(mention);
@@ -133,6 +141,7 @@ export function setupMiddlewares(
     autoHelp: false,
     commands: buildCommandList({ manager, config, logger }),
   });
+  bot.use(requireReceiving);
   bot.use(slash.middleware);
   bot.use(async (ctx, next) => {
     if (ctx.message.content.trim().startsWith('/')) {
@@ -153,7 +162,7 @@ export function setupMiddlewares(
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
   }));
-  bot.use(requireActive);
+  bot.use(requireReceiving);
   bot.use(admit);
 
   // 10. C2C 输入状态指示
