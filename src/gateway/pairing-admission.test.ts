@@ -12,6 +12,7 @@ import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { handleInbound } from '../transport/inbound.ts';
 import { QqInputRegistry } from '../transport/qq-input-origin.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
+import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -36,7 +37,7 @@ function fixture(onInbound?: (ctx: MiddlewareContext, manager: SessionManager, c
   const chain: Middleware[] = [];
   vi.spyOn(bot, 'use').mockImplementation((...middleware) => { chain.push(...middleware); return bot; });
   const send = vi.spyOn(bot, 'sendText').mockResolvedValue({ id: 'reply', timestamp: '' });
-  setupMiddlewares(bot, config, manager, logger);
+  setupMiddlewares(bot, config, manager, logger, new ReplyIdCache());
   const agent = vi.fn();
   async function receive(content: string, options: { group?: boolean; mentioned?: boolean; id?: string; name?: string; senderId?: string; groupId?: string } = {}) {
     const group = options.group ?? false;

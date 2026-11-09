@@ -7,8 +7,7 @@
  *   3. 全部候选都超频/过期，才降级为主动推送（proactive）。
  */
 import type { ReplyTarget } from '../types.ts';
-import { getCachedReplyIds } from './msgid-cache.ts';
-import type { CachedReplyId } from './msgid-cache.ts';
+import type { CachedReplyId, ReplyIdCache } from './msgid-cache.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 
 /**
@@ -23,6 +22,7 @@ import type { ReplyLimiter } from './reply-limiter.ts';
  */
 export function resolveReplyTarget(
   target: ReplyTarget,
+  replyIds: ReplyIdCache,
   limiter: ReplyLimiter,
   allowEvent: boolean,
 ): ReplyTarget {
@@ -30,7 +30,7 @@ export function resolveReplyTarget(
   if (target.forceProactive) {
     return { scope: target.scope, targetId: target.targetId };
   }
-  const cached = getCachedReplyIds(target.scope, target.targetId);
+  const cached = replyIds.getCachedReplyIds(target.scope, target.targetId);
   const explicitMsgId = target.msgId;
   const candidates: CachedReplyId[] = [];
   // 显式 id 在 cache TTL 内（未超平台被动窗口）才置顶优先，否则跳过

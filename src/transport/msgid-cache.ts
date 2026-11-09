@@ -28,60 +28,53 @@ const TTL_C2C = 30 * 60 * 1000; // 私聊 30 分钟
 const MAX_TARGETS = 200;
 const EVENT_PREFIX = 'INTERACTION_CREATE:';
 
-const cache = new Map<string, CachedEntry[]>();
-
 function cacheKey(scope: ChatScope, targetId: string): string {
   return `${scope}:${targetId}`;
 }
 
-function push(scope: ChatScope, targetId: string | undefined, target: CachedReplyId): void {
-  if (!scope || !targetId || !target.id) return;
-  const key = cacheKey(scope, targetId);
-  const existing = cache.get(key);
-  if (existing) {
-    cache.delete(key);
-    existing.push({ target, timestamp: Date.now() });
-    if (existing.length > MAX_PER_TARGET) existing.shift();
-    cache.set(key, existing);
-    return;
+export class ReplyIdCache {
+  private readonly cache = new Map<string, CachedEntry[]>();
+
+  cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId: string | undefined): void {
+    if (!msgId) return;
+    this.push(scope, targetId, { kind: 'msg', id: msgId });
   }
-  cache.set(key, [{ target, timestamp: Date.now() }]);
-  if (cache.size > MAX_TARGETS) {
-    const oldest = cache.keys().next().value;
-    if (oldest !== undefined) cache.delete(oldest);
+
+  forgetMsgId(scope: ChatScope, targetId: string, msgId: string): void {
+    const key = cacheKey(scope, targetId);
+    const entries = this.cache.get(key)?.filter(entry => entry.target.kind !== 'msg' || entry.target.id !== msgId);
+    if (entries?.length) this.cache.set(key, entries);
+    else this.cache.delete(key);
   }
-}
 
-/** 记录普通消息 msgId */
-export function cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId: string | undefined): void {
-  if (!msgId) return;
-  push(scope, targetId, { kind: 'msg', id: msgId });
-}
+  cacheEventId(scope: ChatScope, targetId: string | undefined, eventId: string | undefined): void {
+    if (!eventId) return;
+    this.push(scope, targetId, { kind: 'event', id: `${EVENT_PREFIX}${eventId}` });
+  }
 
-export function forgetMsgId(scope: ChatScope, targetId: string, msgId: string): void {
-  const key = cacheKey(scope, targetId);
-  const entries = cache.get(key)?.filter(entry => entry.target.kind !== 'msg' || entry.target.id !== msgId);
-  if (entries?.length) cache.set(key, entries);
-  else cache.delete(key);
-}
+  getCachedReplyIds(scope: ChatScope, targetId: string): CachedReplyId[] {
+    const list = this.cache.get(cacheKey(scope, targetId));
+    if (!list) return [];
+    const now = Date.now();
+    const ttl = scope === 'group' ? TTL_GROUP : TTL_C2C;
+    return list.filter(entry => now - entry.timestamp < ttl).reverse().map(entry => entry.target);
+  }
 
-/** 记录互动事件 eventId（内部拼 INTERACTION_CREATE 前缀） */
-export function cacheEventId(scope: ChatScope, targetId: string | undefined, eventId: string | undefined): void {
-  if (!eventId) return;
-  push(scope, targetId, { kind: 'event', id: `${EVENT_PREFIX}${eventId}` });
-}
-
-/** 获取所有未过期的被动回复目标（按时间倒序，最新在前） */
-export function getCachedReplyIds(scope: ChatScope, targetId: string): CachedReplyId[] {
-  const list = cache.get(cacheKey(scope, targetId));
-  if (!list || list.length === 0) return [];
-  const now = Date.now();
-  const ttl = scope === 'group' ? TTL_GROUP : TTL_C2C;
-  const result: CachedReplyId[] = [];
-  for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (now - list[i]!.timestamp < ttl) {
-      result.push(list[i]!.target);
+  private push(scope: ChatScope, targetId: string | undefined, target: CachedReplyId): void {
+    if (!scope || !targetId || !target.id) return;
+    const key = cacheKey(scope, targetId);
+    const existing = this.cache.get(key);
+    if (existing) {
+      this.cache.delete(key);
+      existing.push({ target, timestamp: Date.now() });
+      if (existing.length > MAX_PER_TARGET) existing.shift();
+      this.cache.set(key, existing);
+      return;
+    }
+    this.cache.set(key, [{ target, timestamp: Date.now() }]);
+    if (this.cache.size > MAX_TARGETS) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.cache.delete(oldest);
     }
   }
-  return result;
 }

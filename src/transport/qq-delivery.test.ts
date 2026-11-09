@@ -2,33 +2,62 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ApiError, MediaFileType, QQBot, StreamInputState, type InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import { bindDelivery, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
-import { cacheEventId, cacheMsgId } from './msgid-cache.ts';
+import { ReplyIdCache } from './msgid-cache.ts';
+import { StreamTargetExpired } from './delivery-errors.ts';
 import { OutboundBuffer } from './outbound-buffer.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from './qq-delivery.ts';
 import { ReplyLimiter } from './reply-limiter.ts';
 import type { ReplyTarget } from '../types.ts';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
-let nextUser = 0;
 afterEach(() => vi.useRealTimers());
 
-function setup() {
-  const bot = new QQBot({ appId: 'fixture-app', appSecret: 'fixture-secret' });
+function setup({ appId = 'fixture-app', msgId = 'platform-input' } = {}) {
+  const bot = new QQBot({ appId, appSecret: 'fixture-secret' });
   vi.spyOn(bot.tokenManager, 'getAccessToken').mockResolvedValue('fixture-token');
   const request = vi.spyOn(bot.apiClient, 'request').mockResolvedValue({ id: 'qq-message' });
-  const peer: ReplyTarget = { scope: 'c2c', targetId: `user-${++nextUser}`, msgId: 'platform-input' };
-  cacheMsgId(peer.scope, peer.targetId, peer.msgId);
+  const peer: ReplyTarget = { scope: 'c2c', targetId: 'shared-openid', msgId };
+  const replyIds = new ReplyIdCache();
+  replyIds.cacheMsgId(peer.scope, peer.targetId, peer.msgId);
   const limiter = new ReplyLimiter({ limit: 4 });
   let allowed = true;
-  const target = replyDelivery(bindDelivery(peer, { key: 'fixture-delivery', allowed: () => allowed }), 1);
+  const target = replyDelivery(bindDelivery(peer, { key: appId, allowed: () => allowed }), 1);
   const ledger = new DeliveryLedger();
   const sender = guardSender({
-    openStream: target => openDeliveryStream(bot, target, logger),
-    sendMarkdown: (target, body, opts) => sendDeliveryMarkdown(bot, limiter, target, body, opts),
+    openStream: target => openDeliveryStream(bot, replyIds, target, logger),
+    sendMarkdown: (target, body, opts) => sendDeliveryMarkdown(bot, replyIds, limiter, target, body, opts),
   }, ledger);
-  const media = guardMedia(createDeliveryMedia(bot, limiter), ledger);
-  return { bot, request, peer, target, sender, media, revoke: () => { allowed = false; } };
+  const media = guardMedia(createDeliveryMedia(bot, replyIds, limiter), ledger);
+  return { bot, request, peer, target, sender, media, replyIds, revoke: () => { allowed = false; } };
 }
+
+it('keeps passive text, stream and media replies inside each bot at the same OpenID', async () => {
+  const first = setup({ appId: 'fixture-app-1', msgId: 'first-input' });
+  const second = setup({ appId: 'fixture-app-2', msgId: 'second-input' });
+  first.replyIds.cacheEventId(first.peer.scope, first.peer.targetId, 'first-interaction');
+  const recent = bindDelivery(
+    { scope: first.peer.scope, targetId: first.peer.targetId },
+    { key: 'latest-passive-target', allowed: () => true },
+  );
+
+  await first.sender.sendMarkdown(recent, 'first answer');
+  expect(first.request.mock.lastCall?.[3]).toMatchObject({ event_id: 'INTERACTION_CREATE:first-interaction' });
+  await second.sender.sendMarkdown(recent, 'second answer');
+  expect(second.request.mock.lastCall?.[3]).toMatchObject({ msg_id: 'second-input' });
+  expect(second.request.mock.lastCall?.[3]).not.toHaveProperty('event_id');
+
+  expect(() => second.sender.openStream(first.target)).toThrow(StreamTargetExpired);
+  const stream = second.sender.openStream(second.target);
+  await stream.update('second stream');
+  await stream.complete();
+  expect(second.request.mock.calls.find(([, , path]) => path.endsWith('/stream_messages'))?.[3])
+    .toMatchObject({ msg_id: 'second-input' });
+
+  vi.spyOn(second.bot, 'uploadMedia').mockResolvedValue({ file_info: 'uploaded-file', file_uuid: 'file-1', ttl: 60 });
+  await second.media.sendFile(first.target, { localPath: '/fixture/a.txt' });
+  expect(second.request.mock.lastCall?.[3]).toMatchObject({ msg_id: 'second-input' });
+  expect(second.request.mock.lastCall?.[3]).not.toHaveProperty('event_id');
+});
 
 it('checks access when the SDK flushes a queued frame', async () => {
   vi.useFakeTimers();
@@ -160,9 +189,9 @@ it.each(['text', 'card'] as const)('blocks static %s if access is revoked while 
 });
 
 it('preserves event_id, keyboard, and outbound reference tracking for an authorized card', async () => {
-  const { bot, request, sender, peer, target } = setup();
+  const { bot, request, sender, peer, target, replyIds } = setup();
   const eventId = 'INTERACTION_CREATE:approval';
-  cacheEventId(peer.scope, peer.targetId, 'approval');
+  replyIds.cacheEventId(peer.scope, peer.targetId, 'approval');
   const eventTarget = bindDelivery({ scope: peer.scope, targetId: peer.targetId }, { key: 'approved', allowed: () => true });
   const notify = vi.spyOn(bot.messageApi, 'notifyMessageSent');
   request.mockResolvedValueOnce({ id: 'card', ext_info: { ref_idx: 'reference' } });

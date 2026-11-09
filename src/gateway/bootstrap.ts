@@ -13,7 +13,7 @@ import { handleInbound, createOutboundHandler, createTurnTracker } from '../tran
 import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
-import { cacheMsgId, cacheEventId } from '../transport/msgid-cache.ts';
+import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
@@ -90,13 +90,14 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  const replyIds = new ReplyIdCache();
+  setupMiddlewares(bot, config, manager, logger, replyIds);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
     const msg = mCtx.message;
     // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
-    cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
+    replyIds.cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
@@ -116,14 +117,14 @@ export async function bootstrapGateway(
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
   const sender: QQBotSender = guardSender({
-    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyLimiter, target, content, opts),
-    openStream: (target) => openDeliveryStream(bot, target, logger),
+    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyIds, replyLimiter, target, content, opts),
+    openStream: (target) => openDeliveryStream(bot, replyIds, target, logger),
   }, ledger);
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender = guardMedia(createDeliveryMedia(bot, replyLimiter), ledger);
+  const mediaSender = guardMedia(createDeliveryMedia(bot, replyIds, replyLimiter), ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
@@ -163,7 +164,7 @@ export async function bootstrapGateway(
     const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
     const targetId = scope === 'group' ? (event.group_openid ?? event.user_openid) : event.user_openid;
     // 记录互动事件 id，作为后续被动回复候选（event_id）
-    cacheEventId(scope, targetId, event.id);
+    replyIds.cacheEventId(scope, targetId, event.id);
 
     const matched = dispatchInteraction(event, manager);
     await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});

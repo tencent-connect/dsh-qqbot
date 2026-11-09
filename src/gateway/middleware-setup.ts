@@ -25,6 +25,7 @@ import type { Logger } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import type { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
 
@@ -33,6 +34,7 @@ export function setupMiddlewares(
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
+  replyIds: ReplyIdCache,
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
@@ -121,7 +123,7 @@ export function setupMiddlewares(
     await next();
   });
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
-  bot.use(questionAnswer(manager));
+  bot.use(questionAnswer(manager, replyIds));
 
   // 9. 同 peer 串行。不能合并不同发送者，否则无法保留每条输入的身份和回复窗口。
   bot.use(concurrencyGuard({

@@ -3,7 +3,7 @@ import { ApiClient, MediaApi, MessageApi, type RequestOptions } from '@tencent-c
 import type { MediaSenderLike } from '../media/send-media.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { assertDeliveryAllowed } from './delivery-context.ts';
-import { forgetMsgId, getCachedReplyIds } from './msgid-cache.ts';
+import type { ReplyIdCache } from './msgid-cache.ts';
 import type { StreamSessionLike } from './outbound-buffer.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 import { resolveReplyTarget } from './reply-target.ts';
@@ -20,12 +20,13 @@ class CheckedApiClient extends ApiClient {
 
 export function sendDeliveryMarkdown(
   bot: QQBot,
+  replyIds: ReplyIdCache,
   limiter: ReplyLimiter,
   target: ReplyTarget,
   content: string,
   opts?: { keyboard?: InlineKeyboard },
 ) {
-  const reply = resolveReplyTarget(target, limiter, true);
+  const reply = resolveReplyTarget(target, replyIds, limiter, true);
   const client = new CheckedApiClient(bot.apiClient, () => assertDeliveryAllowed(target));
   const api = new MessageApi(client, bot.tokenManager, { markdownSupport: true });
   api.onMessageSent((ref, meta) => bot.messageApi.notifyMessageSent(ref, meta));
@@ -38,9 +39,9 @@ export function sendDeliveryMarkdown(
   });
 }
 
-export function openDeliveryStream(bot: QQBot, target: ReplyTarget, logger: Logger): StreamSessionLike {
+export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: ReplyTarget, logger: Logger): StreamSessionLike {
   const { scope, targetId, msgId } = target;
-  if (scope !== 'c2c' || !msgId || !getCachedReplyIds(scope, targetId).some(id => id.kind === 'msg' && id.id === msgId)) {
+  if (scope !== 'c2c' || !msgId || !replyIds.getCachedReplyIds(scope, targetId).some(id => id.kind === 'msg' && id.id === msgId)) {
     throw new StreamTargetExpired();
   }
 
@@ -66,7 +67,7 @@ export function openDeliveryStream(bot: QQBot, target: ReplyTarget, logger: Logg
       }
       if (error instanceof ApiError && error.httpStatus === 400 && error.bizCode === 40034005
         && error.path.endsWith('/stream_messages')) {
-        forgetMsgId(scope, targetId, msgId);
+        replyIds.forgetMsgId(scope, targetId, msgId);
         if (!sent) error = new StreamTargetExpired();
       }
       failure = { error };
@@ -96,11 +97,11 @@ export function openDeliveryStream(bot: QQBot, target: ReplyTarget, logger: Logg
   };
 }
 
-export function createDeliveryMedia(bot: QQBot, limiter: ReplyLimiter): MediaSenderLike {
+export function createDeliveryMedia(bot: QQBot, replyIds: ReplyIdCache, limiter: ReplyLimiter): MediaSenderLike {
   const send = async (target: ReplyTarget, fileType: MediaFileType, source: { localPath?: string }, fileName?: string) => {
     const upload = await bot.uploadMedia({ target, fileType, ...source, fileName, srvSendMsg: false });
     assertDeliveryAllowed(target);
-    const reply = resolveReplyTarget(target, limiter, false);
+    const reply = resolveReplyTarget(target, replyIds, limiter, false);
     const client = new CheckedApiClient(bot.apiClient, () => assertDeliveryAllowed(target));
     const api = new MediaApi(client, bot.tokenManager);
     const message = await api.sendMediaMessage(reply.scope, reply.targetId, upload.file_info, bot.getCredentials(), { msgId: reply.msgId });
