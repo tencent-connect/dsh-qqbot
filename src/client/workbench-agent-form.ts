@@ -29,7 +29,7 @@ interface Catalog {
 
 const empty: Catalog = { models: null, presets: [], permissions: { options: [] }, errors: [], loading: true };
 
-function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
+function useCatalog(source: AgentFormSource | undefined, placementOnly: boolean): [Catalog, () => void] {
   const [catalog, setCatalog] = useState<Catalog>(empty);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -44,9 +44,9 @@ function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
       return method();
     };
     void Promise.allSettled([
-      read(source?.modelCatalog).then(parseModelCatalog),
+      placementOnly ? Promise.resolve(null) : read(source?.modelCatalog).then(parseModelCatalog),
       read(source?.listAgentPresets).then(response => parseAgentPresets(response, source?.localizePreset)),
-      read(source?.permissionCatalog).then(response => parsePermissionCatalog(response, source?.localizePermission)),
+      placementOnly ? Promise.resolve(empty.permissions) : read(source?.permissionCatalog).then(response => parsePermissionCatalog(response, source?.localizePermission)),
     ]).then(([models, presets, permissions]) => {
       if (!active) return;
       clearTimeout(timeout);
@@ -56,14 +56,14 @@ function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
         presets: presets.status === 'fulfilled' ? presets.value : current.presets,
         permissions: permissions.status === 'fulfilled' ? permissions.value : current.permissions,
         errors: [
-          ...(models.status === 'fulfilled' ? models.value.failures : ['模型目录不可用']),
+          ...(models.status === 'fulfilled' ? models.value?.failures ?? [] : ['模型目录不可用']),
           ...(presets.status === 'fulfilled' ? [] : ['Agent 预设目录不可用']),
           ...(permissions.status === 'fulfilled' ? [] : ['权限目录不可用']),
         ],
       }));
     });
     return () => { active = false; clearTimeout(timeout); };
-  }, [source, attempt]);
+  }, [source, attempt, placementOnly]);
   return [catalog, () => setAttempt(value => value + 1)];
 }
 
@@ -123,8 +123,11 @@ function WorkbenchToolPicker({ tools, preset, disabled, onChange }: {
   );
 }
 
-export function WorkbenchAgentFields({ settings, source, disabled, onChange }: AgentFieldsProps & { source?: AgentFormSource }): ReactNode {
-  const [catalog, retry] = useCatalog(source);
+export function WorkbenchAgentFields({ settings, source, disabled, onChange, placementOnly = false }: AgentFieldsProps & {
+  source?: AgentFormSource;
+  placementOnly?: boolean;
+}): ReactNode {
+  const [catalog, retry] = useCatalog(source, placementOnly);
   const [adding, setAdding] = useState(false);
   const [workspaceError, setWorkspaceError] = useState('');
   const workspaceChange = useRef<typeof onChange | undefined>(undefined);
@@ -169,7 +172,7 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange }: A
     catalog.loading ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取 DSH 目录…') : null,
     catalog.errors.length ? h('div', { className: 'imqw-actions' }, h('p', { className: 'imqb-error', role: 'alert' }, catalog.errors.join(' · ')),
       h(Button, { type: 'button', variant: 'outline', size: 'sm', onClick: retry }, '重试目录')) : null,
-    h('div', { className: 'imqw-model-fields' },
+    !placementOnly ? h('div', { className: 'imqw-model-fields' },
       select('模型', settings.model ? modelChoiceId(settings.model) : '', [{ value: '', label: defaultModelLabel(catalog.models) }, ...models.map(entry => entry.option)], id => {
         const choice = models.find(entry => entry.option.value === id)?.model;
         onChange({ model: choice ? { provider: choice.provider, model: choice.model } : null, reasoningEffort: '' });
@@ -178,7 +181,7 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange }: A
         { value: '', label: defaultEffortName ? `模型默认 · ${defaultEffortName}` : '模型默认' },
         ...(model?.efforts ?? []).map(effort => ({ value: effort.id, label: effort.name, description: effort.description })),
       ], reasoningEffort => onChange({ reasoningEffort })) : null,
-    ),
+    ) : null,
     select('Agent 预设', settings.preset, [{ value: '', label: defaultPresetLabel(catalog.presets) }, ...catalog.presets.map(preset => ({
       value: preset.id, label: preset.name, disabled: preset.broken !== undefined, description: preset.broken ?? preset.description,
     }))], preset => onChange({ preset })),
@@ -193,15 +196,15 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange }: A
       else onChange({ cwd });
     }, adding),
     workspaceError ? h('p', { className: 'imqb-error', role: 'alert' }, workspaceError) : null,
-    select('执行权限', settings.tools === undefined ? settings.permission : CUSTOM_TOOLS, [
+    !placementOnly ? select('执行权限', settings.tools === undefined ? settings.permission : CUSTOM_TOOLS, [
       ...baseOptions, { value: CUSTOM_TOOLS, label: '自定义工具', disabled: customBase === undefined }, ...otherOptions,
       { value: '', label: permissionLabel ? `DSH 默认 · ${permissionLabel}` : 'DSH 默认权限' },
     ], permission => {
       if (permission === CUSTOM_TOOLS) {
         if (customBase) onChange({ permission: customBase, tools: settings.tools ?? [] });
       } else onChange({ permission, tools: undefined });
-    }),
-    settings.tools !== undefined ? h('div', { className: 'imqw-agent-fields' },
+    }) : null,
+    !placementOnly && settings.tools !== undefined ? h('div', { className: 'imqw-agent-fields' },
       select('基础权限', settings.permission, baseOptions, permission => onChange({ permission })),
       h(WorkbenchToolPicker, { tools: settings.tools, preset: settings.preset, disabled, onChange: tools => onChange({ tools }) }),
       h('p', { className: 'imqw-muted' }, '只开放已选工具，仍须遵守原生权限和审批。若当前原生权限高于基础权限，工具暂停使用。'),

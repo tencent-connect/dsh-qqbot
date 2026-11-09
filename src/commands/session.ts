@@ -6,6 +6,7 @@
  *
  * 两者都对应底层 dsh agent 能力，分类为 agent（通用能力）。
  */
+import { SessionSwitchConflict } from '../session/session-manager.ts';
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer } from '../shared/index.ts';
 
@@ -16,9 +17,13 @@ export function newCommand({ manager }: CommandDeps): CategorizedCommand {
     category: 'agent',
     scope: 'all',
     description: '开始新会话（清空上下文）',
-    handler: (cmdCtx) => {
+    handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
-      void manager.remove(scope, peerId);
+      try { await manager.remove(scope, peerId); }
+      catch (error) {
+        if (error instanceof SessionSwitchConflict) return error.message;
+        throw error;
+      }
       return '已开启新会话 ✓';
     },
   };

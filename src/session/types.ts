@@ -132,7 +132,7 @@ export interface SessionRecord {
   replyTarget: ReplyTarget;
   scope: ChatScope;
   peerId: string;
-  senderId: string;
+  senderId?: string;
   lastActivity: number;
   agentPreset?: string;
 }

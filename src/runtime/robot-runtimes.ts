@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { describeCommands } from '../commands/index.ts';
@@ -17,6 +17,8 @@ import { QqTimeline } from './qq-timeline.ts';
 import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
 import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import type { WorkbenchConversation, WorkbenchNewSession } from '../shared/workbench-conversation-protocol.ts';
+import { SessionSwitchConflict } from '../session/session-manager.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
 import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
@@ -140,6 +142,45 @@ export class RobotRuntimes {
         return legacy?.alias || legacy?.name || '';
       },
     };
+  }
+
+  async newSession(input: WorkbenchNewSession, peer: WorkbenchConversation, assertWritable: () => void): Promise<string> {
+    const { appId, scope, openId } = input;
+    const key = peerKey(appId, scope, openId);
+    const runtime = this.slots.get(appId)?.runtime;
+    const base = peer.agent;
+    if (!runtime || !base) throw new WorkbenchRequestError(409, '当前机器人未连接。');
+    if (input.cwd && !isAbsolute(input.cwd)) throw new WorkbenchRequestError(400, '工作区必须使用绝对路径。');
+    const templateRevision = this.defaults(appId).revision;
+    let revision = input.revision;
+    const assertCurrent = () => {
+      assertWritable();
+      if (this.closed || this.slots.get(appId)?.runtime !== runtime || runtime.state !== 'connected'
+        || runtime.allowTarget?.({ scope, targetId: openId }) !== true) {
+        throw new WorkbenchRequestError(409, '机器人已断开，或此 QQ 会话已暂停接收。');
+      }
+      if (this.conversationSettings.get(key).revision !== revision || this.defaults(appId).revision !== templateRevision) {
+        throw new WorkbenchRequestError(409, '会话设置已变化，请刷新后重试。');
+      }
+    };
+
+    const settings = { ...base, cwd: input.cwd, preset: input.preset };
+    try { await validateAgentSettings(this.ctx, this.configFor(appId), settings, base); }
+    catch (error) {
+      throw new WorkbenchRequestError(400, error instanceof Error ? error.message : '新会话配置无效。');
+    }
+    assertCurrent();
+    // Freeze the same per-peer baseline as first QQ ingress, including tool policy.
+    this.conversationSettings.initialize(key, base);
+    revision = this.conversationSettings.get(key).revision;
+    try {
+      return await runtime.manager.createAndBindSession(scope, openId, input.currentSessionId, settings, assertCurrent);
+    } catch (error) {
+      if (error instanceof WorkbenchRequestError) throw error;
+      if (error instanceof SessionSwitchConflict) throw new WorkbenchRequestError(409, error.message);
+      this.logger.warn('QQ 工作台无法建立新的 Session。', error);
+      throw new WorkbenchRequestError(503, '无法新建 Session，原接收会话保持不变。请检查工作区与宿主状态。');
+    }
   }
 
   manualStatus(appId: string, target: ReplyTarget, operation: string) {

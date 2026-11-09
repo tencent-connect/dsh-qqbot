@@ -114,8 +114,8 @@ export class ModelResolver {
   /**
    * 记录指定 sessionKey 的最新 sessionId（fork 后调用）并持久化
    */
-  setSessionId(sessionKey: string, sessionId: string): void {
-    this.prefs.setSessionId(sessionKey, sessionId);
+  setSessionId(sessionKey: string, sessionId: string, options?: { durable: true; previous?: string }): void {
+    this.prefs.setSessionId(sessionKey, sessionId, options);
   }
 
   /**

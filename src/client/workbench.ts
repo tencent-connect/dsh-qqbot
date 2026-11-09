@@ -1,9 +1,11 @@
 import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
-import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
+  WORKBENCH_NEW_SESSION_PATH,
   type WorkbenchConversation,
   type WorkbenchConversationPatch,
+  type WorkbenchNewSession,
   type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
@@ -225,6 +227,9 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
   const [reload, setReload] = useState(0);
   const [loadError, setLoadError] = useState('');
   const [openError, setOpenError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState<{ key: string; text: string }>();
+  const [newSession, setNewSession] = useState<{ peer: WorkbenchConversation; settings: WorkbenchAgentSettings }>();
+  const [createError, setCreateError] = useState('');
   const [unavailable, setUnavailable] = useState(false);
   const [busyKey, setBusyKey] = useState<string>();
   const [feedback, setFeedback] = useState<{ key: string; message: string }>();
@@ -325,6 +330,48 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
         setBusyKey(undefined);
       }
     }
+  };
+
+  const createSession = async (): Promise<void> => {
+    if (!newSession || mutation.current) return;
+    const { peer: target, settings } = newSession;
+    const key = scopedKey(appId, target);
+    const controller = new AbortController();
+    const input: WorkbenchNewSession = {
+      appId, scope: target.scope, openId: target.openId, revision: target.revision,
+      currentSessionId: target.currentSessionId ?? null, cwd: settings.cwd, preset: settings.preset,
+    };
+    mutation.current = controller;
+    generation.current++;
+    setBusyKey(key);
+    setCreateError('');
+    try {
+      const result = await fetchJson<{ sessionId: string }>(WORKBENCH_NEW_SESSION_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input), signal: controller.signal,
+      }, 30_000);
+      if (controller.signal.aborted) return;
+      if (typeof result.sessionId !== 'string' || !result.sessionId) throw new Error('未能确认新 Session，请刷新会话列表。');
+      expandedPeers.add(key);
+      setNewSession(undefined);
+      setSessionNotice({ key, text: '新 Session 已创建。下一条 QQ 消息会进入这个 Session。' });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setCreateError(error instanceof Error ? error.message : '无法新建 QQ Session。');
+    } finally {
+      if (!controller.signal.aborted) {
+        generation.current++;
+        mutation.current = null;
+        setBusyKey(undefined);
+        setReload(value => value + 1);
+      }
+    }
+  };
+
+  const openNewSession = (): void => {
+    if (!peer?.agent) return;
+    setCreateError('');
+    setSessionNotice(undefined);
+    setNewSession({ peer, settings: peer.agent });
   };
 
   const openNative = (id: string): void => {
@@ -428,6 +475,11 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
         h('div', { className: 'imqw-actions' },
           current ? h(Button, { size: 'sm', variant: 'outline', disabled: !openSession, onClick: () => openNative(current.id) }, '打开当前 Session') : null,
           peer ? h(Button, {
+            size: 'sm', variant: 'outline', type: 'button',
+            disabled: !peer.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey,
+            onClick: openNewSession,
+          }, '新建 Session') : null,
+          peer ? h(Button, {
             ref: settingsTrigger, size: 'sm', variant: 'outline',
             className: 'imqw-settings-trigger', 'aria-controls': settingsId,
             'aria-expanded': settingsVisible, onClick: toggleSettings,
@@ -435,6 +487,7 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
         ),
       ),
       openError ? h('p', { className: 'imqb-error', role: 'alert' }, openError) : null,
+      sessionNotice && sessionNotice.key === peerKey ? h('p', { className: 'imqw-muted', role: 'status' }, sessionNotice.text) : null,
       current ? h('p', { className: 'imqw-muted imqw-session-caption' }, [
         sessionTitle?.(current.id),
         workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd),
@@ -461,6 +514,19 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
             h('header', { className: 'imqw-column-head' }, h('h2', null, '会话设置'), closeButton),
             h('p', { className: 'imqw-muted' }, '选择群聊或联系人后可以编辑。')),
     ),
+    newSession ? h(Modal, {
+      open: true, title: '新建 QQ Session', closeLabel: '关闭',
+      description: `${accountName(robot)} · ${peerName(newSession.peer)}。创建成功后，QQ 新消息会进入新 Session，原有记录可从历史打开。`,
+      onClose: () => { if (!mutation.current) setNewSession(undefined); },
+      footer: h(Fragment, null,
+        h(Button, { type: 'button', variant: 'ghost', disabled: !!busyKey, onClick: () => setNewSession(undefined) }, '取消'),
+        h(Button, { type: 'button', variant: 'primary', disabled: !!busyKey, onClick: () => { void createSession(); } },
+          busyKey ? '正在创建…' : '创建并切换'),
+      ),
+    }, h(WorkbenchAgentFields, {
+      source: agentSource, settings: newSession.settings, disabled: !!busyKey, placementOnly: true,
+      onChange: patch => setNewSession(current => current && { ...current, settings: { ...current.settings, ...patch } }),
+    }), createError ? h('p', { className: 'imqb-error', role: 'alert' }, createError) : null) : null,
     h('nav', { className: 'imqw-small-nav', 'aria-label': '工作台页面' },
       h(Button, { variant: 'outline', size: 'sm', onClick: () => onSmallPage('list') }, '会话列表'),
       h(Button, { variant: 'outline', size: 'sm', onClick: () => onSmallPage('conversation') }, '会话'),

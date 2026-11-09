@@ -4,7 +4,8 @@ import type { AccessControlConfig } from '../config.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import {
-  WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation, type WorkbenchConversationPatch, type WorkbenchSession,
+  WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, type WorkbenchConversation, type WorkbenchConversationPatch,
+  type WorkbenchNewSession, type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
@@ -156,7 +157,7 @@ interface ConversationAccount {
   peerName(scope: ChatScope, openId: string): string;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
 }
-type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & Partial<Pick<RobotRuntimes, 'toolPolicies'>> & {
+type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & Partial<Pick<RobotRuntimes, 'toolPolicies' | 'newSession'>> & {
   conversationAccount(appId: string): ConversationAccount | undefined;
 };
 interface SessionPersistence {
@@ -176,7 +177,7 @@ async function projectConversations(
   robots: RuntimeReader,
   appId: string,
   persistence?: SessionPersistence,
-  target?: WorkbenchConversationPatch,
+  target?: Pick<WorkbenchConversation, 'scope' | 'openId'>,
 ): Promise<WorkbenchConversation[]> {
   const account = robots.conversationAccount(appId);
   if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
@@ -264,6 +265,32 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     } catch {
       return workbenchJson({ error: 'QQ 流水读取失败，记录可能不完整。' }, 503);
     }
+  });
+  registerWorkbenchFetch(ctx, WORKBENCH_NEW_SESSION_PATH, ['POST'], async (request, assertWritable) => {
+    let input: WorkbenchNewSession;
+    try {
+      const text = await request.text();
+      if (Buffer.byteLength(text) > 16 * 1024) throw new Error();
+      const row = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'currentSessionId', 'cwd', 'preset']);
+      if ((row.scope !== 'c2c' && row.scope !== 'group') || !validOpenId(row.openId)
+        || (row.currentSessionId !== null && !validOpenId(row.currentSessionId))
+        || typeof row.cwd !== 'string' || row.cwd.length > 4096 || row.cwd.includes('\0')
+        || typeof row.preset !== 'string' || row.preset.length > 256 || row.preset.includes('\0')) throw new Error();
+      input = {
+        appId: robotAppId(row.appId), scope: row.scope, openId: row.openId, revision: robotRevision(row.revision),
+        currentSessionId: row.currentSessionId, cwd: row.cwd, preset: row.preset,
+      };
+    } catch {
+      throw new WorkbenchRequestError(400, '新建 Session 的参数无效。');
+    }
+    const [peer] = await projectConversations(robots, input.appId, getPersistence(ctx), input);
+    if (!peer) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
+    if (peer.revision !== input.revision || (peer.currentSessionId ?? null) !== input.currentSessionId) {
+      throw new WorkbenchRequestError(409, '会话或设置已变化，请刷新后重试。');
+    }
+    if (!robots.newSession) throw new WorkbenchRequestError(503, '此宿主暂不支持新建 QQ Session。');
+    const sessionId = await robots.newSession(input, peer, assertWritable);
+    return workbenchJson({ sessionId }, 201);
   });
   registerWorkbenchFetch(ctx, WORKBENCH_CONVERSATIONS_PATH, ['GET', 'POST'], async (request, assertWritable) => {
     const persistence = getPersistence(ctx);

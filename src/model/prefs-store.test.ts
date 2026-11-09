@@ -77,6 +77,24 @@ describe('PrefsStore 并发安全（E3）', () => {
     expect(restored.getSessionId('botB:peer')).toBe('session-b2');
   });
 
+  it('严格写入失败后保留原 Session，后续保存不重试失败的切换', () => {
+    const a = store();
+    const key = 'qqbot:botA:c2c:peer';
+    const saved = join(dir, 'saved-prefs.json');
+    a.setSessionId(key, 'old');
+    renameSync(path, saved);
+    mkdirSync(path);
+
+    expect(() => a.setSessionId(key, 'new', { durable: true })).toThrow();
+    expect(a.getSessionId(key)).toBe('old');
+    expect(a.findKnownSessionKey('new')).toBeUndefined();
+
+    rmSync(path, { recursive: true });
+    renameSync(saved, path);
+    a.setPreset(key, 'standard');
+    expect(store().getSessionId(key)).toBe('old');
+  });
+
   it('显式修改同一键时，新值覆盖磁盘旧值', () => {
     const a = store();
     a.setSessionId('k', 'old');

@@ -631,3 +631,64 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(created[0].sections.size).toBe(0);
   });
 });
+
+describe('web workbench session switching', () => {
+  const settings: WorkbenchAgentSettings = {
+    model: { provider: 'p', model: 'm' }, reasoningEffort: '', preset: '', cwd: '', permission: '',
+    groupPrompt: '', directPrompt: '', streaming: false, showToolResults: false,
+  };
+
+  it('waits for the new native session, keeps history, and sends waiting input to the new binding', async () => {
+    const gate = deferred<void>();
+    const old = fakeHandle('session-old');
+    const stored = new Set([old.agent.id]);
+    const { registry } = createRegistry(async () => old);
+    registry.create.mockImplementation(async ({ sessionId }) => {
+      await gate.promise;
+      stored.add(sessionId);
+      return fakeHandle(sessionId);
+    });
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async id => stored.has(id) ? { header: {} } : undefined));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const start = manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    const incoming = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(persistedId()).toBe(old.agent.id);
+    await expect(manager.remove('c2c', PEER)).rejects.toThrow('正在切换');
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    gate.resolve();
+    const id = await start;
+    expect((await incoming).sessionId).toBe(id);
+    expect(persistedId()).toBe(id);
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('已变化');
+    expect(registry.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the old binding and releases the candidate when permission changes during creation', async () => {
+    const old = fakeHandle('session-old');
+    const { registry, handles } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    let checks = 0;
+    await expect(manager.createAndBindSession('c2c', PEER, record.sessionId, settings, () => {
+      if (++checks === 2) throw new Error('QQ 会话已暂停');
+    })).rejects.toThrow('已暂停');
+    expect(persistedId()).toBe(record.sessionId);
+    expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(record);
+    expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('declines a new session when the current native agent is running', async () => {
+    const old = fakeHandle('session-old');
+    Object.defineProperty(old.agent, 'status', { value: 'running' });
+    const { registry } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(old.agent.id);
+  });
+});

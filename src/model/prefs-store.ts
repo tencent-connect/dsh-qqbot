@@ -109,12 +109,28 @@ export class PrefsStore {
       }));
   }
 
-  setSessionId(sessionKey: string, sessionId: string): void {
-    this.rememberSession(sessionKey, sessionId);
+  setSessionId(sessionKey: string, sessionId: string, options?: { durable: true; previous?: string }): void {
+    const previous = this.sessionIds.get(sessionKey);
+    const history = this.sessionHistory.get(sessionKey);
+    const alreadyPending = this.pending.sessionIds.has(sessionKey);
+    this.rememberSession(sessionKey, sessionId, options?.previous ?? previous);
     this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);
     this.sessionKeys.set(sessionId, sessionKey);
-    this.write('sessionIds', sessionKey);
+    try {
+      this.write('sessionIds', sessionKey, options?.durable);
+    } catch (error) {
+      this.unindexSessionId(sessionKey);
+      if (previous === undefined) this.sessionIds.delete(sessionKey);
+      else {
+        this.sessionIds.set(sessionKey, previous);
+        this.sessionKeys.set(previous, sessionKey);
+      }
+      if (history === undefined) this.sessionHistory.delete(sessionKey);
+      else this.sessionHistory.set(sessionKey, history);
+      if (!alreadyPending) this.pending.sessionIds.delete(sessionKey);
+      throw error;
+    }
   }
 
   clearSessionId(sessionKey: string): boolean {
@@ -144,8 +160,7 @@ export class PrefsStore {
 
   // ── 私有方法 ──
 
-  private rememberSession(key: string, next?: string): void {
-    const previous = this.sessionIds.get(key);
+  private rememberSession(key: string, next?: string, previous = this.sessionIds.get(key)): void {
     if (previous === undefined || previous === next) return;
     const history = new Set(this.sessionHistory.get(key));
     history.add(previous);
@@ -273,7 +288,7 @@ export class PrefsStore {
     };
   }
 
-  private write(section: keyof typeof this.pending, key: string): void {
+  private write(section: keyof typeof this.pending, key: string, durable = false): void {
     this.pending[section].add(key);
     try {
       mkdirSync(dirname(this.prefsPath), { recursive: true });
@@ -299,6 +314,7 @@ export class PrefsStore {
       const msg = `writePrefs failed: ${err instanceof Error ? err.message : String(err)}`;
       this.onError?.(msg);
       this.debugLog?.(msg);
+      if (durable) throw err;
     }
   }
 }
