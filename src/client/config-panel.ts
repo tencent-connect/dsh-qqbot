@@ -185,10 +185,10 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
   return undefined;
 }
 
-export interface ConfigPanelProps { bindPhase?: string }
+export interface ConfigPanelProps { bindPhase?: string; accountOnly?: boolean }
 
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
-export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
+export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps = {}): ReactNode {
   useConfigPanelStyles();
   const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
   const [commandsError, setCommandsError] = useState<string | null>(null);
@@ -360,25 +360,25 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
         ['requireMention', '群聊仅回复 @机器人的消息'],
         ['streaming', '流式输出'],
         ['showToolResults', '显示工具调用结果'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+      ] as const).filter(([key]) => !accountOnly || key === 'requireMention').map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
         createElement('div', { className: 'imqb2-head' },
           createElement('span', { className: 'imqb2-label' }, label),
           createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
             onChange: (value: boolean) => patch(key, value) })))),
-      createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
+      accountOnly ? null : createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
       ...([
         ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+      ] as const).filter(() => !accountOnly).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
         createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
         createElement(Input, { id: `imqq-${key}`, value: form[key] ?? '', placeholder: '留空继承 DSH 默认',
           onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch(key, event.target.value) }))),
       ...([
         ['groupPrompt', '群聊补充提示词'], ['directPrompt', '私聊补充提示词'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+      ] as const).filter(() => !accountOnly).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
         createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
         createElement('textarea', { id: `imqq-${key}`, className: 'imqb2-textarea', value: form[key] ?? '', rows: 3,
           onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => patch(key, event.target.value) }))),
-      form.cwd === undefined ? null : createElement('div', { className: 'imqb2-field' },
+      accountOnly || form.cwd === undefined ? null : createElement('div', { className: 'imqb2-field' },
         createElement('span', { className: 'imqb2-label' }, 'Agent 工作目录（只读）'),
         createElement('p', { className: 'imqb2-readonly' }, form.cwd)),
     ),

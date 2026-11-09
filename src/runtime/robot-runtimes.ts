@@ -15,6 +15,9 @@ import { RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
 import { WorkbenchRequestError } from './workbench-routes.ts';
 import { QqTimeline } from './qq-timeline.ts';
 import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
+import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-settings.ts';
+import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { legacyDerivedSessionId } from '../session/session-id.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -77,21 +80,69 @@ export class RobotRuntimes {
     return this.records().map(record => this.view(record));
   }
 
+  defaults(appId: string): WorkbenchDefaults {
+    const config = this.configFor(appId);
+    return this.conversationSettings.template(appId) ?? { revision: 0, settings: legacyAgentSettings(config) };
+  }
+
+  async saveDefaults(appId: string, next: WorkbenchDefaults, assertWritable: () => void): Promise<WorkbenchDefaults> {
+    const config = this.configFor(appId);
+    const current = this.defaults(appId);
+    if (current.revision !== next.revision) {
+      throw new WorkbenchRequestError(409, '机器人默认设置已更新，请重新加载后保存。');
+    }
+    try {
+      await validateAgentSettings(this.ctx, config, next.settings, current.settings);
+    } catch (error) {
+      throw new WorkbenchRequestError(400, error instanceof Error ? error.message : 'Agent 设置无效。');
+    }
+    assertWritable();
+    const keys = new Set([
+      ...this.prefs.listSessionBindings(appId).map(binding => binding.key),
+      ...this.conversationSettings.keys(appId),
+      ...this.timeline.peers(appId).map(({ scope, openId }) => peerKey(appId, scope, openId)),
+    ]);
+    const established = new Map([...keys].map(key => [key, this.legacySettings(config, key)]));
+    return this.conversationSettings.saveTemplate(appId, next, established);
+  }
+
   conversationAccount(appId: string) {
     const record = this.records().find(item => item.appId === appId);
     if (!record) return undefined;
     const manager = this.slots.get(appId)?.runtime?.manager;
     const members = (record.kind === 'primary' ? this.primary?.access : manager?.accountAccess)?.store;
     const profiles = members?.memberProfiles();
+    const config = this.configFor(appId);
     return {
       access: record.kind === 'additional' ? record.access : this.primary!.access.currentAccess(),
       liveSessionId: (scope: ChatScope, openId: string) => manager?.getSessionRecord(scope, openId)?.sessionId,
+      agentSettings: (scope: ChatScope, openId: string, existing: boolean) => {
+        const key = peerKey(appId, scope, openId);
+        return this.conversationSettings.get(key).agent
+          ?? (existing ? this.legacySettings(config, key) : this.defaults(appId).settings);
+      },
+      validateAgent: (next: WorkbenchAgentSettings, current: WorkbenchAgentSettings) => validateAgentSettings(this.ctx, config, next, current),
       peerName: (scope: ChatScope, openId: string) => {
         const profile = profiles && Object.hasOwn(profiles, openId) ? profiles[openId] : undefined;
         if (profile?.scene === scope && profile.nickname) return profile.nickname.slice(0, 300);
         const legacy = members?.peerName(scope, openId);
         return legacy?.alias || legacy?.name || '';
       },
+    };
+  }
+
+  private legacySettings(config: ImQQBotConfig, key: string): WorkbenchAgentSettings {
+    const settings = legacyAgentSettings(config);
+    return { ...settings, model: this.prefs.getOverride(key) ?? settings.model, preset: this.prefs.getPreset(key) ?? settings.preset };
+  }
+
+  private configFor(appId: string): ImQQBotConfig {
+    const record = this.records().find(entry => entry.appId === appId);
+    if (!record) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
+    if (record.kind === 'primary') return this.primary!.config;
+    return {
+      ...ConfigSchema({} as ImQQBotConfig), appId, appSecret: record.appSecret,
+      cwd: join(PLUGIN_HOME, 'robots', appId, 'workspace'), access: record.access,
     };
   }
 
@@ -195,7 +246,7 @@ export class RobotRuntimes {
         return;
       }
       const root = join(PLUGIN_HOME, 'robots', appId);
-      const config = { ...ConfigSchema({} as ImQQBotConfig), appId, appSecret: record.appSecret, cwd: join(root, 'workspace'), access: record.access };
+      const config = this.configFor(appId);
       const read = () => {
         const current = this.store?.get(appId);
         if (current?.kind !== 'additional') throw new Error('QQ 账号配置已变更');
@@ -232,6 +283,30 @@ export class RobotRuntimes {
         slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs, receiving, {
           timeline: this.timeline,
           recording: ({ scope, targetId }) => this.conversationSettings.get(peerKey(config.appId, scope, targetId)).recording,
+          initialize: async ({ scope, targetId }) => {
+            const key = peerKey(config.appId, scope, targetId);
+            if (this.conversationSettings.get(key).agent) return;
+            const template = this.conversationSettings.template(config.appId);
+            if (!template) {
+              this.conversationSettings.initialize(key, this.legacySettings(config, key));
+              return;
+            }
+            const persistence = this.ctx.get('sessionPersistence') as { stat(id: string): Promise<unknown> } | undefined;
+            const existing = this.prefs.getSessionId(key) || this.prefs.getPreset(key) || this.prefs.getOverride(key)
+              || !persistence || await persistence.stat(legacyDerivedSessionId(key));
+            if (!receiving({ scope, targetId }) || !access.allowsConversation(scope, targetId) || slot.stopped) return;
+            this.conversationSettings.initialize(key, existing ? this.legacySettings(config, key) : this.defaults(config.appId).settings);
+          },
+          agent: {
+            read: key => this.conversationSettings.get(key).agent,
+            defaults: () => this.defaults(config.appId).settings,
+            update: (key, patch) => {
+              const current = this.conversationSettings.get(key);
+              if (!current.agent) return false;
+              this.conversationSettings.save(key, { revision: current.revision, agent: { ...current.agent, ...patch } });
+              return true;
+            },
+          },
         });
       },
     });

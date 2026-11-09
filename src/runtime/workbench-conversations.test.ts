@@ -8,6 +8,8 @@ import { WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.t
 import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { ConversationSettingsStore, peerKey, registerWorkbenchConversations } from './workbench-conversations.ts';
+import { legacyAgentSettings } from './workbench-agent-settings.ts';
+import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'qq-conversation-tests-')); });
@@ -16,6 +18,32 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const url = `http://dsh.internal${WORKBENCH_CONVERSATIONS_PATH}`;
 type TestRoute = { path: string; methods: string[]; fetch(request: Request): Promise<Response> };
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+it('copies per-robot defaults once and freezes legacy peers in the same commit as a template change', () => {
+  const path = join(dir, 'defaults.json');
+  const store = new ConversationSettingsStore(path);
+  const legacy = legacyAgentSettings(ConfigSchema({ streaming: false, directPrompt: 'legacy' } as ImQQBotConfig));
+  const oldA = peerKey('A', 'c2c', 'old');
+  const newA = peerKey('A', 'group', 'same');
+  const newB = peerKey('B', 'group', 'same');
+  const newPrivate = peerKey('A', 'c2c', 'same');
+  store.save(oldA, { revision: 0, receiving: false });
+  const a = { ...legacy, groupPrompt: 'A', streaming: true };
+  const b = { ...legacy, groupPrompt: 'B', showToolResults: true };
+  store.saveTemplate('A', { revision: 0, settings: a }, new Map([[oldA, legacy]]));
+  store.saveTemplate('B', { revision: 0, settings: b }, new Map());
+  store.initialize(newA, store.template('A')!.settings);
+  store.initialize(newB, store.template('B')!.settings);
+  expect(() => store.saveTemplate('A', { revision: 0, settings: b }, new Map())).toThrow('已更新');
+  store.saveTemplate('A', { revision: 1, settings: { ...a, directPrompt: 'A2' } }, new Map([[newA, legacy]]));
+  store.initialize(newA, store.template('A')!.settings);
+  store.initialize(newPrivate, store.template('A')!.settings);
+  const restored = new ConversationSettingsStore(path);
+  expect(restored.get(oldA)).toMatchObject({ agent: legacy, receiving: false });
+  expect(restored.get(newA).agent).toEqual(a);
+  expect(restored.get(newB).agent).toEqual(b);
+  expect(restored.get(newPrivate).agent).toMatchObject({ directPrompt: 'A2', groupPrompt: 'A' });
+});
 
 async function fixture(withPersistence = true) {
   const prefs = new PrefsStore(undefined, { path: join(dir, 'prefs.json') });

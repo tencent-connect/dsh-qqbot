@@ -102,7 +102,7 @@ export class PrefsStore {
 
   listSessionBindings(appId: string): { key: string; current?: string; history: readonly string[] }[] {
     const prefix = `qqbot:${appId}:`;
-    return [...new Set([...this.sessionIds.keys(), ...this.sessionHistory.keys()])]
+    return [...new Set([...this.sessionIds.keys(), ...this.sessionHistory.keys(), ...this.overrides.keys(), ...this.presets.keys()])]
       .filter(key => key.startsWith(prefix))
       .map(key => ({
         key, current: this.sessionIds.get(key), history: [...(this.sessionHistory.get(key) ?? [])],

@@ -19,12 +19,13 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { PrefsStore } from '../model/prefs-store.ts';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
@@ -43,6 +44,12 @@ import type {
   CompactionServiceLike,
   CompactOutcome,
 } from './types.ts';
+
+export interface PeerAgentSettings {
+  read(key: string): WorkbenchAgentSettings | undefined;
+  update(key: string, patch: Partial<WorkbenchAgentSettings>): boolean;
+  defaults(): WorkbenchAgentSettings;
+}
 
 /** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
@@ -104,6 +111,7 @@ export class SessionManager {
     config: ImQQBotConfig,
     logger: Logger,
     prefs?: PrefsStore,
+    private readonly peerSettings?: PeerAgentSettings,
   ) {
     this.ctx = ctx;
     this.agents = agents;
@@ -137,14 +145,18 @@ export class SessionManager {
    * 在 agent.ctx 上安装 QQ prompt（幂等、fail-soft）：失败仅 warn，不打断会话建立。
    * TODO(split-2): personaCard / turnContext 由 inbound 接线，当前恒空。
    */
-  private attachPrompt(agent: DshAgent, scope: ChatScope): void {
+  private attachPrompt(agent: DshAgent, scope: ChatScope, key: string): void {
     if (this.promptHandles.has(agent)) return;
     if (!agent.ctx.get?.('systemPrompt')) return;
     try {
       this.promptHandles.set(agent, installQQPrompt(agent.ctx, {
         scope,
         personaCard: () => '',
-        extraPrompts: () => ({ group: this.config.groupPrompt, direct: this.config.directPrompt }),
+        extraPrompts: () => {
+          const settings = this.peerSettings?.read(key);
+          return settings ? { group: settings.groupPrompt, direct: settings.directPrompt }
+            : { group: this.config.groupPrompt, direct: this.config.directPrompt };
+        },
       }));
     } catch (err) {
       this.logger.warn(`qq prompt install failed (session keeps working without it): ${errorText(err)}`);
@@ -174,18 +186,22 @@ export class SessionManager {
     }
   }
 
-  /**
-   * 从 session 持久化 header 读 session 当初的 preset（started 锁定语义）。
-   * 读不到（服务缺失 / session 不存在 / 未记录 agentPreset）返回 undefined。
-   */
-  private async resolvePersistedPreset(sessionId: string): Promise<string | undefined> {
-    return (await this.host.sessionHeader(sessionId))?.agentPreset;
-  }
-
   // ── 模型相关（委托给 ModelResolver） ──
 
   getEffectiveModel(scope: ChatScope, peerId: string): ModelRoute | undefined {
-    return this.modelResolver.getEffectiveRoute(this.sessionKey(scope, peerId));
+    const key = this.sessionKey(scope, peerId);
+    return this.sessions.get(key)?.agent.model?.current?.() ?? this.configuredRoute(key);
+  }
+
+  private configuredRoute(key: string, settings = this.peerSettings?.read(key)): (ModelRoute & { reasoningEffort?: string }) | undefined {
+    if (!settings) return this.modelResolver.getEffectiveRoute(key);
+    const route = settings.model ?? this.modelResolver.resolveDefault(false);
+    return { ...route, ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}) };
+  }
+
+  replyOptions(sessionId: string): Pick<WorkbenchAgentSettings, 'streaming' | 'showToolResults'> {
+    const target = this.deliveryAddress(sessionId);
+    return (target && this.peerSettings?.read(this.sessionKey(target.scope, target.targetId))) ?? this.config;
   }
 
   /**
@@ -197,6 +213,8 @@ export class SessionManager {
 
   /** 按 sessionKey 解析生效 preset */
   private getEffectivePresetByKey(key: string): string | undefined {
+    const settings = this.peerSettings?.read(key);
+    if (settings) return settings.preset || undefined;
     return this.modelResolver.getPreset(key) ?? this.config.preset;
   }
 
@@ -221,7 +239,7 @@ export class SessionManager {
   async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
     const key = this.sessionKey(scope, peerId);
 
-    this.modelResolver.setOverride(key, route);
+    if (!this.peerSettings?.update(key, { model: route, reasoningEffort: '' })) this.modelResolver.setOverride(key, route);
 
     const record = this.sessions.get(key);
     if (!record) {
@@ -256,7 +274,7 @@ export class SessionManager {
     }
 
     // 2. 持久化 per-peer 覆盖（新会话生效）
-    this.modelResolver.setPreset(key, presetId);
+    if (!this.peerSettings?.update(key, { preset: presetId })) this.modelResolver.setPreset(key, presetId);
 
     const hasActive = this.sessions.has(key);
     this.logger.info(
@@ -270,7 +288,7 @@ export class SessionManager {
    */
   async clearPresetOverride(scope: ChatScope, peerId: string): Promise<PresetSwitchOutcome> {
     const key = this.sessionKey(scope, peerId);
-    this.modelResolver.clearPreset(key);
+    if (!this.peerSettings?.update(key, { preset: this.peerSettings.defaults().preset })) this.modelResolver.clearPreset(key);
     this.logger.info(`preset pref cleared: key=${key} (next session applies)`);
     return { ok: true };
   }
@@ -311,21 +329,26 @@ export class SessionManager {
     }
 
     const childId = SessionId(mintSessionId());
-    const effectiveRoute = options.route ?? this.modelResolver.getEffectiveRoute(key);
-    const composed = await this.composePreset(this.getEffectivePresetByKey(key));
+    const effectiveRoute = options.route ?? this.configuredRoute(key);
+    const header = await this.host.sessionHeader(record.sessionId);
+    const cwd = header?.cwd ?? this.workspaceDir();
+    const composed = await this.composePreset(header?.agentPreset ?? record.agentPreset ?? this.getEffectivePresetByKey(key));
     const created = await this.agents.create({
       sessionId: childId,
       seed,
       inheritedEventCount: boundary + 1,
       meta: {
-        cwd: this.workspaceDir(),
+        cwd,
         isSeeded: true,
         // 旧版宿主的 delivery 豁免要求 parentSession，新版忽略——都传
         parentSession: record.sessionId,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
       },
       ...(effectiveRoute ? { agentOptions: effectiveRoute } : {}),
-      ...(composed.setup ? { setup: composed.setup } : {}),
+      setup: async (ctx, agent) => {
+        await composed.setup?.(ctx, agent);
+        if (effectiveRoute) agent?.model?.select(effectiveRoute);
+      },
     });
 
     this.modelResolver.setSessionId(key, childId);
@@ -333,7 +356,7 @@ export class SessionManager {
     const oldHandle = record.handle;
     const oldAgent = record.agent;
     record.sessionId = childId;
-    this.attachPrompt(created.agent, record.scope);
+    this.attachPrompt(created.agent, record.scope, key);
     record.agent = created.agent;
     record.handle = created;
     record.agentPreset = composed.agentPreset;
@@ -341,12 +364,16 @@ export class SessionManager {
 
     this.releasePrompt(oldAgent);
     void oldHandle.dispose().catch(() => {});
+    void this.host.attachSessionToWorkspace(childId, cwd);
     this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
 
   clearModelOverride(scope: ChatScope, peerId: string): void {
     const key = this.sessionKey(scope, peerId);
-    this.modelResolver.clearOverride(key);
+    if (this.peerSettings) {
+      const { model, reasoningEffort } = this.peerSettings.defaults();
+      if (!this.peerSettings.update(key, { model, reasoningEffort })) this.modelResolver.clearOverride(key);
+    } else this.modelResolver.clearOverride(key);
     this.modelResolver.clearSessionId(key);
   }
 
@@ -452,12 +479,16 @@ export class SessionManager {
     }
   }
 
-  private async composePreset(presetId?: string): Promise<PresetComposition> {
+  private async composePreset(presetId?: string, required = false): Promise<PresetComposition> {
     const presets = this.getPresetsService();
-    if (!presets) return {};
+    if (!presets) {
+      if (required) throw new Error('所选 Agent 预设不可用。');
+      return {};
+    }
 
     try {
       const resolved = await presets.resolve(presetId);
+      if (required && resolved.broken !== undefined) throw new Error('所选 Agent 预设不可用。');
       const resolvedId = resolved.id;
       return {
         agentPreset: resolvedId,
@@ -466,6 +497,7 @@ export class SessionManager {
         },
       };
     } catch (err) {
+      if (required) throw err;
       this.logger.warn(
         `im-qqbot: preset ${presetId ?? '(default)'} unavailable: ${err instanceof Error ? err.message : String(err)} — using host composition`,
       );
@@ -515,7 +547,8 @@ export class SessionManager {
     senderId: string,
     replyTarget: ReplyTarget,
   ): Promise<SessionRecord> {
-    const route = this.modelResolver.getEffectiveRoute(key);
+    const settings = this.peerSettings?.read(key);
+    const route = this.configuredRoute(key, settings);
     // prefs 命中 = 已知存量会话；miss 时取 0.5.x 派生 id 仅作存量探测候选，不用于新建
     const candidateIsLegacy = this.modelResolver.getSessionId(key) === undefined;
     let sessionId = SessionId(this.currentSessionId(key));
@@ -523,7 +556,9 @@ export class SessionManager {
 
     let agent: DshAgent;
     let handle: DshAgentHandle | undefined;
-    let agentPreset: string | undefined;
+    const header = await this.host.sessionHeader(sessionId);
+    let agentPreset = header?.agentPreset;
+    let cwd = header?.cwd;
 
     const live = this.agents.get(sessionId);
     if (live) {
@@ -531,10 +566,8 @@ export class SessionManager {
       this.persistSessionId(key, sessionId);
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
-      // preset 只解析一次：resume/create 共用同一组合，避免重复 resolve/mount 目录。
-      // 优先 session 当初的 preset（started 锁定语义），无则用当前 effective preset。
-      const presetId = (await this.resolvePersistedPreset(sessionId)) ?? this.getEffectivePresetByKey(key);
-      const composed = await this.composePreset(presetId);
+      const presetId = header ? (header.agentPreset ?? this.config.preset) : this.getEffectivePresetByKey(key);
+      let composed = await this.composePreset(presetId);
       agentPreset = composed.agentPreset;
       try {
         const resumeRoute = this.modelResolver.getResumeRoute(key);
@@ -550,15 +583,35 @@ export class SessionManager {
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
       } catch (err) {
         if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
+        if (settings?.preset) composed = await this.composePreset(settings.preset, true);
+        agentPreset = composed.agentPreset;
+        cwd = settings?.cwd || this.workspaceDir();
+        if (settings?.cwd && !statSync(cwd).isDirectory()) throw new Error('所选工作区目录不可用。');
+        const permission = settings?.permission;
+        const permissions = permission ? this.host.globalService('permissionPresets') as {
+          catalog(): { options: readonly { value: string }[] };
+          set(session: unknown, permission: string): void;
+        } | undefined : undefined;
+        if (permission && !permissions?.catalog().options.some(option => option.value === permission)) {
+          throw new Error('所选 DSH 执行权限不可用。');
+        }
         sessionId = this.resolveCreateId(key, sessionId, candidateIsLegacy);
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.workspaceDir(),
+            cwd,
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
+          ...(settings || composed.setup ? { setup: async (ctx: Context, newAgent?: DshAgent) => {
+            await composed.setup?.(ctx, newAgent);
+            if (settings && route) newAgent?.model?.select(route);
+            if (permissions && permission) {
+              const session = newAgent?.session ?? (this.host.globalService('sessions') as { get(id: string): unknown } | undefined)?.get(sessionId);
+              if (!session) throw new Error('无法为新 Session 应用执行权限。');
+              permissions.set(session, permission);
+            }
+          } } : {}),
         });
         agent = created.agent;
         handle = created;
@@ -580,7 +633,7 @@ export class SessionManager {
       agentPreset,
     };
 
-    this.attachPrompt(agent, scope);
+    this.attachPrompt(agent, scope, key);
     this.sessions.set(key, record);
 
     // 挂载到对应工作区（侧边栏可见性）；fail-soft、异步执行，不阻塞消息处理。
@@ -588,7 +641,7 @@ export class SessionManager {
     // 闲置回收后会从侧边栏消失（详见 host/adapter.ts 的 attachSessionToWorkspace）。
     // cwd 必须与 meta.cwd 同源（workspaceDir()），否则 attachSession 的
     // header.cwd 校验（realpath 后须等于工作区 path）会失败。
-    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir());
+    void this.host.attachSessionToWorkspace(sessionId, cwd ?? this.workspaceDir());
 
     return record;
   }

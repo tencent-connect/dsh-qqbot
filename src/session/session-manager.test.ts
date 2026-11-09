@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { DshAgent, DshAgentHandle, DshAgentRegistry } from './types.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 
 const env = vi.hoisted(() => ({ home: '' }));
 
@@ -161,6 +162,54 @@ function createdIds(registry: { create: { mock: { calls: Array<[{ sessionId: str
 beforeEach(() => {
   env.home = mkdtempSync(join(tmpdir(), 'im-qqbot-session-'));
   mkdirSync(join(env.home, 'workspace'), { recursive: true });
+});
+
+it('applies staged model, effort, preset, workspace and native permission on new Session only', async () => {
+  const workspace = join(env.home, 'project');
+  mkdirSync(workspace);
+  const settings: WorkbenchAgentSettings = {
+    model: { provider: 'test-provider', model: 'new-model' }, reasoningEffort: 'medium',
+    preset: 'selected', cwd: workspace, permission: 'read-only', groupPrompt: '', directPrompt: '',
+    streaming: true, showToolResults: false,
+  };
+  const config = ConfigSchema({ appId: APP_ID, appSecret: 'secret', cwd: join(env.home, 'workspace'), sessionIdleTimeout: 0 } as ImQQBotConfig);
+  const setPermission = vi.fn();
+  const selectModel = vi.fn();
+  const mount = vi.fn();
+  const native = fakeHandle(LEGACY_ID);
+  const ctx = { get: (name: string) => ({
+    sessionPersistence: { stat: async (id: string) => id === LEGACY_ID ? { header: { cwd: config.cwd, agentPreset: 'legacy' } } : undefined },
+    agentPresets: { resolve: async (id: string) => ({ id }), mount },
+    permissionPresets: { catalog: () => ({ options: [{ value: 'read-only' }] }), set: setPermission },
+  })[name as 'sessionPersistence'], on: vi.fn() } as unknown as Context;
+  const registry: DshAgentRegistry = {
+    get: () => undefined,
+    resume: async ({ resumeSessionId, setup }) => {
+      if (resumeSessionId !== LEGACY_ID) throw notFound(resumeSessionId);
+      await setup?.(native.agent.ctx, native.agent);
+      return native;
+    },
+    create: vi.fn(async ({ sessionId, setup }) => {
+      const handle = fakeHandle(sessionId);
+      const agent = { ...handle.agent, model: { select: selectModel } };
+      await setup?.(agent.ctx, agent);
+      return { ...handle, agent };
+    }),
+  };
+  const manager = new SessionManager(ctx, registry, config, createLogger(), undefined, {
+    read: () => settings, update: () => false, defaults: () => settings,
+  });
+  managers.push(manager);
+  expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(LEGACY_ID);
+  expect(mount).toHaveBeenLastCalledWith(expect.anything(), 'legacy');
+  expect(setPermission).not.toHaveBeenCalled();
+  expect(selectModel).not.toHaveBeenCalled();
+  await manager.remove('c2c', PEER);
+  const session = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+  expect(session.sessionId).not.toBe(LEGACY_ID);
+  expect(registry.create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd: workspace, agentPreset: 'selected' } }));
+  expect(selectModel).toHaveBeenCalledWith({ provider: 'test-provider', model: 'new-model', reasoningEffort: 'medium' });
+  expect(setPermission).toHaveBeenCalledWith(session.agent.session, 'read-only');
 });
 
 afterEach(async () => {

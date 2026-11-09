@@ -23,14 +23,14 @@ const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const target: ReplyTarget = { scope: 'c2c', targetId: 'synthetic-user', msgId: 'platform-1' };
 const content = [{ type: 'text', text: 'synthetic request' }];
 
-function setup(options: { file?: string; group?: boolean; streaming?: boolean; showToolResults?: boolean } = {}) {
+function setup(options: { file?: string; group?: boolean; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
   const ledger = new DeliveryLedger(options.file);
   const inputs = new QqInputRegistry({ ledger });
   const stream = { update: vi.fn().mockResolvedValue(undefined), complete: vi.fn().mockResolvedValue(undefined) };
   const bot: QQBotSender = { sendMarkdown: vi.fn().mockResolvedValue(undefined), openStream: vi.fn(() => stream) };
   const initial = options.group ? { ...target, scope: 'group' as const, targetId: 'synthetic-group' } : target;
   const record = { sessionId: 'session-1', replyTarget: { ...initial }, agent: {} } as SessionRecord;
-  const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined } as SessionManager;
+  const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined, replyOptions: options.replyOptions } as SessionManager;
   const config = { streaming: options.streaming ?? true, showToolResults: options.showToolResults ?? true,
     textChunkLimit: 4500, proactiveDelivery: { externalTurns: 'c2c' },
     sendFile: { maxFiles: 4, restrictPaths: false, extraRoots: [], sendPresentedFiles: true } } as ImQQBotConfig;
@@ -322,6 +322,32 @@ describe('verified native output, retaining upstream delivery features', () => {
     const result = { turn: 1, message: { source: { callId: 'call' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: 'tool output' }] }] } };
     f.emit('tool/result', result); f.emit('tool/result', result); await vi.runAllTimersAsync();
     expect(f.bot.sendMarkdown).toHaveBeenCalledTimes(showToolResults ? 1 : 0);
+  });
+
+  it('takes per-conversation output choices at turn start', async () => {
+    vi.useFakeTimers();
+    let streaming = false;
+    const f = setup({ replyOptions: () => ({ streaming, showToolResults: streaming }) });
+    f.input();
+    streaming = true;
+    f.start();
+    f.chunk('static');
+    f.emit('tool/call', { turn: 1, callId: 'call1', name: 'read', arguments: '{}' });
+    f.emit('tool/result', { turn: 1, callId: 'call1', message: { source: { callId: 'call1' }, content: [{ type: 'text', text: 'hidden preview' }] } });
+    f.answer();
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).not.toHaveBeenCalled();
+    expect(f.bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    f.emit('turn/end', { turn: 1 });
+    f.input('input-2', 2, 'platform-2');
+    f.start(2, 2);
+    f.chunk('streamed', 0, 2);
+    f.answer('streamed', 1, 2);
+    f.emit('tool/call', { turn: 2, callId: 'call2', name: 'read', arguments: '{}' });
+    f.emit('tool/result', { turn: 2, callId: 'call2', message: { source: { callId: 'call2' }, content: [{ type: 'text', text: 'visible preview' }] } });
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).toHaveBeenCalledTimes(1);
+    expect(f.bot.sendMarkdown).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('visible preview'));
   });
 
   it.each([false, true])('direct native tool text remains visible, including errors with previews disabled (error=%s)', async error => {

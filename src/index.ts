@@ -8,7 +8,7 @@ import { ensureCredentials, persistCredentialsToProfile, registerBoundCredential
 import { ensureVisionInputModal, registerDescribeImageTool } from './media/vision-tool.ts';
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
-import { registerWorkbenchRoutes } from './runtime/workbench-routes.ts';
+import { registerWorkbenchDefaults, registerWorkbenchRoutes } from './runtime/workbench-routes.ts';
 import { registerWorkbenchConversations } from './runtime/workbench-conversations.ts';
 import type { Logger } from './types.ts';
 
@@ -26,6 +26,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const store = profileDir ? new RobotConfigStore(join(profileDir, 'qqbot-robots.json')) : undefined;
   const robots = new RobotRuntimes(ctx, agents, logger, store);
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
+  registerWorkbenchDefaults(ctx, robots);
   registerWorkbenchConversations(ctx, robots, logger);
 
   const appId = resolveEnv(config.appId, 'QQBOT_APPID');

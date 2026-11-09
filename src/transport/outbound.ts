@@ -90,6 +90,7 @@ class OutboundRouter {
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
   private readonly deliverer: DeliverablesDelivererLike | undefined;
   private readonly tracker: TurnTracker;
+  private readonly outputOptions = new Map<string, Pick<ImQQBotConfig, 'streaming' | 'showToolResults'>>();
 
   public constructor(
     manager: SessionManager,
@@ -113,7 +114,14 @@ class OutboundRouter {
   public route(session: SessionLike, raw: RawSessionEvent): void {
     const sessionId = session.header.id;
     if (raw.type === 'turn/start') {
-      if (this.tracker.begin(sessionId, eventTurn(raw.data))) this.resetTurnState(sessionId);
+      if (this.tracker.begin(sessionId, eventTurn(raw.data))) {
+        this.resetTurnState(sessionId);
+        try {
+          this.outputOptions.set(sessionId, this.manager.replyOptions?.(sessionId) ?? this.config);
+        } catch {
+          this.outputOptions.set(sessionId, { streaming: false, showToolResults: false });
+        }
+      }
       return;
     }
     if (raw.type === 'user/message') {
@@ -133,6 +141,7 @@ class OutboundRouter {
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
       this.finishTurn(sessionId, event, plan);
+      this.outputOptions.delete(sessionId);
       return;
     }
     if (plan === undefined) return;
@@ -218,7 +227,7 @@ class OutboundRouter {
         this.bot,
         this.config.textChunkLimit,
         this.logger,
-        this.shouldStream(plan),
+        this.shouldStream(sessionId, plan),
       );
       this.buffers.set(sessionId, buffer);
     }
@@ -226,9 +235,9 @@ class OutboundRouter {
   }
 
   /** 被动回复且 c2c 有 msgId 才流式（群聊、主动推送均不流式） */
-  private shouldStream(plan: DeliveryPlan): boolean {
+  private shouldStream(sessionId: string, plan: DeliveryPlan): boolean {
     return !plan.proactive
-      && this.config.streaming
+      && (this.outputOptions.get(sessionId) ?? this.config).streaming
       && plan.target.scope === 'c2c'
       && !!plan.target.msgId;
   }
@@ -280,7 +289,7 @@ class OutboundRouter {
     if (call === undefined) return;
 
     const nativeError = (event.raw.message as { isError?: unknown } | undefined)?.isError === true;
-    if (event.error === undefined && !nativeError && !this.config.showToolResults) return;
+    if (event.error === undefined && !nativeError && !(this.outputOptions.get(record.sessionId) ?? this.config).showToolResults) return;
 
     const text = formatToolResult(
       call.name,

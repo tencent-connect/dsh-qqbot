@@ -1,4 +1,5 @@
 import type { ChatScope } from '../types.ts';
+import type { WorkbenchAgentSettings } from './workbench-agent-settings.ts';
 
 export const WORKBENCH_CONVERSATIONS_PATH = '/api/qqbot/workbench/conversations';
 
@@ -18,6 +19,7 @@ export interface WorkbenchConversation {
   recording: boolean;
   admitted: boolean;
   revision: number;
+  agent?: WorkbenchAgentSettings;
   currentSessionId?: string;
   sessions: WorkbenchSession[];
 }
@@ -30,4 +32,5 @@ export interface WorkbenchConversationPatch {
   alias?: string;
   receiving?: boolean;
   recording?: boolean;
+  agent?: WorkbenchAgentSettings;
 }

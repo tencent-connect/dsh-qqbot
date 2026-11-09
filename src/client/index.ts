@@ -18,6 +18,7 @@ import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 import { QQWorkbench } from './workbench.ts';
+import type { AgentFormSource } from './workbench-agent-form.ts';
 
 export const name = 'im-qqbot-client';
 export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
@@ -81,11 +82,11 @@ function BindGuideIcon(): ReactNode {
 }
 
 /** 设置页栏目：共享一份绑定状态轮询，驱动绑定面板与配置刷新 */
-function QQBotSettingsSection(): ReactNode {
+function QQBotSettingsSection({ accountOnly = false }: { accountOnly?: boolean } = {}): ReactNode {
   const { state, gone, recheck } = useBindState();
   return createElement('div', null,
     createElement<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, { state, gone, recheck }),
-    createElement<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, { bindPhase: state?.phase }),
+    createElement<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, { bindPhase: state?.phase, accountOnly }),
   );
 }
 
@@ -161,6 +162,28 @@ export function apply(ctx: Context): void {
       const pageSlots = (pageCtx as unknown as { slots?: SlotsLike }).slots;
       const layout = (pageCtx as unknown as { layout?: { selectPanel(panelId: string | null): void } }).layout;
       if (pageSlots === undefined || layout === undefined) return undefined;
+      type AgentRemotes = {
+        session: { modelCatalog(): Promise<unknown> };
+        agentPresets: { list(): Promise<unknown> };
+        permissionPresets: { catalog(): Promise<unknown> };
+      };
+      let remote: AgentRemotes | undefined;
+      void ctxInject.call(pageCtx, ['remote', 'remote.session', 'remote.agentPresets', 'remote.permissionPresets'], scope => {
+        remote = (scope as unknown as { remote: AgentRemotes }).remote;
+        return () => { remote = undefined; };
+      });
+      const getRemote = (): AgentRemotes => {
+        if (!remote) throw new Error('DSH 目录服务尚未就绪。');
+        return remote;
+      };
+      const agentSource: AgentFormSource = {
+        modelCatalog: () => getRemote().session.modelCatalog(),
+        listAgentPresets: () => getRemote().agentPresets.list(),
+        permissionCatalog: () => getRemote().permissionPresets.catalog(),
+        workspaces: () => (pageCtx.get('workspaces') as {
+          list?: { getSnapshot(): { items: readonly { path: string; title: string }[] } };
+        } | undefined)?.list?.getSnapshot().items ?? [],
+      };
       const QQBotPage = (): ReactNode => {
         const workspace = pageCtx.get('uiWorkspace') as { openSession?(id: string): void } | undefined;
         const sessions = pageCtx.get('sessions') as {
@@ -175,6 +198,8 @@ export function apply(ctx: Context): void {
         const open = workspace?.openSession?.bind(workspace);
         return createElement(QQWorkbench, {
           primarySettings: createElement(QQBotSettingsSection),
+          primaryAccountSettings: createElement<{ accountOnly?: boolean }>(QQBotSettingsSection, { accountOnly: true }),
+          agentSource,
           openSession: open ? id => {
             if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
               throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');

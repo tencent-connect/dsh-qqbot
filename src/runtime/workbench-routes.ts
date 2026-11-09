@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
+import { WORKBENCH_DEFAULTS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { parseAgentSettings } from './workbench-agent-settings.ts';
 
 interface ConnectionFetchRegistry {
   register(route: {
@@ -105,5 +107,31 @@ export function registerWorkbenchRoutes(
     }
     assertWritable();
     return workbenchJson({ robot: publicRobot(await saveRobot(patch)) });
+  });
+}
+
+export function registerWorkbenchDefaults(ctx: Context, robots: {
+  defaults(appId: string): WorkbenchDefaults;
+  saveDefaults(appId: string, next: WorkbenchDefaults, assertWritable: () => void): Promise<WorkbenchDefaults>;
+}): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_DEFAULTS_PATH, ['GET', 'POST'], async (request, assertWritable) => {
+    if (request.method === 'GET') {
+      let appId: string;
+      try { appId = robotAppId(new URL(request.url).searchParams.get('appId')); }
+      catch { throw new WorkbenchRequestError(400, '请指定一个有效的 AppID。'); }
+      return workbenchJson(robots.defaults(appId));
+    }
+    let appId: string;
+    let next: WorkbenchDefaults;
+    try {
+      const text = await request.text();
+      if (Buffer.byteLength(text) > 512 * 1024) throw new Error('默认设置请求过大。');
+      const row = robotObject(JSON.parse(text), ['appId', 'revision', 'settings']);
+      appId = robotAppId(row.appId);
+      next = { revision: robotRevision(row.revision), settings: parseAgentSettings(row.settings) };
+    } catch (error) {
+      throw new WorkbenchRequestError(400, error instanceof Error && !(error instanceof SyntaxError) ? error.message : '默认设置格式无效。');
+    }
+    return workbenchJson(await robots.saveDefaults(appId, next, assertWritable));
   });
 }

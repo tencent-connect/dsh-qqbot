@@ -12,12 +12,15 @@ import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
 import { WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
+import { parseAgentSettings } from './workbench-agent-settings.ts';
+import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 
 interface PeerSettings {
   alias: string;
   receiving: boolean;
   recording: boolean;
   revision: number;
+  agent?: WorkbenchAgentSettings;
 }
 const defaults: Readonly<PeerSettings> = Object.freeze({ alias: '', receiving: true, recording: true, revision: 0 });
 export const peerKey = (appId: string, scope: ChatScope, openId: string): string => `qqbot:${appId}:${scope}:${openId}`;
@@ -45,58 +48,102 @@ function receivingValue(value: unknown): boolean {
 }
 
 export class ConversationSettingsStore {
-  private cache?: { signature: string; records: Map<string, PeerSettings> };
+  private cache?: { signature: string; data: SettingsData };
   private seenFile = false;
 
   constructor(private readonly path: string) {}
 
   get(key: string): Readonly<PeerSettings> {
-    return this.read().get(key) ?? defaults;
+    return this.read().peers.get(key) ?? defaults;
   }
 
   keys(appId: string): string[] {
-    return [...this.read().keys()].filter(key => key.startsWith(`qqbot:${appId}:`));
+    return [...this.read().peers.keys()].filter(key => key.startsWith(`qqbot:${appId}:`));
   }
 
-  save(key: string, patch: WorkbenchConversationPatch): Readonly<PeerSettings> {
-    const records = new Map(this.read());
-    const current = records.get(key) ?? defaults;
+  template(appId: string): WorkbenchDefaults | undefined {
+    return this.read().templates.get(appId);
+  }
+
+  initialize(key: string, settings: WorkbenchAgentSettings): void {
+    const current = this.get(key);
+    if (!current.agent) this.save(key, { revision: current.revision, agent: settings });
+  }
+
+  saveTemplate(appId: string, next: WorkbenchDefaults, established: ReadonlyMap<string, WorkbenchAgentSettings>): WorkbenchDefaults {
+    const current = this.read();
+    if (next.revision !== (current.templates.get(appId)?.revision ?? 0)) {
+      throw new WorkbenchRequestError(409, '机器人默认设置已更新，请重新加载后保存。');
+    }
+    const peers = new Map(current.peers);
+    for (const [key, settings] of established) {
+      const peer = peers.get(key) ?? defaults;
+      if (!peer.agent) peers.set(key, { ...peer, agent: settings, revision: robotRevision(peer.revision + 1) });
+    }
+    const saved = { revision: robotRevision(next.revision + 1), settings: next.settings };
+    const templates = new Map(current.templates).set(appId, saved);
+    this.write({ peers, templates });
+    return saved;
+  }
+
+  save(key: string, patch: Omit<WorkbenchConversationPatch, 'appId' | 'scope' | 'openId'>): Readonly<PeerSettings> {
+    const data = this.read();
+    const peers = new Map(data.peers);
+    const current = peers.get(key) ?? defaults;
     if (patch.revision !== current.revision) throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
     const next = Object.freeze({
       alias: patch.alias ?? current.alias,
       receiving: patch.receiving ?? current.receiving,
       recording: patch.recording ?? current.recording,
       revision: robotRevision(current.revision + 1),
+      ...(patch.agent ?? current.agent ? { agent: patch.agent ?? current.agent } : {}),
     });
-    records.set(key, next);
-    atomicWrite(this.path, [JSON.stringify({ version: 1, peers: Object.fromEntries(records) })]);
-    this.seenFile = true;
-    this.cache = undefined;
+    peers.set(key, next);
+    this.write({ ...data, peers });
     return next;
   }
 
-  private read(): ReadonlyMap<string, PeerSettings> {
+  private write(data: SettingsData): void {
+    atomicWrite(this.path, [JSON.stringify({ version: 1, peers: Object.fromEntries(data.peers), templates: Object.fromEntries(data.templates) })]);
+    this.seenFile = true;
+    this.cache = undefined;
+  }
+
+  private read(): SettingsData {
     let stats: ReturnType<typeof statSync>;
     try {
       stats = statSync(this.path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !this.seenFile) return new Map();
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !this.seenFile) return { peers: new Map(), templates: new Map() };
       throw error;
     }
     this.seenFile = true;
     const signature = `${stats.ino}:${stats.mtimeMs}:${stats.size}`;
-    if (this.cache?.signature === signature) return this.cache.records;
-    const root = robotObject(JSON.parse(readFileSync(this.path, 'utf8')), ['version', 'peers']);
+    if (this.cache?.signature === signature) return this.cache.data;
+    const root = robotObject(JSON.parse(readFileSync(this.path, 'utf8')), ['version', 'peers', 'templates']);
     if (root.version !== 1 || !root.peers || typeof root.peers !== 'object' || Array.isArray(root.peers)) throw new Error('QQ 会话设置格式无效。');
-    const records = new Map(Object.entries(root.peers).map(([key, raw]) => {
-      const value = robotObject(raw, ['alias', 'receiving', 'recording', 'revision']);
-      return [key, Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), recording: value.recording === undefined ? true : recordingValue(value.recording), revision: robotRevision(value.revision) })];
+    const peers = new Map(Object.entries(root.peers).map(([key, raw]) => {
+      const value = robotObject(raw, ['alias', 'receiving', 'recording', 'revision', 'agent']);
+      return [key, Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), recording: value.recording === undefined ? true : recordingValue(value.recording), revision: robotRevision(value.revision),
+        ...(value.agent === undefined ? {} : { agent: parseAgentSettings(value.agent) }),
+      })];
     }));
-    this.cache = { signature, records };
-    return records;
+    const rawTemplates = root.templates === undefined ? {} : root.templates;
+    if (!rawTemplates || typeof rawTemplates !== 'object' || Array.isArray(rawTemplates)) throw new Error('QQ 默认设置格式无效。');
+    const templates = new Map(Object.entries(rawTemplates).map(([appId, raw]) => {
+      const row = robotObject(raw, ['revision', 'settings']);
+      return [robotAppId(appId), { revision: robotRevision(row.revision), settings: parseAgentSettings(row.settings) }];
+    }));
+    const data = { peers, templates };
+    this.cache = { signature, data };
+    return data;
   }
 }
 
+interface SettingsData {
+  peers: Map<string, PeerSettings>;
+  templates: Map<string, WorkbenchDefaults>;
+}
 function recordingValue(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new Error('QQ 消息保存开关无效。');
   return value;
@@ -104,6 +151,8 @@ function recordingValue(value: unknown): boolean {
 
 interface ConversationAccount {
   access: AccessControlConfig;
+  agentSettings?(scope: ChatScope, openId: string, existing: boolean): WorkbenchAgentSettings;
+  validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
 }
@@ -167,6 +216,7 @@ async function projectConversations(
       return {
         scope, openId, name: account.peerName(scope, openId),
         ...robots.conversationSettings.get(key),
+        agent: account.agentSettings?.(scope, openId, sessions.length > 0),
         admitted: allowsConversation(account.access, scope, openId),
         currentSessionId: sessions.some(session => session.id === current) ? current : undefined,
         sessions,
@@ -178,15 +228,16 @@ async function projectConversations(
 
 async function parsePatch(request: Request): Promise<WorkbenchConversationPatch> {
   const text = await request.text();
-  if (Buffer.byteLength(text) > 8192) throw new Error('会话设置请求过大。');
-  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'alias', 'receiving', 'recording']);
+  if (Buffer.byteLength(text) > 512 * 1024) throw new Error('会话设置请求过大。');
+  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'alias', 'receiving', 'recording', 'agent']);
   if ((value.scope !== 'c2c' && value.scope !== 'group') || !validOpenId(value.openId)) throw new Error('QQ 会话地址无效。');
-  if (value.alias === undefined && value.receiving === undefined && value.recording === undefined) throw new Error('缺少要保存的会话设置。');
+  if (value.alias === undefined && value.receiving === undefined && value.recording === undefined && value.agent === undefined) throw new Error('缺少要保存的会话设置。');
   return {
     appId: robotAppId(value.appId), scope: value.scope, openId: value.openId, revision: robotRevision(value.revision),
     ...(value.alias === undefined ? {} : { alias: aliasValue(value.alias) }),
     ...(value.receiving === undefined ? {} : { receiving: receivingValue(value.receiving) }),
     ...(value.recording === undefined ? {} : { recording: recordingValue(value.recording) }),
+    ...(value.agent === undefined ? {} : { agent: parseAgentSettings(value.agent) }),
   };
 }
 
@@ -241,8 +292,15 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     }
     const [conversation] = await projectConversations(robots, patch.appId, persistence, patch);
     if (!conversation) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
+    if (patch.agent && conversation.agent) {
+      try {
+        await robots.conversationAccount(patch.appId)?.validateAgent?.(patch.agent, conversation.agent);
+      } catch (error) {
+        throw new WorkbenchRequestError(400, error instanceof Error ? error.message : 'Agent 设置无效。');
+      }
+    }
     assertWritable();
-    const settings = robots.conversationSettings.save(peerKey(patch.appId, patch.scope, patch.openId), patch);
+    const settings = robots.conversationSettings.save(peerKey(patch.appId, patch.scope, patch.openId), { ...patch, agent: patch.agent ?? conversation.agent });
     return workbenchJson({ conversation: { ...conversation, ...settings } });
   });
 }

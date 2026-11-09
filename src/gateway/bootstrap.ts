@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
+import type { PeerAgentSettings } from '../session/session-manager.ts';
 import { handleInbound, createOutboundHandler, createTurnTracker } from '../transport/index.ts';
 import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.ts';
 import { parseStreamFrame } from '../transport/events.ts';
@@ -67,9 +68,14 @@ export function bootstrapGateway(
   mediaRoot?: string,
   prefs?: PrefsStore,
   receiving?: (target: ReplyTarget) => boolean,
-  history?: { timeline: QqTimeline; recording: (target: ReplyTarget) => boolean },
+  history?: {
+    timeline: QqTimeline;
+    recording: (target: ReplyTarget) => boolean;
+    initialize?: (target: ReplyTarget) => Promise<void>;
+    agent?: PeerAgentSettings;
+  },
 ): GatewayRuntime {
-  const manager = new SessionManager(ctx, agents, config, logger, prefs);
+  const manager = new SessionManager(ctx, agents, config, logger, prefs, history?.agent);
 
   manager.accountAccess = accountAccess;
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
@@ -109,11 +115,12 @@ export function bootstrapGateway(
     catch { return false; }
   };
   const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord);
-  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (messageContext => {
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (async messageContext => {
     const { message, replyTarget } = messageContext;
     const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
-    if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope
-      || !canRecord(replyTarget)) return;
+    if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope) return;
+    await history.initialize?.(replyTarget);
+    if (!canRecord(replyTarget)) return;
     const body = message.content.replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
     const command = /^\/([a-z][a-z0-9_-]*)\b/i.exec(body);
     const pairing = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(body);

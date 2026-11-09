@@ -152,16 +152,17 @@ export class ModelResolver {
    * 优先级：config 显式指定 > settings.yaml（只读） > 宿主 agentDefaultModel
    * 最终兜底 deepseek-official/deepseek-v4-flash，确保 {{model}} 变量始终有值。
    */
-  resolveDefault(): ModelRoute {
-    if (this.config.provider && this.config.model) {
+  resolveDefault(includePluginConfig = true): ModelRoute {
+    const host = this.readFromHost();
+    if (!includePluginConfig && host) return host;
+    if (includePluginConfig && this.config.provider && this.config.model) {
       return { provider: this.config.provider, model: this.config.model };
     }
 
     const fromSettings = this.settings.readDefaultRoute();
     if (fromSettings) return fromSettings;
 
-    const fromHost = this.readFromHost();
-    if (fromHost) return fromHost;
+    if (host) return host;
 
     return { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
   }

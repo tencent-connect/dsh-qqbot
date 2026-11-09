@@ -38,7 +38,7 @@ export function setupMiddlewares(
   isActive: () => boolean,
   mediaRoot?: string,
   receiving?: (target: ReplyTarget) => boolean,
-  onAdmitted?: (ctx: MiddlewareContext) => void,
+  onAdmitted?: (ctx: MiddlewareContext) => void | Promise<void>,
 ): void {
   const blocked = (ctx: MiddlewareContext): boolean => {
     if (!isActive()) {
@@ -104,7 +104,7 @@ export function setupMiddlewares(
   bot.use(admit);
   if (onAdmitted) bot.use(async (ctx, next) => {
     if (blocked(ctx)) return;
-    onAdmitted(ctx);
+    await onAdmitted(ctx);
     await next();
   });
 

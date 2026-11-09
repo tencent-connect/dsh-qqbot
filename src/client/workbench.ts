@@ -12,10 +12,13 @@ import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps
 import { QqTimelineView } from './workbench-timeline.ts';
 import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
+import { WorkbenchAgentFields, type AgentFormSource } from './workbench-agent-form.ts';
+import { readDefaults, WorkbenchDefaultsForm } from './workbench-defaults.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
-type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording'>;
+type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording' | 'agent'>;
 
 interface Draft extends EditableSettings {
   baseline: EditableSettings & Pick<WorkbenchConversation, 'revision'>;
@@ -74,8 +77,8 @@ function accessLabel(robot: WorkbenchRobot, peer: WorkbenchConversation): string
 }
 
 function selectDraft(peer: WorkbenchConversation): Draft {
-  const { alias, receiving, recording, revision } = peer;
-  return { alias, receiving, recording, baseline: { alias, receiving, recording, revision } };
+  const { alias, receiving, recording, agent, revision } = peer;
+  return { alias, receiving, recording, agent, baseline: { alias, receiving, recording, agent, revision } };
 }
 
 function changes(draft: Draft): Partial<EditableSettings> {
@@ -83,7 +86,24 @@ function changes(draft: Draft): Partial<EditableSettings> {
     ...(draft.alias !== draft.baseline.alias ? { alias: draft.alias } : {}),
     ...(draft.receiving !== draft.baseline.receiving ? { receiving: draft.receiving } : {}),
     ...(draft.recording !== draft.baseline.recording ? { recording: draft.recording } : {}),
+    ...(JSON.stringify(draft.agent) !== JSON.stringify(draft.baseline.agent) ? { agent: draft.agent } : {}),
   };
+}
+
+function mergeDraft(peer: WorkbenchConversation, draft: Draft, edited: Partial<EditableSettings>): Draft {
+  const latest = selectDraft(peer);
+  const next = { ...latest, ...edited };
+  const { agent } = edited;
+  const baseline = draft.baseline.agent;
+  if (latest.agent && agent && baseline) {
+    const merged: WorkbenchAgentSettings = { ...latest.agent };
+    const copyIfChanged = <K extends keyof WorkbenchAgentSettings>(key: K): void => {
+      if (JSON.stringify(agent[key]) !== JSON.stringify(baseline[key])) merged[key] = agent[key];
+    };
+    for (const key of Object.keys(merged) as Array<keyof WorkbenchAgentSettings>) copyIfChanged(key);
+    next.agent = merged;
+  }
+  return next;
 }
 
 interface SessionNavigation {
@@ -94,11 +114,15 @@ interface SessionNavigation {
 
 export interface QQWorkbenchProps extends SessionNavigation {
   primarySettings: ReactNode;
+  primaryAccountSettings: ReactNode;
+  agentSource?: AgentFormSource;
 }
 
-export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
   const [robotSettings, setRobotSettings] = useState(false);
+  const [robotPage, setRobotPage] = useState('account');
+  const robotTabsId = useId();
   const layout = useWorkbenchLayout(nav.collapsed, !robotSettings, nav.peerSettingsOpen);
 
   const navigate = (patch: Partial<Navigation>): void => {
@@ -120,6 +144,7 @@ export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkben
       onToggleCollapse: () => navigate({ collapsed: !nav.collapsed }),
       onOpenSettings: appId => {
         if (nav.appId !== appId) navigate({ appId });
+        setRobotPage('account');
         setRobotSettings(true);
       },
       render: ({ robots, unavailable, rail, accountSettings }) => {
@@ -143,7 +168,7 @@ export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkben
                 className: 'imqw-conversation-grid', hidden: showRobotSettings,
                 'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
               }, h(RobotConversations, {
-                key: robot.appId, robot, settingsOpen: nav.peerSettingsOpen, ...sessionNavigation,
+                key: robot.appId, robot, agentSource, settingsOpen: nav.peerSettingsOpen, ...sessionNavigation,
                 treeDivider: layout.divider('tree'), settingsDivider: layout.divider('settings'),
                 onToggleSettings: open => navigate({ peerSettingsOpen: open, smallPage: open ? 'settings' : 'conversation' }),
                 onSmallPage: page => navigate({ smallPage: page }),
@@ -155,11 +180,18 @@ export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkben
                     h('div', null, h('h2', null, '机器人设置'),
                       h('p', { className: 'imqw-muted' }, `${accountName(robot)} · ${ROBOT_STATE_LABELS[robot.state]}`)),
                     h(Button, { size: 'sm', variant: 'outline', onClick: () => setRobotSettings(false) }, '返回会话')),
-                  accountSettings,
-                  robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据、接入与回复' },
-                    h('h3', null, '凭据与访问'),
-                    primarySettings,
-                  ) : null,
+                  h(SegmentedControl, { id: robotTabsId, label: '机器人设置页面', value: robotPage,
+                    options: [{ value: 'account', label: '账号与权限' }, { value: 'defaults', label: '新会话默认设置' }],
+                    onChange: setRobotPage,
+                  }),
+                  h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-account-panel`, 'aria-labelledby': `${robotTabsId}-account`, hidden: robotPage !== 'account' },
+                    accountSettings,
+                    robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
+                      h('h3', null, '凭据与访问'),
+                      primaryAccountSettings,
+                    ) : null),
+                  h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-defaults-panel`, 'aria-labelledby': `${robotTabsId}-defaults`, hidden: robotPage !== 'defaults' },
+                    h(WorkbenchDefaultsForm, { key: robot.appId, appId: robot.appId, source: agentSource })),
                 ),
               ) : null,
             ),
@@ -172,6 +204,7 @@ export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkben
 
 interface RobotConversationsProps extends SessionNavigation {
   robot: WorkbenchRobot;
+  agentSource?: AgentFormSource;
   settingsOpen: boolean;
   treeDivider: ReactNode;
   settingsDivider: ReactNode;
@@ -179,7 +212,7 @@ interface RobotConversationsProps extends SessionNavigation {
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, settingsOpen, treeDivider, settingsDivider, openSession, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, agentSource, settingsOpen, treeDivider, settingsDivider, openSession, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
   const [peers, setPeers] = useState<WorkbenchConversation[] | null>(null);
   const [selection, setSelection] = useState(() => peerSelections.get(appId));
@@ -391,7 +424,7 @@ function RobotConversations({ robot, settingsOpen, treeDivider, settingsDivider,
         }, '收起')),
       peer ? h('p', { className: 'imqw-muted imqw-tree-caption' }, peerName(peer)) : null,
       peer && peerKey ? h(ConversationSettings, {
-            key: peerKey, robot, peer, workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
+            key: peerKey, robot, peer, agentSource, workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
             busy: busyKey === peerKey, feedback: feedback?.key === peerKey ? feedback : undefined,
             onEdit: draft => {
               if (Object.keys(changes(draft)).length > 0) peerDrafts.set(peerKey, draft);
@@ -425,6 +458,7 @@ function SessionDetails({ session, title, workspace }: { session: WorkbenchSessi
 interface ConversationSettingsProps {
   robot: WorkbenchRobot;
   peer: WorkbenchConversation;
+  agentSource?: AgentFormSource;
   workspace?: string;
   draft: Draft;
   busy: boolean;
@@ -433,34 +467,53 @@ interface ConversationSettingsProps {
   onSave: (draft: Draft) => void;
 }
 
-function ConversationSettings({ robot, peer, workspace, draft, busy, feedback, onEdit, onSave }: ConversationSettingsProps): ReactNode {
+function ConversationSettings({ robot, peer, agentSource, workspace, draft, busy, feedback, onEdit, onSave }: ConversationSettingsProps): ReactNode {
+  const [adoptError, setAdoptError] = useState('');
+  const [reading, setReading] = useState(false);
   const edited = changes(draft);
   const dirty = Object.keys(edited).length > 0;
   const stale = dirty && draft.baseline.revision !== peer.revision;
   const current = peer.sessions.find(session => session.id === peer.currentSessionId);
+  const adopt = async (): Promise<void> => {
+    setReading(true);
+    setAdoptError('');
+    try {
+      const { settings } = await readDefaults(robot.appId);
+      const agent = draft.agent;
+      if (!agent) return;
+      onEdit({ ...draft, agent: {
+        ...settings,
+        ...(peer.scope === 'group' ? { directPrompt: agent.directPrompt, streaming: agent.streaming } : { groupPrompt: agent.groupPrompt }),
+      } });
+    } catch (error) {
+      setAdoptError(error instanceof Error ? error.message : '无法读取机器人默认设置。');
+    } finally {
+      setReading(false);
+    }
+  };
 
   return h('form', { className: 'imqw-form', onSubmit: (event: FormEvent) => {
     event.preventDefault();
-    if (dirty && !stale && !busy) onSave(draft);
+    if (dirty && !stale && !busy && !reading) onSave(draft);
   } },
     h('label', { className: 'imqw-field' },
       h('span', null, '会话备注'),
       h(Input, {
-        value: draft.alias, maxLength: 120, placeholder: peer.name || '未设置备注', disabled: busy,
+        value: draft.alias, maxLength: 120, placeholder: peer.name || '未设置备注', disabled: busy || reading,
         onChange: event => onEdit({ ...draft, alias: event.currentTarget.value }),
       })),
     h('div', { className: 'imqw-receiving' },
       h('div', null, h('strong', null, '接收 QQ 消息'),
         h('p', { className: 'imqw-muted' }, '保存后影响此会话的消息接收，仍受机器人接入规则限制。')),
       h(Switch, {
-        checked: draft.receiving, label: '接收 QQ 消息', disabled: busy,
+        checked: draft.receiving, label: '接收 QQ 消息', disabled: busy || reading,
         onChange: receiving => onEdit({ ...draft, receiving }),
       })),
     h('div', { className: 'imqw-receiving' },
       h('div', null, h('strong', null, '保存 QQ 消息'),
         h('p', { className: 'imqw-muted' }, '关闭后停止新增 QQ 流水，已有记录保留。')),
       h(Switch, {
-        checked: draft.recording, label: '保存 QQ 消息', disabled: busy,
+        checked: draft.recording, label: '保存 QQ 消息', disabled: busy || reading,
         onChange: recording => onEdit({ ...draft, recording }),
       })),
     h('dl', { className: 'imqw-details' },
@@ -472,16 +525,21 @@ function ConversationSettings({ robot, peer, workspace, draft, busy, feedback, o
       h('h3', null, '当前 Session'),
       h(SessionDetails, { session: current, workspace }),
     ) : null,
+    draft.agent ? h(Fragment, null,
+      h(WorkbenchAgentFields, { settings: draft.agent, scope: peer.scope, source: agentSource, disabled: busy || reading, onChange: agent => onEdit({ ...draft, agent }) }),
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: busy || reading, onClick: () => { void adopt(); } }, reading ? '正在读取默认值…' : '采用机器人当前默认值'),
+      adoptError ? h('p', { className: 'imqb-error', role: 'alert' }, adoptError) : null,
+    ) : null,
     stale ? h('div', { className: 'imqw-conflict' },
       h('p', { className: 'imqb-error', role: 'alert' }, '会话设置已更新。请确认是否将草稿中的改动合并到最新设置。'),
       h(Button, {
-        type: 'button', size: 'sm', variant: 'outline', disabled: busy,
-        onClick: () => onEdit({ ...selectDraft(peer), ...edited }),
+        type: 'button', size: 'sm', variant: 'outline', disabled: busy || reading,
+        onClick: () => onEdit(mergeDraft(peer, draft, edited)),
       }, '合并草稿')) : null,
     feedback ? h('p', { className: 'imqb-error', role: 'alert' }, feedback.message) : null,
     h('footer', { className: 'imqw-actions' },
-      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: busy || !dirty, onClick: () => onEdit(selectDraft(peer)) }, '放弃修改'),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || !dirty || stale }, busy ? '保存中…' : '保存更改'),
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: busy || reading || !dirty, onClick: () => onEdit(selectDraft(peer)) }, '放弃修改'),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || reading || !dirty || stale }, busy ? '保存中…' : '保存更改'),
     ),
   );
 }

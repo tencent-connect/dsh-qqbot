@@ -89,6 +89,20 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
 
   export function SegmentedControl<Value extends string>(props: SegmentedControlProps<Value>): ReactElement;
 
+  export function Menu(props: {
+    open: boolean;
+    anchor: ReactNode;
+    onClose: () => void;
+    onSelect: (id: string) => void;
+    items: readonly { id: string; label: ReactNode; disabled?: boolean }[];
+    selectedId?: string;
+    portal?: boolean;
+    autoFocus?: boolean;
+    minWidthFromAnchor?: boolean;
+    className?: string;
+    listClassName?: string;
+  }): ReactElement;
+
   export interface DisclosureRowProps {
     icon: ReactNode;
     title: string;
