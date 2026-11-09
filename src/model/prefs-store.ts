@@ -4,10 +4,8 @@
  * 隔离文件 I/O 操作，便于单元测试时 mock。
  * 存储路径：~/.dsh-qqbot/model-prefs.json（全局共享，多实例/多进程共存）。
  *
- * 并发安全（该文件存在多个写者——同进程多 bot 实例、跨进程多 profile）：
- * - 原子写：同目录临时文件 + rename，崩溃不留半份文件；
- * - 写前合并：重读磁盘，保留其他写者的条目，内存覆盖同 key（本进程视角权威）；
- * - 删除墓碑：本进程显式删除的 key 在合并时压住磁盘旧值，防止「删除被并发写复活」。
+ * 写前重读磁盘，只合并本实例待保存的修改与删除。原子替换后清除待写键。
+ * 同进程的同步写入不会交错。原子替换不提供跨进程读改写互斥。
  */
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -29,13 +27,6 @@ interface PrefsFile {
   presets: Record<string, string>;
 }
 
-/** 各段的删除墓碑（key 集合），合并时用于压住磁盘上的旧值 */
-interface Tombstones {
-  overrides: Set<string>;
-  sessionIds: Set<string>;
-  presets: Set<string>;
-}
-
 export class PrefsStore {
   /** per-peer 模型偏好（内存态） */
   private overrides = new Map<string, ModelRoute>();
@@ -45,8 +36,11 @@ export class PrefsStore {
   private sessionKeys = new Map<string, string>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
-  /** 本进程显式删除的 key（防止并发合并把删除复活） */
-  private deleted: Tombstones = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
+  private readonly pending: Record<keyof PrefsFile, Set<string>> = {
+    overrides: new Set(),
+    sessionIds: new Set(),
+    presets: new Set(),
+  };
   /** 隔离偏好文件路径 */
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
@@ -67,16 +61,12 @@ export class PrefsStore {
 
   setOverride(sessionKey: string, route: ModelRoute): void {
     this.overrides.set(sessionKey, route);
-    this.deleted.overrides.delete(sessionKey);
-    this.write();
+    this.write('overrides', sessionKey);
   }
 
   clearOverride(sessionKey: string): boolean {
     const deleted = this.overrides.delete(sessionKey);
-    if (deleted) {
-      this.deleted.overrides.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('overrides', sessionKey);
     return deleted;
   }
 
@@ -102,17 +92,13 @@ export class PrefsStore {
     this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);
     this.sessionKeys.set(sessionId, sessionKey);
-    this.deleted.sessionIds.delete(sessionKey);
-    this.write();
+    this.write('sessionIds', sessionKey);
   }
 
   clearSessionId(sessionKey: string): boolean {
     this.unindexSessionId(sessionKey);
     const deleted = this.sessionIds.delete(sessionKey);
-    if (deleted) {
-      this.deleted.sessionIds.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('sessionIds', sessionKey);
     return deleted;
   }
 
@@ -124,16 +110,12 @@ export class PrefsStore {
 
   setPreset(sessionKey: string, presetId: string): void {
     this.presets.set(sessionKey, presetId);
-    this.deleted.presets.delete(sessionKey);
-    this.write();
+    this.write('presets', sessionKey);
   }
 
   clearPreset(sessionKey: string): boolean {
     const deleted = this.presets.delete(sessionKey);
-    if (deleted) {
-      this.deleted.presets.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('presets', sessionKey);
     return deleted;
   }
 
@@ -191,12 +173,12 @@ export class PrefsStore {
    * 丢掉（用户表现为「QQ 里丢上下文」且无从恢复）。备份保留一份人工可救的证据。
    */
   private readDiskState(): PrefsFile | null {
-    if (!existsSync(this.prefsPath)) return null;
     let raw: string;
     try {
       raw = readFileSync(this.prefsPath, 'utf8');
-    } catch {
-      return null; // 读不到（权限/并发删除）：按首次写处理，不备份
+    } catch (err) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return null;
+      throw err;
     }
     try {
       const data = JSON.parse(raw) as PrefsFile;
@@ -222,26 +204,26 @@ export class PrefsStore {
     }
   }
 
-  /** 合并内存与磁盘（内存覆盖同 key，磁盘独有的其他写者条目保留，墓碑 key 除外） */
   private mergeDisk(disk: PrefsFile | null): PrefsFile {
-    const pick = <T>(mem: Map<string, T>, diskMap: Record<string, T> | undefined, tomb: Set<string>): Record<string, T> => {
-      const out = Object.fromEntries(mem.entries());
-      if (diskMap && typeof diskMap === 'object') {
-        for (const [key, value] of Object.entries(diskMap)) {
-          if (key in out || tomb.has(key)) continue;
-          out[key] = value;
-        }
+    const merge = <T>(section: keyof PrefsFile, mem: Map<string, T>, saved?: Record<string, T>): Record<string, T> => {
+      if (disk === null) return Object.fromEntries(mem);
+      const out = new Map(saved && typeof saved === 'object' ? Object.entries(saved) : []);
+      for (const key of this.pending[section]) {
+        const value = mem.get(key);
+        if (value === undefined) out.delete(key);
+        else out.set(key, value);
       }
-      return out;
+      return Object.fromEntries(out);
     };
     return {
-      overrides: pick(this.overrides, disk?.overrides, this.deleted.overrides),
-      sessionIds: pick(this.sessionIds, disk?.sessionIds, this.deleted.sessionIds),
-      presets: pick(this.presets, disk?.presets, this.deleted.presets),
+      overrides: merge('overrides', this.overrides, disk?.overrides),
+      sessionIds: merge('sessionIds', this.sessionIds, disk?.sessionIds),
+      presets: merge('presets', this.presets, disk?.presets),
     };
   }
 
-  private write(): void {
+  private write(section: keyof PrefsFile, key: string): void {
+    this.pending[section].add(key);
     try {
       mkdirSync(dirname(this.prefsPath), { recursive: true });
       const data = this.mergeDisk(this.readDiskState());
@@ -252,6 +234,7 @@ export class PrefsStore {
       try {
         writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
         renameSync(tmpPath, this.prefsPath);
+        for (const keys of Object.values(this.pending)) keys.clear();
       } catch (err) {
         try { unlinkSync(tmpPath); } catch { /* 临时文件可能不存在 */ }
         throw err;

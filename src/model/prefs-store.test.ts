@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrefsStore } from './prefs-store.ts';
@@ -33,7 +33,51 @@ describe('PrefsStore 并发安全（E3）', () => {
     });
   });
 
-  it('内存覆盖磁盘同 key：本进程视角权威', () => {
+  it('两个实例交错写入时保留另一账号的新会话、模型和预设', () => {
+    const a = store();
+    a.setSessionId('botA:peer', 'session-a1');
+    a.setPreset('botA:peer', 'preset-a1');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a1' });
+    const b = store();
+
+    a.setSessionId('botA:peer', 'session-a2');
+    a.clearPreset('botA:peer');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a2' });
+    b.setSessionId('botB:peer', 'session-b1');
+
+    const restored = store();
+    expect(restored.getSessionId('botA:peer')).toBe('session-a2');
+    expect(restored.findSessionKey('session-a1')).toBeUndefined();
+    expect(restored.getPreset('botA:peer')).toBeUndefined();
+    expect(restored.getOverride('botA:peer')).toEqual({ provider: 'provider', model: 'model-a2' });
+    expect(restored.getSessionId('botB:peer')).toBe('session-b1');
+  });
+
+  it('保存失败后重试待写改动，保留期间已落盘的其他账号更新', () => {
+    const onError = vi.fn();
+    const a = new PrefsStore(undefined, { path, onError });
+    a.setPreset('botA:peer', 'preset-a1');
+    a.setSessionId('botB:peer', 'session-b1');
+    const b = store();
+
+    const saved = join(dir, 'saved-prefs.json');
+    renameSync(path, saved);
+    mkdirSync(path);
+    a.clearPreset('botA:peer');
+    a.setSessionId('botA:peer', 'session-a1');
+    expect(onError).toHaveBeenCalledTimes(2);
+    rmSync(path, { recursive: true });
+    renameSync(saved, path);
+
+    b.setSessionId('botB:peer', 'session-b2');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a1' });
+    const restored = store();
+    expect(restored.getPreset('botA:peer')).toBeUndefined();
+    expect(restored.getSessionId('botA:peer')).toBe('session-a1');
+    expect(restored.getSessionId('botB:peer')).toBe('session-b2');
+  });
+
+  it('显式修改同一键时，新值覆盖磁盘旧值', () => {
     const a = store();
     a.setSessionId('k', 'old');
 
