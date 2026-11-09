@@ -13,7 +13,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked, formatRelativeTime } from '../shared/index.ts';
-import { clipTitle } from '../shared/session-title.ts';
+import { clipTitle, DIGEST_MESSAGE_CLIP, type DigestMessage } from '../shared/session-title.ts';
 import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
 
 /** 会话 id 展示短码（session-xxxxxxxx 截断到 16 字符） */
@@ -26,6 +26,25 @@ function displayName(session: { sessionId: string; title?: string }): string {
   return session.title !== undefined && session.title !== ''
     ? clipTitle(session.title, 40)
     : shortId(session.sessionId);
+}
+
+/**
+ * 最近对话预览的排版：对话式缩进 + 回合分组。
+ *
+ * 用户问句顶格，助手答句缩进 3 空格挂在问句下（读起来像聊天记录）；
+ * 每个回合之间空行分隔，避免 5 行等长文本挤成一堵墙。
+ */
+export function renderDigestLines(messages: readonly DigestMessage[]): string[] {
+  const lines: string[] = [];
+  let previousRole: DigestMessage['role'] | undefined;
+  for (const message of messages) {
+    const icon = message.role === 'user' ? '🧑' : '🤖';
+    const indent = message.role === 'assistant' && previousRole === 'user' ? '   ' : '';
+    if (previousRole === 'assistant' && message.role === 'user') lines.push('');
+    lines.push(`${indent}${icon} ${clipTitle(message.text, DIGEST_MESSAGE_CLIP)}`);
+    previousRole = message.role;
+  }
+  return lines;
 }
 
 export function sessionsCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
@@ -72,16 +91,13 @@ export function sessionsCommand({ manager, config, logger }: CommandDeps): Categ
         if (outcome.alreadyCurrent) return `当前就在会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`;
         const lines: string[] = [`✅ 已切换到会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`];
         if (outcome.recentMessages !== undefined && outcome.recentMessages.length > 0) {
-          lines.push('── 最近对话 ──');
-          for (const message of outcome.recentMessages) {
-            const icon = message.role === 'user' ? '🧑' : '🤖';
-            lines.push(`${icon} ${clipTitle(message.text, 60)}`);
-          }
+          lines.push('', '**最近对话**', '');
+          lines.push(...renderDigestLines(outcome.recentMessages));
           if ((outcome.earlierMessages ?? 0) > 0) {
-            lines.push(`（更早 ${outcome.earlierMessages} 条消息）`);
+            lines.push('', `（更早还有 ${outcome.earlierMessages} 条消息）`);
           }
         }
-        lines.push('发送消息继续该会话（上下文与文件现场一并切换）。');
+        lines.push('', '发送消息继续该会话，上下文与文件现场一并切换。');
         return lines.join('\n');
       }
 

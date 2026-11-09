@@ -63,9 +63,9 @@ export interface DigestMessage {
   text: string;
 }
 
-/** 摘要条数（用户拍板 5 条）与单条裁剪长度 */
+/** 摘要条数（用户拍板 5 条）与单条裁剪长度（预览用，46 码点≈一行半） */
 export const DIGEST_MESSAGE_COUNT = 5;
-export const DIGEST_MESSAGE_CLIP = 60;
+export const DIGEST_MESSAGE_CLIP = 46;
 
 /**
  * 兼容两种 durable 事件形态提取文本：

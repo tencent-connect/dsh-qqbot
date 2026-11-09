@@ -2,7 +2,8 @@
  * /sessions 命令层用例：分组渲染、QQ 标签、参数解析、准入错误与鉴权。
  */
 import { describe, it, expect, vi } from 'vitest';
-import { sessionsCommand } from './sessions.ts';
+import { sessionsCommand, renderDigestLines } from './sessions.ts';
+import { DIGEST_MESSAGE_CLIP } from '../shared/session-title.ts';
 
 const CONFIG = {
   textChunkLimit: 4500,
@@ -117,11 +118,15 @@ describe('/sessions 命令', () => {
 
     const text = String(result);
     expect(text).toContain('✅ 已切换到会话 登录页优化');
-    expect(text).toContain('── 最近对话 ──');
+    expect(text).toContain('**最近对话**');
     expect(text).toContain('🧑 表单校验不生效');
     expect(text).toContain('🤖 检查 zod schema 调用时机');
-    expect(text).toContain('（更早 12 条消息）');
-    expect(text).toContain('发送消息继续该会话');
+    expect(text).toContain('（更早还有 12 条消息）');
+    expect(text).toContain('发送消息继续该会话，上下文与文件现场一并切换。');
+    // 助手答句缩进挂在问句下（对话式排版）
+    expect(text).toContain('\n   🤖 检查 zod schema 调用时机');
+    // 预览块与确认标题之间空行分隔
+    expect(text).toContain('登录页优化\n\n**最近对话**');
   });
 
   it('序号切换：无历史时省略摘要块；更早 0 条不提示', async () => {
@@ -215,5 +220,36 @@ describe('/sessions 命令', () => {
     const cmd = sessionsCommand({ manager: makeManager(), config: restricted });
     expect(cmd.authorized!(makeCmdCtx('', [], 'admin1'), {} as never)).toBe(true);
     expect(cmd.authorized!(makeCmdCtx('', [], 'stranger'), {} as never)).not.toBe(true);
+  });
+});
+
+describe('renderDigestLines（最近对话排版）', () => {
+  it('助手答句缩进 3 空格挂在问句下，问句顶格', () => {
+    const lines = renderDigestLines([
+      { role: 'user', text: '问句' },
+      { role: 'assistant', text: '答句' },
+    ]);
+    expect(lines).toEqual(['🧑 问句', '   🤖 答句']);
+  });
+
+  it('回合之间空行分隔（助手→用户 换回合时插空行）', () => {
+    const lines = renderDigestLines([
+      { role: 'user', text: '问1' },
+      { role: 'assistant', text: '答1' },
+      { role: 'user', text: '问2' },
+      { role: 'assistant', text: '答2' },
+    ]);
+    expect(lines).toEqual(['🧑 问1', '   🤖 答1', '', '🧑 问2', '   🤖 答2']);
+  });
+
+  it('开头即助手消息：不缩进（无所属问句）', () => {
+    const lines = renderDigestLines([{ role: 'assistant', text: '孤答' }]);
+    expect(lines).toEqual(['🤖 孤答']);
+  });
+
+  it('单条裁剪到 46 码点并加省略号', () => {
+    const lines = renderDigestLines([{ role: 'user', text: '字'.repeat(60) }]);
+    expect(Array.from(lines[0]!.slice(3))).toHaveLength(DIGEST_MESSAGE_CLIP);
+    expect(lines[0]!.endsWith('…')).toBe(true);
   });
 });
