@@ -89,13 +89,6 @@ function QQBotSettingsSection(): ReactNode {
   );
 }
 
-function LegacyQQBotPage(): ReactNode {
-  return createElement('div', { className: 'imqb-pluginPage' },
-    createElement('div', { className: 'imqb-pluginPageContent' },
-      createElement(QQBotSettingsSection)),
-  );
-}
-
 /** 左侧栏入口图标（宿主传入 size：展开 18 / 收起 16；currentColor 跟随侧栏配色与选中态） */
 function QqBotSidebarIcon({ size = 16 }: { size?: number; active?: boolean }): ReactNode {
   return createElement('svg', {
@@ -181,7 +174,7 @@ export function apply(ctx: Context): void {
         } | undefined;
         const open = workspace?.openSession?.bind(workspace);
         return createElement(QQWorkbench, {
-          legacySettings: createElement(LegacyQQBotPage),
+          primarySettings: createElement(QQBotSettingsSection),
           openSession: open ? id => {
             if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
               throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');

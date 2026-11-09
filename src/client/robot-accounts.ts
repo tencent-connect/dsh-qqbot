@@ -128,9 +128,9 @@ export interface RobotAccountsProps {
   onSelect?: (appId: string) => void;
   workbench?: {
     collapsed: boolean;
+    compact: boolean;
     onToggleCollapse: () => void;
     onOpenSettings: (appId: string) => void;
-    onCloseSettings: () => void;
     render: (view: {
       robots: readonly WorkbenchRobot[] | null;
       unavailable: boolean;
@@ -249,19 +249,25 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   const closeEditor = (): void => {
     if (busy) return;
     setEditor(null);
-    if (editor?.kind === 'edit') workbench?.onCloseSettings();
   };
   const openSettings = (robot: WorkbenchRobot): void => {
     if (editor?.kind !== 'edit' || editor.baseline.appId !== robot.appId) startEdit(editRobot(robot));
     workbench?.onOpenSettings(robot.appId);
   };
+  const inlineEditor = workbench && editor?.kind === 'edit';
   const footer = h('div', { className: 'imqr-footer' },
-    h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: busy, onClick: closeEditor }, '取消'),
+    h(Button, { size: 'sm', variant: 'ghost', type: 'button',
+      disabled: busy || Boolean(inlineEditor && !stale && !canSave),
+      onClick: () => {
+        if (inlineEditor) startEdit(editRobot(current ?? editor.baseline));
+        else closeEditor();
+      },
+    }, inlineEditor ? '撤销修改' : '取消'),
     h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave }, busy ? '保存中…' : '保存'));
   const description = editor?.kind === 'add'
     ? '保存后连接此机器人。私聊和群聊默认使用空白名单。'
     : editor?.baseline.primary
-      ? '主机器人的凭据和访问权限在原绑定设置中管理。'
+      ? undefined
       : '访问规则仅适用于此机器人。填写新的 AppSecret 后会重新连接。';
   const form = editor === null ? null : h('form', {
       id: formId, className: 'imqr-form', onSubmit: (event: FormEvent) => {
@@ -292,9 +298,9 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       editError && !stale ? h('p', { className: 'imqb-error', role: 'alert' }, editError) : null,
       rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, '草稿已合并，请核对后保存。') : null,
   );
-  const inlineEditor = workbench && editor?.kind === 'edit';
   const accountSettings = inlineEditor && editor?.kind === 'edit' ? h('div', { className: 'imqr-inline' },
-    h('p', { className: 'imqb-status-sub' }, description),
+    h('h3', null, '账号信息'),
+    description ? h('p', { className: 'imqb-status-sub' }, description) : null,
     h('div', { className: 'imqr-inline-state' },
       h(Switch, {
         checked: current?.enabled ?? editor.baseline.enabled,
@@ -330,7 +336,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           disabled: busy || robots === null,
           onClick: () => startEdit({ kind: 'add', draft: { ...EMPTY_DRAFT } }),
         }, h(IconPlusOutlineRegular, { size: 16 })),
-        workbench ? h(Button, {
+        workbench && !workbench.compact ? h(Button, {
           size: 'sm', variant: 'ghost', type: 'button', title: workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
           'aria-label': workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
           onClick: workbench.onToggleCollapse,
@@ -388,6 +394,7 @@ const STYLES = `
 .imqr-footer { justify-content: flex-end; }
 .imqr-modal { width: min(540px, 100%); max-height: 100%; overflow-y: auto; }
 .imqr-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.imqr-field > span { box-sizing: border-box; }
 .imqr-access { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 12px; font-size: 13px; }
 .imqr-access .imqr-field { margin-top: 8px; }
 .imqr-field textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); }

@@ -1,5 +1,5 @@
-import { createElement as h, Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, IconChevronDownOutlineRegular, Input, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { createElement as h, Fragment, useEffect, useId, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { Button, IconChevronDownOutlineRegular, IconSettingsOutlineRegular, Input, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
   type WorkbenchConversation,
@@ -10,11 +10,11 @@ import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
 import { QqTimelineView } from './workbench-timeline.ts';
+import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
-type SettingsPanel = 'peer' | 'robot' | 'legacy' | 'closed';
 type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording'>;
 
 interface Draft extends EditableSettings {
@@ -93,27 +93,21 @@ interface SessionNavigation {
 }
 
 export interface QQWorkbenchProps extends SessionNavigation {
-  legacySettings: ReactNode;
+  primarySettings: ReactNode;
 }
 
-export function QQWorkbench({ legacySettings, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+export function QQWorkbench({ primarySettings, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
-  const [panel, setPanel] = useState<SettingsPanel>(() => nav.peerSettingsOpen ? 'peer' : 'closed');
+  const [robotSettings, setRobotSettings] = useState(false);
+  const layout = useWorkbenchLayout(nav.collapsed, !robotSettings, nav.peerSettingsOpen);
 
   const navigate = (patch: Partial<Navigation>): void => {
     Object.assign(lastNavigation, patch);
     setNav({ ...lastNavigation });
   };
-  const showPanel = (next: SettingsPanel): void => {
-    setPanel(next);
-    navigate({
-      ...(next === 'peer' || next === 'closed' ? { peerSettingsOpen: next === 'peer' } : {}),
-      smallPage: next === 'closed' ? 'conversation' : 'settings',
-    });
-  };
   const selectRobot = (appId: string): void => {
+    setRobotSettings(false);
     if (nav.appId === appId) return;
-    setPanel(nav.peerSettingsOpen ? 'peer' : 'closed');
     navigate({ appId, smallPage: 'list' });
   };
 
@@ -121,36 +115,54 @@ export function QQWorkbench({ legacySettings, ...sessionNavigation }: QQWorkbenc
     selectedAppId: nav.appId,
     onSelect: selectRobot,
     workbench: {
-      collapsed: nav.collapsed,
+      collapsed: layout.iconsOnly,
+      compact: layout.compact,
       onToggleCollapse: () => navigate({ collapsed: !nav.collapsed }),
       onOpenSettings: appId => {
-        navigate({ appId, smallPage: 'settings' });
-        setPanel('robot');
+        if (nav.appId !== appId) navigate({ appId });
+        setRobotSettings(true);
       },
-      onCloseSettings: () => showPanel('closed'),
       render: ({ robots, unavailable, rail, accountSettings }) => {
         if (unavailable) return h('div', { className: 'imqb-pluginPage' },
-          h('div', { className: 'imqb-pluginPageContent' }, legacySettings));
+          h('div', { className: 'imqb-pluginPageContent' }, primarySettings));
         const robot = robots?.find(candidate => candidate.appId === nav.appId) ?? robots?.[0];
-        const visiblePanel = panel === 'robot' && accountSettings === null ? 'closed' : panel;
-        const settings = visiblePanel === 'robot'
-          ? h(Fragment, null, accountSettings, robot?.primary ? h('div', { className: 'imqw-legacy' }, legacySettings) : null)
-          : legacySettings;
-        return h('div', { className: 'imqw-root' },
+        const showRobotSettings = Boolean(robotSettings && robot && accountSettings);
+        return h('div', { className: 'imqw-root', ref: layout.root },
           h('style', null, WORKBENCH_STYLES),
           h('div', {
-            className: 'imqw-layout', 'data-collapsed': nav.collapsed, 'data-settings': Boolean(robot && visiblePanel !== 'closed'),
-            'data-page': nav.smallPage === 'settings' && visiblePanel === 'closed' ? 'conversation' : nav.smallPage,
-            'data-empty': !robot || undefined,
+            className: 'imqw-layout', 'data-collapsed': layout.iconsOnly, 'data-single-page': layout.singlePage,
+            style: {
+              '--imqw-rail': `${layout.railWidth}px`, '--imqw-tree': `${layout.treeWidth}px`,
+              '--imqw-settings': `${layout.settingsWidth}px`,
+            } as CSSProperties,
           },
             h('aside', { className: 'imqw-robots', 'aria-label': '机器人列表' }, rail),
-            robot
-              ? h(RobotConversations, {
-                  key: robot.appId, robot, panel: visiblePanel, settings, ...sessionNavigation,
-                  onShowPanel: showPanel, onSmallPage: page => navigate({ smallPage: page }),
-                })
-              : h('section', { className: 'imqw-empty' },
-                  robots?.length === 0 ? legacySettings : h('p', { role: 'status' }, rail ? '机器人列表暂不可用' : '正在读取机器人…')),
+            layout.divider('robots'),
+            h('div', { className: 'imqw-content' },
+              robot ? h('div', {
+                className: 'imqw-conversation-grid', hidden: showRobotSettings,
+                'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
+              }, h(RobotConversations, {
+                key: robot.appId, robot, settingsOpen: nav.peerSettingsOpen, ...sessionNavigation,
+                treeDivider: layout.divider('tree'), settingsDivider: layout.divider('settings'),
+                onToggleSettings: open => navigate({ peerSettingsOpen: open, smallPage: open ? 'settings' : 'conversation' }),
+                onSmallPage: page => navigate({ smallPage: page }),
+              })) : h('section', { className: 'imqw-empty' },
+                robots?.length === 0 ? primarySettings : h('p', { role: 'status' }, rail ? '机器人列表暂不可用' : '正在读取机器人…')),
+              showRobotSettings && robot ? h('section', { className: 'imqw-robot-settings', 'aria-label': '机器人设置' },
+                h('div', { className: 'imqw-robot-settings-inner' },
+                  h('header', { className: 'imqw-column-head imqw-robot-settings-head' },
+                    h('div', null, h('h2', null, '机器人设置'),
+                      h('p', { className: 'imqw-muted' }, `${accountName(robot)} · ${ROBOT_STATE_LABELS[robot.state]}`)),
+                    h(Button, { size: 'sm', variant: 'outline', onClick: () => setRobotSettings(false) }, '返回会话')),
+                  accountSettings,
+                  robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据、接入与回复' },
+                    h('h3', null, '凭据与访问'),
+                    primarySettings,
+                  ) : null,
+                ),
+              ) : null,
+            ),
           ),
         );
       },
@@ -160,13 +172,14 @@ export function QQWorkbench({ legacySettings, ...sessionNavigation }: QQWorkbenc
 
 interface RobotConversationsProps extends SessionNavigation {
   robot: WorkbenchRobot;
-  panel: SettingsPanel;
-  settings: ReactNode;
-  onShowPanel: (next: SettingsPanel) => void;
+  settingsOpen: boolean;
+  treeDivider: ReactNode;
+  settingsDivider: ReactNode;
+  onToggleSettings: (open: boolean) => void;
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, panel, settings, openSession, sessionTitle, workspaceTitle, onShowPanel, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, settingsOpen, treeDivider, settingsDivider, openSession, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
   const [peers, setPeers] = useState<WorkbenchConversation[] | null>(null);
   const [selection, setSelection] = useState(() => peerSelections.get(appId));
@@ -266,7 +279,6 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
     peerSelections.set(appId, key);
     setSelection(key);
     setOpenError('');
-    if (panel === 'robot' || panel === 'legacy') onShowPanel('peer');
     onSmallPage('conversation');
   };
   const visiblePeers = (peers ?? []).filter(item => {
@@ -349,6 +361,7 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
         );
       }),
     ),
+    treeDivider,
     h('section', { className: 'imqw-conversation', 'aria-label': '当前 QQ 会话' },
       h('header', { className: 'imqw-column-head imqw-main-head' },
         h('div', null,
@@ -357,9 +370,8 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
         h('div', { className: 'imqw-actions' },
           current ? h(Button, { size: 'sm', variant: 'primary', disabled: !openSession, onClick: () => openNative(current.id) }, '打开当前 Session') : null,
           peer ? h(Button, {
-            size: 'sm', variant: 'outline', 'aria-expanded': panel === 'peer', onClick: () => onShowPanel('peer'),
-          }, '会话设置') : null,
-          robot.primary ? h(Button, { size: 'sm', variant: 'ghost', onClick: () => onShowPanel('legacy') }, '绑定与原设置') : null,
+            size: 'sm', variant: 'outline', 'aria-expanded': settingsOpen, onClick: () => onToggleSettings(true),
+          }, h(IconSettingsOutlineRegular, { size: 14 }), '会话设置') : null,
         ),
       ),
       openError ? h('p', { className: 'imqb-error', role: 'alert' }, openError) : null,
@@ -370,15 +382,15 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
       ].filter(Boolean).join(' · ')) : null,
       peer ? h(QqTimelineView, { key: peerKey, appId, peer, robotName: accountName(robot), openSession: openSession && openNative }) : null,
     ),
-    panel !== 'closed' ? h('aside', { className: 'imqw-settings', 'aria-label': panel === 'peer' ? '会话设置' : '机器人设置' },
+    settingsDivider,
+    settingsOpen ? h('aside', { className: 'imqw-settings', 'aria-label': '会话设置' },
       h('header', { className: 'imqw-column-head' },
-        h('h2', null, panel === 'peer' ? '会话设置' : panel === 'robot' ? '机器人设置' : '绑定与原设置'),
+        h('h2', null, '会话设置'),
         h(Button, {
-          size: 'sm', variant: 'ghost', 'aria-label': '收起设置栏', onClick: () => onShowPanel('closed'),
+          size: 'sm', variant: 'ghost', 'aria-label': '收起设置栏', onClick: () => onToggleSettings(false),
         }, '收起')),
-      h('p', { className: 'imqw-muted imqw-tree-caption' }, panel === 'peer' && peer ? peerName(peer) : accountName(robot)),
-      panel === 'peer'
-        ? peer && peerKey ? h(ConversationSettings, {
+      peer ? h('p', { className: 'imqw-muted imqw-tree-caption' }, peerName(peer)) : null,
+      peer && peerKey ? h(ConversationSettings, {
             key: peerKey, robot, peer, workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
             busy: busyKey === peerKey, feedback: feedback?.key === peerKey ? feedback : undefined,
             onEdit: draft => {
@@ -388,16 +400,15 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
               setFeedback(undefined);
             },
             onSave: draft => { void save(peer, draft); },
-          }) : h('p', { className: 'imqw-muted' }, '选择群聊或联系人后可以编辑。')
-        : settings,
+          }) : h('p', { className: 'imqw-muted' }, '选择群聊或联系人后可以编辑。'),
     ) : null,
     h('nav', { className: 'imqw-small-nav', 'aria-label': '工作台页面' },
       h(Button, { variant: 'outline', size: 'sm', onClick: () => onSmallPage('list') }, '会话列表'),
       h(Button, { variant: 'outline', size: 'sm', onClick: () => onSmallPage('conversation') }, '会话'),
       h(Button, {
-        variant: 'outline', size: 'sm', disabled: !peer && panel === 'closed',
-        onClick: () => panel === 'closed' ? onShowPanel('peer') : onSmallPage('settings'),
-      }, '设置'),
+        variant: 'outline', size: 'sm', disabled: !peer,
+        onClick: () => onToggleSettings(true),
+      }, '会话设置'),
     ),
   );
 }
