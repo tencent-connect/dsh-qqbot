@@ -11,6 +11,8 @@ import { bootstrapGateway } from './gateway/index.ts';
 import type { DshAgentRegistry } from './session/index.ts';
 import { getProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
+import { registerWorkbenchRoutes } from './runtime/workbench-routes.ts';
+import type { WorkbenchRobot } from './shared/workbench-protocol.ts';
 import type { Logger } from './types.ts';
 
 // ── Cordis 插件元数据 ──
@@ -24,6 +26,8 @@ export type { ImQQBotConfig } from './config.ts';
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
+  let robot: WorkbenchRobot | undefined;
+  registerWorkbenchRoutes(ctx, () => robot ? [robot] : []);
 
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
@@ -37,7 +41,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
     // Web 的 URL 延迟输出。绑定编排（路由/呈现/生命周期）在
     // ensureCredentials 的同步阶段即完成，凭据就绪后由异步链接管。
     void ensureCredentials(ctx, { logger, config: { ...config } })
-      .then((credentials): void => {
+      .then(async (credentials) => {
         if (!credentials) {
           // null 包括：扫码取消、手动提交（已另行持久化）、流程失败
           logger.info('扫码绑定流程结束（未获取凭据或已手动配置）');
@@ -56,12 +60,13 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
         }
         logger.warn('凭据未能持久化，本次进程将使用环境变量凭据启动（重启后需重新绑定）');
         // 本 fiber 已激活（ctx 有效），直接以凭据启动网关
-        void bootstrapGateway(ctx, agents, {
+        robot = await bootstrapGateway(ctx, agents, {
           ...config,
           appId: credentials.appId,
           appSecret: credentials.appSecret,
         }, logger).catch((err: unknown) => {
           logger.error(`网关启动失败: ${err instanceof Error ? err.message : String(err)}`);
+          return undefined;
         });
       })
       .catch((err: unknown) => {
@@ -78,5 +83,5 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 
-  await bootstrapGateway(ctx, agents, resolvedConfig, logger);
+  robot = await bootstrapGateway(ctx, agents, resolvedConfig, logger);
 }

@@ -28,6 +28,7 @@ import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '.
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { registerAccountRoutes } from '../runtime/account-routes.ts';
+import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
@@ -55,7 +56,7 @@ export async function bootstrapGateway(
   agents: DshAgentRegistry,
   config: ImQQBotConfig,
   logger: Logger,
-): Promise<void> {
+): Promise<WorkbenchRobot> {
   const manager = new SessionManager(ctx, agents, config, logger);
 
   const accountAccess = new AccountAccessService(config, logger);
@@ -64,6 +65,7 @@ export async function bootstrapGateway(
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
   let active = true;
+  let state: WorkbenchRobot['state'] = 'connecting';
   const isActive = () => active;
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
   const allowTarget = (target: ReplyTarget) => {
@@ -187,6 +189,8 @@ export async function bootstrapGateway(
   // TypeError（profiles 增量安装可能残留旧版 SDK）——降级为跳过监听而非崩溃
   try {
     bot.on('disconnected', (event: GatewayDisconnect) => {
+      if (!active) return;
+      state = event.willReconnect ? 'reconnecting' : 'failed';
       const detail = `code=${event.code}${event.reason ? ` reason=${event.reason}` : ''}`;
       if (event.willReconnect) {
         logger.warn(`Bot disconnected (${detail}), reconnecting...`);
@@ -199,8 +203,11 @@ export async function bootstrapGateway(
   }
 
   bot.on('ready', () => {
+    if (!active) return;
+    state = 'connected';
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
+  bot.on('resumed', () => { if (active) state = 'connected'; });
 
   // ── 富媒体过期清理 ──
   if (config.media.enabled) {
@@ -219,6 +226,8 @@ export async function bootstrapGateway(
     .effect(() => {
       logger.info(`Starting bot (appId=${config.appId})`);
       bot.start().catch((err: unknown) => {
+        if (!active) return;
+        state = 'failed';
         logger.error(`Bot start failed: ${err instanceof Error ? err.message : String(err)}`);
       });
 
@@ -236,4 +245,6 @@ export async function bootstrapGateway(
         if (failed) throw failed.reason;
       };
     }, 'im-qqbot.lifecycle');
+
+  return { appId: config.appId, get state() { return state; } };
 }
