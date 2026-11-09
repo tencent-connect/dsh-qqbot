@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { Context, Service } from '@deepseek-ai/cordis';
 import { ApiError, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import { bindDelivery, guardSender } from '../transport/delivery-context.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
@@ -434,13 +435,122 @@ describe('QuestionChannel.install routing', () => {
   it('uninstall restores the original ask', async () => {
     const sent: SentMessage[] = [];
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
-      ask: async () => ({ answers: [] }),
-    };
+    const original = async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] });
+    const uq = { ask: original };
     ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.__qqQuestionPatched).toBe(true);
+    expect(uq.ask).not.toBe(original);
     ch.uninstall();
-    expect(uq.__qqQuestionPatched).toBeUndefined();
+    expect(uq.ask).toBe(original);
+  });
+
+  it('routes questions for the same OpenID to separate accounts and stops just one', async () => {
+    const makeChannel = (appId: string) => {
+      const record = makeRecord(`qqbot:${appId}:c2c:shared`);
+      const sender = createSender([]);
+      const manager = createManager({
+        findBySessionId: id => id === appId ? record : undefined,
+        getSessionRecord: (_scope, peer) => peer === 'shared' ? record : undefined,
+      });
+      return {
+        sender,
+        channel: new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger()),
+      };
+    };
+    const first = makeChannel('first');
+    const second = makeChannel('second');
+    const original = vi.fn(async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }));
+    const uq = { ask: original };
+    const ctx = { get: () => uq };
+    first.channel.install(ctx);
+    const sharedAsk = uq.ask;
+    second.channel.install(ctx);
+    expect(uq.ask).toBe(sharedAsk);
+
+    const firstAnswer = uq.ask({ questions: [q2('first')], agent: { id: 'first' } });
+    const canceled = expect(firstAnswer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    const secondAnswer = uq.ask({ questions: [q2('second')], agent: { id: 'second' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(first.sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(second.sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    first.channel.uninstall();
+    await canceled;
+    expect(uq.ask).toBe(sharedAsk);
+    expect(first.channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
+    expect(second.channel.tryAnswer('c2c', 'shared', '2')).toBe(true);
+    await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
+
+    await uq.ask({ questions: [q2('local')], agent: { id: 'first' } });
+    expect(original).toHaveBeenCalledTimes(1);
+    second.channel.uninstall();
+    expect(uq.ask).toBe(original);
+  });
+
+  it('does not recreate a pending question when the first send finishes after uninstall', async () => {
+    const record = makeRecord(sessionKey('c2c', 'shared'));
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const sender = { sendMarkdown: vi.fn(() => promise) };
+    const channel = new QuestionChannel(
+      createManager({ findBySessionId: () => record }), sender,
+      { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+    );
+    const uq = { ask: async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }) };
+    channel.install({ get: () => uq });
+    const answer = uq.ask({ questions: [q2()], agent: { id: 'session' } });
+    const canceled = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    channel.uninstall();
+    resolve();
+    await canceled;
+    expect(channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
+  });
+
+  it('shares the question dispatcher between Cordis service proxies', async () => {
+    const hostAsk = vi.fn(async () => ({ answers: [] }));
+    class HostQuestions extends Service {
+      constructor(ctx: Context) { super(ctx, 'userQuestions'); }
+      ask(request: UserQuestionRequest): Promise<UserQuestionResult> {
+        return hostAsk(this.ctx, request);
+      }
+    }
+    const ctx = new Context();
+    const host = ctx.plugin(HostQuestions);
+    await host.await();
+    const record = makeRecord(sessionKey('c2c', 'shared'));
+    const makeChannel = (id: string) => new QuestionChannel(
+      createManager({
+        findBySessionId: session => session === id ? record : undefined,
+        getSessionRecord: () => record,
+      }),
+      createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+    );
+    const first = makeChannel('first');
+    const second = makeChannel('second');
+    const mount = (channel: QuestionChannel) => ctx.plugin(scope => {
+      channel.install(scope);
+      scope.effect(() => () => channel.uninstall());
+    });
+    const firstFiber = mount(first);
+    const secondFiber = mount(second);
+    try {
+      await Promise.all([firstFiber.await(), secondFiber.await()]);
+      await firstFiber.dispose();
+      const service = ctx.get('userQuestions') as HostQuestions;
+      const secondAnswer = service.ask({ questions: [q2('second')], agent: { id: 'second' } });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(second.tryAnswer('c2c', 'shared', '2')).toBe(true);
+      await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
+      expect(hostAsk).not.toHaveBeenCalled();
+      const local = { questions: [q2('local')], agent: { id: 'first' } };
+      await service.ask(local);
+      expect(hostAsk).toHaveBeenCalledWith(expect.anything(), local);
+      await secondFiber.dispose();
+      expect(Object.getOwnPropertyDescriptor(service, 'ask')).toBeUndefined();
+    } finally {
+      await Promise.all([firstFiber.dispose(), secondFiber.dispose()]);
+      await host.dispose();
+    }
   });
 
   it('disables gracefully when the userQuestions service is missing', () => {

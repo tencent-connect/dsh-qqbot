@@ -9,13 +9,13 @@ import { downloadMediaAttachments } from '../transport/attachment.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger, QuotedAttachment, RawAttachment } from '../types.ts';
 
-export function attachmentProcessor(config: ImQQBotConfig, logger: Logger) {
+export function attachmentProcessor(config: ImQQBotConfig, logger: Logger, mediaRoot?: string) {
   return async (ctx: MiddlewareContext, next: () => Promise<void>): Promise<void> => {
     const msg = ctx.message as { attachments?: RawAttachment[] };
 
     try {
       // 当前消息附件
-      const downloaded = await downloadMediaAttachments(msg.attachments, config.media, logger);
+      const downloaded = await downloadMediaAttachments(msg.attachments, config.media, logger, mediaRoot);
       ctx.state.downloadedFiles = downloaded;
 
       // 引用消息附件：转成 RawAttachment 结构复用下载（voice 由 downloadMediaAttachments 自动跳过）
@@ -29,7 +29,7 @@ export function attachmentProcessor(config: ImQQBotConfig, logger: Logger) {
             size: 0,
             url: a.url as string,
           }));
-        const downloadedQuote = await downloadMediaAttachments(rawQuote, config.media, logger);
+        const downloadedQuote = await downloadMediaAttachments(rawQuote, config.media, logger, mediaRoot);
         ctx.state.downloadedQuoteFiles = downloadedQuote;
       }
     } catch (err) {

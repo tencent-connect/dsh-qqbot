@@ -17,6 +17,7 @@ import { createElement, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
+import { RobotAccounts } from './robot-accounts.ts';
 
 export const name = 'im-qqbot-client';
 export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
@@ -92,6 +93,7 @@ function QQBotSettingsSection(): ReactNode {
 function QQBotPage(): ReactNode {
   return createElement('div', { className: 'imqb-pluginPage' },
     createElement('div', { className: 'imqb-pluginPageContent' },
+      createElement(RobotAccounts),
       createElement(QQBotSettingsSection)),
   );
 }

@@ -74,9 +74,9 @@ export function isWithinRoot(filePath: string, root: string): boolean {
 }
 
 /** 路径白名单校验：restrictPaths 关闭时放行任意路径，否则限定 media + cwd + extraRoots */
-export function isPathAllowed(filePath: string, config: SendFileConfig, cwd: string): boolean {
+export function isPathAllowed(filePath: string, config: SendFileConfig, cwd: string, mediaRoot = MEDIA_ROOT): boolean {
   if (!config.restrictPaths) return true;
-  const roots = [MEDIA_ROOT, cwd, ...config.extraRoots];
+  const roots = [mediaRoot, cwd, ...config.extraRoots];
   return roots.some((root) => isWithinRoot(filePath, root));
 }
 

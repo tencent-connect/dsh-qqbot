@@ -36,11 +36,12 @@ export class ModelResolver {
     ctx: Context,
     config: ImQQBotConfig,
     logger?: Logger,
+    prefs?: PrefsStore,
   ) {
     this.ctx = ctx;
     this.config = config;
     this.logger = logger;
-    this.prefs = new PrefsStore(
+    this.prefs = prefs ?? new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
       { onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`) },
     );

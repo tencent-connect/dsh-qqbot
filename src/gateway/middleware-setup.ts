@@ -36,6 +36,7 @@ export function setupMiddlewares(
   logger: Logger,
   replyIds: ReplyIdCache,
   isActive: () => boolean,
+  mediaRoot?: string,
 ): void {
   const stopIfInactive = (ctx: MiddlewareContext): boolean => {
     if (isActive()) return false;
@@ -165,7 +166,7 @@ export function setupMiddlewares(
   }));
 
   // 11.5. 附件下载（file 附件下载到本地，供 @提及 / 工具访问）
-  bot.use(attachmentProcessor(config, logger));
+  bot.use(attachmentProcessor(config, logger, mediaRoot));
 
   // 12. 上下文组装（将 history + quote + sender 组成 envelope）
   bot.use(envelopeFormatter({

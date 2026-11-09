@@ -27,13 +27,11 @@ import { guardSender, guardMedia } from '../transport/delivery-context.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
-import { registerAccountRoutes } from '../runtime/account-routes.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
-import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
-import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool } from '../media/send-file-tool.ts';
+import type { PrefsStore } from '../model/prefs-store.ts';
+import type { SendFileRuntime } from '../media/send-file-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 
 /**
@@ -51,17 +49,24 @@ function dispatchInteraction(event: InteractionEvent, manager: SessionManager): 
   return false;
 }
 
-export async function bootstrapGateway(
+export interface GatewayRuntime extends SendFileRuntime {
+  readonly manager: SessionManager;
+  readonly state: WorkbenchRobot['state'];
+  deactivate(): void;
+}
+
+export function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
   config: ImQQBotConfig,
   logger: Logger,
-): Promise<WorkbenchRobot> {
-  const manager = new SessionManager(ctx, agents, config, logger);
+  accountAccess = new AccountAccessService(config, logger),
+  mediaRoot?: string,
+  prefs?: PrefsStore,
+): GatewayRuntime {
+  const manager = new SessionManager(ctx, agents, config, logger, prefs);
 
-  const accountAccess = new AccountAccessService(config, logger);
   manager.accountAccess = accountAccess;
-  registerAccountRoutes(ctx, accountAccess, () => describeCommands({manager, config, logger}));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
   let active = true;
@@ -94,7 +99,7 @@ export async function bootstrapGateway(
 
   // ── 中间件链 ──
   const replyIds = new ReplyIdCache();
-  setupMiddlewares(bot, config, manager, logger, replyIds, isActive);
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -131,7 +136,7 @@ export async function bootstrapGateway(
   const mediaSender = guardMedia(createDeliveryMedia(bot, replyIds, replyLimiter), ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
-  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
+  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger, mediaRoot);
 
   const outbound = createOutboundHandler(
     manager, sender, config, logger, toolsRegistry, deliverablesDeliverer, turnTracker,
@@ -211,15 +216,8 @@ export async function bootstrapGateway(
 
   // ── 富媒体过期清理 ──
   if (config.media.enabled) {
-    startMediaCleanup(ctx, config.media.ttlHours, logger);
+    startMediaCleanup(ctx, config.media.ttlHours, logger, mediaRoot);
   }
-
-  // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
-  ensureVisionInputModal(config.vision, logger);
-  registerDescribeImageTool(ctx, config.vision, logger);
-
-  // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker, isActive);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
@@ -246,5 +244,9 @@ export async function bootstrapGateway(
       };
     }, 'im-qqbot.lifecycle');
 
-  return { appId: config.appId, get state() { return state; } };
+  return {
+    bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,
+    get state() { return state; },
+    deactivate() { active = false; },
+  };
 }

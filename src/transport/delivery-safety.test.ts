@@ -14,7 +14,7 @@ import type { Logger, ReplyTarget } from '../types.ts';
 import { handleInbound } from './inbound.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { Context } from '@deepseek-ai/cordis';
-import { registerSendFileTool } from '../media/send-file-tool.ts';
+import { registerSendFileTool, type SendFileRuntime } from '../media/send-file-tool.ts';
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -132,39 +132,78 @@ describe('durable delivery identities', () => {
 });
 
 describe('explicit file tool source and replay checks', () => {
-  function tool() {
+  function runtime(appId: string, sessionId: string) {
     const cwd = directory(), file = join(cwd, 'test.txt'); writeFileSync(file, 'synthetic delivery');
+    const manager = { findBySessionId: () => undefined, deliveryAddress: (id: string) => id === sessionId ? target : undefined };
+    const raw = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'fixture' } }) };
+    let eligible = true, active = true, admitted = true;
+    const descriptor: SendFileRuntime = {
+      bot: guardMedia(raw, new DeliveryLedger()), manager,
+      config: { appId, cwd, sendFile: { restrictPaths: true, extraRoots: [] } },
+      targets: { targetFor: () => eligible ? target : undefined },
+      active: () => active,
+      allowTarget: () => admitted,
+    };
+    return { file, raw, descriptor, sessionId, block: () => { eligible = false; }, stop: () => { active = false; }, revoke: () => { admitted = false; } };
+  }
+
+  function tool(...accounts: ReturnType<typeof runtime>[]) {
     const registry = { register: vi.fn() };
     const ctx = { get: () => registry } as unknown as Context;
-    const manager = { findBySessionId: (id: string) => id === 'qq-session' ? {} : undefined, deliveryAddress: () => undefined } as unknown as SessionManager;
-    const raw = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'fixture' } }) };
-    let eligible = true;
-    registerSendFileTool(ctx, guardMedia(raw, new DeliveryLedger()), manager,
-      { cwd, sendFile: { restrictPaths: true, extraRoots: [] } } as ImQQBotConfig, logger,
-      { targetFor: () => eligible ? target : undefined }, () => true);
+    registerSendFileTool(ctx, {
+      runtimes: () => accounts.map(account => account.descriptor).filter(descriptor => descriptor.active()),
+      ownerOf: id => accounts.find(account => account.sessionId === id)?.descriptor.config.appId,
+      defaultAppId: () => accounts.length === 1 ? accounts[0]?.descriptor.config.appId : undefined,
+    }, logger);
     const definition = registry.register.mock.calls[0]?.[0] as { execute(args: unknown, exec: { agent: { id: string }; callId?: string; signal: AbortSignal }): Promise<unknown> };
-    const execute = (callId: string | undefined, agentId = 'qq-session') => definition.execute({ file_path: file, target: 'group:explicit-target' }, { agent: { id: agentId }, callId, signal: new AbortController().signal });
-    return { execute, raw, block: () => { eligible = false; } };
+    return (file: string, callId: string | undefined, agentId: string) => definition.execute(
+      { file_path: file, target: 'group:explicit-target' },
+      { agent: { id: agentId }, callId, signal: new AbortController().signal },
+    );
   }
 
   it('retains explicit targets but sends a repeated native call only once', async () => {
-    const f = tool();
-    await expect(f.execute('native-call')).resolves.toMatchObject({ target: 'group:explicit-target' });
-    await expect(f.execute('native-call')).rejects.toThrow('already submitted');
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    await expect(execute(f.file, 'native-call', f.sessionId)).resolves.toMatchObject({ target: 'group:explicit-target' });
+    await expect(execute(f.file, 'native-call', f.sessionId)).rejects.toThrow('already submitted');
     expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
   });
 
   it('an explicit target cannot override an ineligible QQ source or missing call identity', async () => {
-    const f = tool();
-    await expect(f.execute(undefined)).rejects.toThrow('调用身份');
-    f.block(); await expect(f.execute('blocked')).rejects.toThrow('当前来源');
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    await expect(execute(f.file, undefined, f.sessionId)).rejects.toThrow('调用身份');
+    f.block();
+    await expect(execute(f.file, 'blocked', f.sessionId)).rejects.toThrow('当前来源');
     expect(f.raw.sendFile).not.toHaveBeenCalled();
   });
 
   it('preserves separately authorized explicit file calls outside a QQ Session', async () => {
-    const f = tool(); f.block();
-    await expect(f.execute('external-explicit-call', 'native-web-session')).resolves.toMatchObject({ target: 'group:explicit-target' });
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    f.block();
+    await expect(execute(f.file, 'external-explicit-call', 'native-web-session')).resolves.toMatchObject({ target: 'group:explicit-target' });
     expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
+    f.revoke();
+    await expect(execute(f.file, 'revoked-call', 'native-web-session')).rejects.toThrow('目标不允许');
+    expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses session ownership with identical target and call IDs, even after one bot stops', async () => {
+    const first = runtime('app-a', 'session-a');
+    const second = runtime('app-b', 'session-b');
+    const execute = tool(first, second);
+    await Promise.all([
+      execute(first.file, 'same-call', first.sessionId),
+      execute(second.file, 'same-call', second.sessionId),
+    ]);
+    expect(first.raw.sendFile).toHaveBeenCalledTimes(1);
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
+
+    first.stop();
+    await expect(execute(second.file, 'stopped', first.sessionId)).rejects.toThrow('无法确定启用的 QQ 账号');
+    await expect(execute(second.file, 'ambiguous', 'native-web-session')).rejects.toThrow('无法确定启用的 QQ 账号');
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
+    await expect(execute(second.file, 'still-running', second.sessionId)).resolves.toMatchObject({ target: 'group:explicit-target' });
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(2);
   });
 });
 

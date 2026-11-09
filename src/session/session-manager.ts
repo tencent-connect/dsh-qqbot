@@ -17,6 +17,7 @@ import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
 import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import type { PrefsStore } from '../model/prefs-store.ts';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
 import { mkdirSync } from 'node:fs';
 import { resolveAgentCwd } from '../shared/dirs.ts';
@@ -102,6 +103,7 @@ export class SessionManager {
     agents: DshAgentRegistry,
     config: ImQQBotConfig,
     logger: Logger,
+    prefs?: PrefsStore,
   ) {
     this.ctx = ctx;
     this.agents = agents;
@@ -109,7 +111,7 @@ export class SessionManager {
     this.logger = logger;
     this.host = createHostAdapter(ctx, logger);
     this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
-    this.modelResolver = new ModelResolver(ctx, config, logger);
+    this.modelResolver = new ModelResolver(ctx, config, logger, prefs);
 
     this.evictor = new IdleEvictor(
       this.sessions,
