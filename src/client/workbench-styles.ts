@@ -134,8 +134,24 @@ button.imqw-message-action { background: transparent; border: 0; padding: 0 4px;
 button.imqw-message-action:hover, button.imqw-message-action:focus-visible { background: var(--dsw-alias-bg-layer-3); opacity: 1; }
 .imqw-message-jump { display: flex; justify-content: center; }
 .imqw-composer { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 9px; display: grid; gap: 4px; }
-.imqw-composer-input { display: flex; gap: 8px; align-items: flex-end; }
-.imqw-composer-input textarea { box-sizing: border-box; flex: 1; min-width: 0; min-height: 52px; max-height: 160px; resize: vertical; background: var(--dsw-alias-bg-layer-2); color: inherit; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 7px 9px; font: inherit; }
+.imqw-composer-input { display: flex; gap: 8px; align-items: center; }
+.imqw-composer-input textarea {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  max-height: 160px;
+  field-sizing: content;
+  resize: vertical;
+  background: var(--dsw-alias-bg-layer-2);
+  color: inherit;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  padding: 5px 9px;
+  font: inherit;
+  line-height: 20px;
+}
+.imqw-composer-input button[type='submit'] { flex: none; min-height: 32px; }
 .imqw-composer-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 14px; font-size: 11px; }
 .imqw-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .imqw-muted {

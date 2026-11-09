@@ -110,7 +110,7 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
   return h('form', { className: 'imqw-composer', onSubmit: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); send(); } },
     h('div', { className: 'imqw-composer-input' },
       h('textarea', {
-        ref: input, 'aria-label': '发送到 QQ 的消息', rows: 2, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
+        ref: input, 'aria-label': '发送到 QQ 的消息', rows: 1, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
         value: draft, readOnly: !!operation, disabled: !!disabledReason,
         placeholder: disabledReason || `以 ${robotName} 的身份发送到 QQ`,
         onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit(event.currentTarget.value); setStatus(''); }, onKeyDown,
