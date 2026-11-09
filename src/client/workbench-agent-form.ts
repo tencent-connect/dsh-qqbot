@@ -1,27 +1,30 @@
-import { createElement as h, useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { ChatScope } from '../types.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import {
   defaultModelLabel, defaultPresetLabel, findModel, modelChoiceId,
   parseAgentPresets, parseModelCatalog, parsePermissionCatalog,
-  type ModelDirectory, type PermissionChoice, type PresetChoice, type SelectorSource,
+  type ModelDirectory, type PermissionDirectory, type PresetChoice, type SelectorSource,
 } from './host-selectors.ts';
-import { QQSelect } from './qq-select.ts';
+import { QQSelect, type QQSelectOption } from './qq-select.ts';
 
 export interface AgentFormSource extends SelectorSource {
   workspaces(): readonly { path: string; title: string }[];
+  addWorkspace?(): Promise<string | null>;
+  localizePreset?(id: string): string | undefined;
+  localizePermission?(id: string, name: string): string | undefined;
 }
 
 interface Catalog {
   models: ModelDirectory | null;
   presets: PresetChoice[];
-  permissions: PermissionChoice[];
+  permissions: PermissionDirectory;
   errors: string[];
   loading: boolean;
 }
 
-const empty: Catalog = { models: null, presets: [], permissions: [], errors: [], loading: true };
+const empty: Catalog = { models: null, presets: [], permissions: { options: [] }, errors: [], loading: true };
 
 function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
   const [catalog, setCatalog] = useState<Catalog>(empty);
@@ -39,8 +42,8 @@ function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
     };
     void Promise.allSettled([
       read(source?.modelCatalog).then(parseModelCatalog),
-      read(source?.listAgentPresets).then(parseAgentPresets),
-      read(source?.permissionCatalog).then(parsePermissionCatalog),
+      read(source?.listAgentPresets).then(response => parseAgentPresets(response, source?.localizePreset)),
+      read(source?.permissionCatalog).then(response => parsePermissionCatalog(response, source?.localizePermission)),
     ]).then(([models, presets, permissions]) => {
       if (!active) return;
       clearTimeout(timeout);
@@ -63,71 +66,99 @@ function useCatalog(source?: AgentFormSource): [Catalog, () => void] {
 
 interface AgentFieldsProps {
   settings: WorkbenchAgentSettings;
-  source?: AgentFormSource;
-  scope?: ChatScope;
   disabled: boolean;
-  onChange: (next: WorkbenchAgentSettings) => void;
+  onChange: (patch: Partial<WorkbenchAgentSettings>) => void;
 }
 
-export function WorkbenchAgentFields({ settings, source, scope, disabled, onChange }: AgentFieldsProps): ReactNode {
+const ADD_WORKSPACE = 'add-workspace';
+
+export function WorkbenchAgentFields({ settings, source, disabled, onChange }: AgentFieldsProps & { source?: AgentFormSource }): ReactNode {
   const [catalog, retry] = useCatalog(source);
-  const patch = (change: Partial<WorkbenchAgentSettings>) => onChange({ ...settings, ...change });
+  const [adding, setAdding] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState('');
+  const workspaceChange = useRef<typeof onChange | undefined>(undefined);
+  useLayoutEffect(() => {
+    workspaceChange.current = onChange;
+    return () => { workspaceChange.current = undefined; };
+  }, [onChange]);
+  const addWorkspace = source?.addWorkspace;
+  const pickWorkspace = async (): Promise<void> => {
+    if (!addWorkspace || adding) return;
+    setAdding(true);
+    setWorkspaceError('');
+    try {
+      const cwd = await addWorkspace();
+      if (cwd) workspaceChange.current?.({ cwd });
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : '无法添加工作区。');
+    } finally {
+      setAdding(false);
+    }
+  };
   const models = catalog.models?.groups.flatMap(group => group.models.map(model => ({
-    model, option: { value: modelChoiceId(model), label: `${group.name} / ${model.name}` },
+    model, option: { value: modelChoiceId(model), label: `${group.name} / ${model.name}`, description: model.description },
   }))) ?? [];
   const route = settings.model ?? catalog.models?.defaultModel;
   const model = route && findModel(catalog.models, route);
+  const defaultEffortName = model?.efforts.find(effort => effort.id === model.defaultEffort)?.name;
   const workspaces = source?.workspaces() ?? [];
-  const select = (label: string, value: string, options: Parameters<typeof QQSelect>[0]['options'], onChange: (value: string) => void) =>
-    h('div', { className: 'imqw-field' }, h('span', null, label), h(QQSelect, { label, value, options, disabled, onChange }));
+  const permission = catalog.permissions.options.find(option => option.value === catalog.permissions.defaultPreset);
+  const permissionLabel = permission?.name ?? catalog.permissions.defaultPreset;
+  const select = (label: string, value: string, options: readonly QQSelectOption[], onSelect: (value: string) => void, pending = false) =>
+    h('div', { className: 'imqw-field' }, h('span', null, label),
+      h(QQSelect, { label, value, options, disabled: disabled || pending, onChange: onSelect }));
   return h('div', { className: 'imqw-agent-fields' },
-    h('section', { className: 'imqw-session-settings', 'aria-label': 'Agent 与工作区' },
-      h('h3', null, 'Agent 与工作区'),
-      scope ? h('p', { className: 'imqw-muted' }, '模型、推理强度、预设、工作区和执行权限在下次新建 DSH Session 时生效。当前 Session 可在 DSH 原生页面操作。') : null,
-      catalog.loading ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取 DSH 目录…') : null,
-      catalog.errors.length ? h('div', { className: 'imqw-actions' }, h('p', { className: 'imqb-error', role: 'alert' }, catalog.errors.join(' · ')),
-        h(Button, { type: 'button', variant: 'outline', size: 'sm', onClick: retry }, '重试目录')) : null,
-      h('div', { className: 'imqw-agent-grid' },
-        select('模型', settings.model ? modelChoiceId(settings.model) : '', [{ value: '', label: defaultModelLabel(catalog.models) }, ...models.map(entry => entry.option)], id => {
-          const choice = models.find(entry => entry.option.value === id)?.model;
-          patch({ model: choice ? { provider: choice.provider, model: choice.model } : null, reasoningEffort: '' });
-        }),
-        select('推理强度', settings.reasoningEffort, [
-          { value: '', label: '模型默认' },
-          ...(model?.efforts ?? []).map(effort => ({ value: effort.id, label: effort.name, description: effort.description })),
-        ], reasoningEffort => patch({ reasoningEffort })),
-        select('Agent 预设', settings.preset, [{ value: '', label: defaultPresetLabel(catalog.presets) }, ...catalog.presets.map(preset => ({
-          value: preset.id, label: preset.name, disabled: preset.broken !== undefined, description: preset.broken ?? preset.description,
-        }))], preset => patch({ preset })),
-        select('工作区', settings.cwd, [{ value: '', label: '机器人默认目录' }, ...workspaces.map(workspace => ({
-          value: workspace.path, label: workspace.title === 'default-workspace' ? '默认工作区' : workspace.title || workspace.path,
-          description: workspace.path,
-        })), ...(settings.cwd && !workspaces.some(workspace => workspace.path === settings.cwd)
-          ? [{ value: settings.cwd, label: settings.cwd, description: '已配置的工作目录' }] : [])], cwd => patch({ cwd })),
-        select('执行权限', settings.permission, [{ value: '', label: 'DSH 默认权限' }, ...catalog.permissions.map(permission => ({
-          value: permission.value, label: permission.name, description: permission.description,
-        }))], permission => patch({ permission })),
-      ),
-    ),
-    h('section', { className: 'imqw-session-settings', 'aria-label': '提示词与 QQ 回复' },
-      h('h3', null, '提示词与 QQ 回复'),
-      scope ? h('p', { className: 'imqw-muted' }, '补充提示词在后续请求组装时读取。QQ 输出选项从下一轮回复开始使用。') : null,
-      ...(['group', 'c2c'] as const).filter(kind => !scope || kind === scope).map(kind => {
-        const key = kind === 'group' ? 'groupPrompt' : 'directPrompt';
-        return h('label', { className: 'imqw-field', key },
-          h('span', null, kind === 'group' ? '群聊补充提示词' : '私聊补充提示词'),
-          h('textarea', { value: settings[key], rows: 3, maxLength: 80_000, disabled,
-            onChange: (event: ChangeEvent<HTMLTextAreaElement>) => patch({ [key]: event.currentTarget.value }),
-          }));
+    catalog.loading ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取 DSH 目录…') : null,
+    catalog.errors.length ? h('div', { className: 'imqw-actions' }, h('p', { className: 'imqb-error', role: 'alert' }, catalog.errors.join(' · ')),
+      h(Button, { type: 'button', variant: 'outline', size: 'sm', onClick: retry }, '重试目录')) : null,
+    h('div', { className: 'imqw-model-fields' },
+      select('模型', settings.model ? modelChoiceId(settings.model) : '', [{ value: '', label: defaultModelLabel(catalog.models) }, ...models.map(entry => entry.option)], id => {
+        const choice = models.find(entry => entry.option.value === id)?.model;
+        onChange({ model: choice ? { provider: choice.provider, model: choice.model } : null, reasoningEffort: '' });
       }),
-      ...([
-        ['streaming', '流式输出', '仅带有效回复目标的 QQ 私聊使用流式。'],
-        ['showToolResults', '显示工具调用结果', '控制 QQ 上的成功结果预览，工具错误仍会提示。'],
-      ] as const).filter(([key]) => key !== 'streaming' || scope !== 'group').map(([key, label, hint]) =>
-        h('div', { className: 'imqw-receiving', key },
-          h('div', null, h('strong', null, label), h('p', { className: 'imqw-muted' }, hint)),
-          h(Switch, { label, checked: settings[key], disabled, onChange: value => patch({ [key]: value }) }),
-        )),
+      model?.efforts.length || settings.reasoningEffort ? select('推理强度', settings.reasoningEffort, [
+        { value: '', label: defaultEffortName ? `模型默认 · ${defaultEffortName}` : '模型默认' },
+        ...(model?.efforts ?? []).map(effort => ({ value: effort.id, label: effort.name, description: effort.description })),
+      ], reasoningEffort => onChange({ reasoningEffort })) : null,
     ),
+    select('Agent 预设', settings.preset, [{ value: '', label: defaultPresetLabel(catalog.presets) }, ...catalog.presets.map(preset => ({
+      value: preset.id, label: preset.name, disabled: preset.broken !== undefined, description: preset.broken ?? preset.description,
+    }))], preset => onChange({ preset })),
+    select('工作区', settings.cwd, [{ value: '', label: '机器人默认目录' }, ...workspaces.map(workspace => ({
+      value: workspace.path, label: workspace.title === 'default-workspace' ? '默认工作区' : workspace.title || workspace.path,
+      description: workspace.path,
+    })), ...(settings.cwd && !workspaces.some(workspace => workspace.path === settings.cwd)
+      ? [{ value: settings.cwd, label: settings.cwd, description: '已配置的工作目录' }] : []),
+    ...(addWorkspace ? [{ value: ADD_WORKSPACE, label: '＋ 添加工作区（选择文件夹…）' }] : [])], cwd => {
+      setWorkspaceError('');
+      if (cwd === ADD_WORKSPACE) void pickWorkspace();
+      else onChange({ cwd });
+    }, adding),
+    workspaceError ? h('p', { className: 'imqb-error', role: 'alert' }, workspaceError) : null,
+    select('执行权限', settings.permission, [{ value: '', label: permissionLabel ? `DSH 默认 · ${permissionLabel}` : 'DSH 默认权限' },
+      ...catalog.permissions.options.map(option => ({
+        value: option.value, label: option.name, description: option.description,
+      }))], permission => onChange({ permission })),
+  );
+}
+
+export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: AgentFieldsProps & { scope?: ChatScope }): ReactNode {
+  return h('div', { className: 'imqw-agent-fields' },
+    ...(['group', 'c2c'] as const).filter(kind => !scope || kind === scope).map(kind => {
+      const key = kind === 'group' ? 'groupPrompt' : 'directPrompt';
+      return h('label', { className: 'imqw-field', key },
+        h('span', null, kind === 'group' ? '群聊补充提示词' : '私聊补充提示词'),
+        h('textarea', { value: settings[key], rows: 3, maxLength: 80_000, disabled,
+          onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ [key]: event.currentTarget.value }),
+        }));
+    }),
+    ...([
+      ['streaming', '私聊流式输出', '仅被动回复支持流式'],
+      ['showToolResults', '显示工具调用结果', '关闭后仍提示工具错误'],
+    ] as const).filter(([key]) => key !== 'streaming' || scope !== 'group').map(([key, label, hint]) =>
+      h('div', { className: 'imqw-receiving', key },
+        h('span', { title: hint }, label),
+        h(Switch, { label, checked: settings[key], disabled, onChange: value => onChange({ [key]: value }) }),
+      )),
   );
 }

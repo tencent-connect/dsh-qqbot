@@ -2,7 +2,7 @@ import { createElement as h, useEffect, useState, type FormEvent, type ReactNode
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { WORKBENCH_DEFAULTS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { fetchJson, HttpError } from './http.ts';
-import { WorkbenchAgentFields, type AgentFormSource } from './workbench-agent-form.ts';
+import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
 
 export function readDefaults(appId: string, signal?: AbortSignal): Promise<WorkbenchDefaults> {
   return fetchJson<WorkbenchDefaults>(`${WORKBENCH_DEFAULTS_PATH}?${new URLSearchParams({ appId })}`, { cache: 'no-store', signal });
@@ -50,9 +50,20 @@ export function WorkbenchDefaultsForm({ appId, source }: { appId: string; source
       setBusy(false);
     }
   };
-  return h('form', { className: 'imqw-form', onSubmit: save },
-    h('p', { className: 'imqw-muted' }, '首次接入的群聊和私聊会复制这台机器人的默认值。已接入的对话保留各自设置。'),
-    settings ? h(WorkbenchAgentFields, { settings, source, disabled: busy, onChange: value => { setSettings(value); setSaved(false); } }) : null,
+  const change = (patch: Partial<WorkbenchDefaults['settings']>): void => {
+    setSettings(current => current && { ...current, ...patch });
+    setSaved(false);
+  };
+  return h('form', { className: 'imqw-form imqw-defaults-form', onSubmit: save },
+    h('p', { className: 'imqw-muted' }, '仅用于首次接入的群聊和私聊。'),
+    settings ? h('section', { className: 'imqw-defaults-section', 'aria-label': 'Agent 基本设置' },
+      h('h3', null, 'Agent 基本设置'),
+      h(WorkbenchAgentFields, { settings, source, disabled: busy, onChange: change }),
+    ) : null,
+    settings ? h('section', { className: 'imqw-defaults-section', 'aria-label': 'QQ 回复' },
+      h('h3', null, 'QQ 回复'),
+      h(WorkbenchReplyFields, { settings, disabled: busy, onChange: change }),
+    ) : null,
     error ? h('p', { className: 'imqb-error', role: 'alert' }, error) : null,
     saved ? h('p', { className: 'imqw-muted', role: 'status' }, '默认设置已保存。') : null,
     settings ? h('footer', { className: 'imqw-actions imqw-savebar' },

@@ -40,9 +40,10 @@ export interface PresetChoice {
 
 /** Actual permission options declared by the current Host. */
 export interface PermissionChoice { value: string; name: string; description?: string }
+export interface PermissionDirectory { options: PermissionChoice[]; defaultPreset?: string }
 
 /** Validate the Host catalog once; no UI-only permission ids are introduced. */
-export function parsePermissionCatalog(response: unknown): PermissionChoice[] {
+export function parsePermissionCatalog(response: unknown, localize?: (id: string, name: string) => string | undefined): PermissionDirectory {
   const value = remoteValue(response);
   if (!Array.isArray(value.options)) throw new Error('权限目录返回格式无效。');
   const options: PermissionChoice[] = [];
@@ -52,9 +53,10 @@ export function parsePermissionCatalog(response: unknown): PermissionChoice[] {
     const id = text(option?.value);
     if (option === undefined || id === undefined || seen.has(id)) throw new Error('权限目录含无效或重复的条目。');
     seen.add(id);
-    options.push({ value: id, name: text(option.name) ?? id, ...(text(option.description) === undefined ? {} : { description: text(option.description) }) });
+    const name = text(option.name) ?? id;
+    options.push({ value: id, name: localize?.(id, name) ?? name, description: text(option.description) });
   }
-  return options;
+  return { options, defaultPreset: text(value.defaultPreset) };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -124,7 +126,7 @@ export function parseModelCatalog(response: unknown): ModelDirectory {
   };
 }
 
-export function parseAgentPresets(response: unknown): PresetChoice[] {
+export function parseAgentPresets(response: unknown, localize?: (id: string) => string | undefined): PresetChoice[] {
   const value = remoteValue(response);
   if (!Array.isArray(value.presets)) throw new Error('Agent 预设目录返回格式无效。');
   const presets: PresetChoice[] = [];
@@ -135,7 +137,7 @@ export function parseAgentPresets(response: unknown): PresetChoice[] {
     if (preset === undefined || id === undefined || seen.has(id)) throw new Error('Agent 预设目录含无效或重复的条目。');
     if (preset.broken !== undefined && typeof preset.broken !== 'string') throw new Error('Agent 预设状态格式无效。');
     seen.add(id);
-    presets.push({ id, name: text(preset.name) ?? id, description: text(preset.description), broken: typeof preset.broken === 'string' ? preset.broken : undefined, isDefault: preset.isDefault === true });
+    presets.push({ id, name: text(preset.name) ?? localize?.(id) ?? id, description: text(preset.description), broken: typeof preset.broken === 'string' ? preset.broken : undefined, isDefault: preset.isDefault === true });
   }
   return presets;
 }

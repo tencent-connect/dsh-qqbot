@@ -172,6 +172,41 @@ export function apply(ctx: Context): void {
         remote = (scope as unknown as { remote: AgentRemotes }).remote;
         return () => { remote = undefined; };
       });
+      let addWorkspace: AgentFormSource['addWorkspace'];
+      void ctxInject.call(pageCtx, ['workspaces', 'uiWorkspace'], scope => {
+        const { workspaces, uiWorkspace } = scope as unknown as {
+          uiWorkspace: { pickDirectory?(): Promise<string | null> };
+          workspaces: { create?(input: { path: string }): Promise<{ path: string }> };
+        };
+        if (!uiWorkspace.pickDirectory || !workspaces.create) return undefined;
+        const pickDirectory = uiWorkspace.pickDirectory.bind(uiWorkspace);
+        const createWorkspace = workspaces.create.bind(workspaces);
+        addWorkspace = async () => {
+          const path = await pickDirectory();
+          if (!path) return null;
+          return (await createWorkspace({ path })).path;
+        };
+        return () => { addWorkspace = undefined; };
+      });
+      let hostLocale: { bind(namespace: string): (key: string) => string } | undefined;
+      void ctxInject.call(pageCtx, ['locale'], scope => {
+        hostLocale = (scope as unknown as { locale: typeof hostLocale }).locale;
+        return () => { hostLocale = undefined; };
+      });
+      const hostLabel = (namespace: string, key: string): string | undefined => {
+        const label = hostLocale?.bind(namespace)(key);
+        return label && label !== key && label !== `${namespace}.${key}` ? label : undefined;
+      };
+      const presetNameKeys = new Map([
+        ['standard', 'presetStandardName'], ['ptc', 'presetPtcName'],
+        ['minimal', 'presetMinimalName'], ['cordis', 'presetCordisName'],
+      ]);
+      const permissionLabels = new Map([
+        ['read-only', { key: 'preset.readOnly', nativeName: 'Read Only' }],
+        ['workspace-write', { key: 'preset.workspaceWrite', nativeName: 'Workspace Write' }],
+        ['danger-full-access', { key: 'preset.fullAccess', nativeName: 'Full access' }],
+        ['auto', { key: 'auto.label', nativeName: 'Auto review' }],
+      ]);
       const getRemote = (): AgentRemotes => {
         if (!remote) throw new Error('DSH 目录服务尚未就绪。');
         return remote;
@@ -180,6 +215,16 @@ export function apply(ctx: Context): void {
         modelCatalog: () => getRemote().session.modelCatalog(),
         listAgentPresets: () => getRemote().agentPresets.list(),
         permissionCatalog: () => getRemote().permissionPresets.catalog(),
+        localizePreset: id => {
+          const key = presetNameKeys.get(id);
+          return key && hostLabel('settings.agentPreset', key);
+        },
+        localizePermission: (id, name) => {
+          const builtin = permissionLabels.get(id);
+          return builtin && (id === name || name === builtin.nativeName)
+            ? hostLabel('permission.access', builtin.key) : undefined;
+        },
+        get addWorkspace() { return addWorkspace; },
         workspaces: () => (pageCtx.get('workspaces') as {
           list?: { getSnapshot(): { items: readonly { path: string; title: string }[] } };
         } | undefined)?.list?.getSnapshot().items ?? [],
