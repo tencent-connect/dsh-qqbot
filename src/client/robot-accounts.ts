@@ -1,5 +1,5 @@
 import { createElement as h, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, IconPlusOutlineRegular, Input, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconPlusOutlineRegular, IconSettingsOutlineRegular, Input, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_ROBOTS_PATH,
   type WorkbenchRobot,
@@ -9,7 +9,7 @@ import {
 import { QQ_BOT_LOGO_PATH } from './bind-page.ts';
 import { fetchJson, HttpError } from './http.ts';
 
-const STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
+export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
   connecting: '连接中', connected: '已连接', reconnecting: '重连中', failed: '连接失败', disabled: '已停用',
 };
 
@@ -36,7 +36,7 @@ const EMPTY_DRAFT: Draft = {
   appId: '', alias: '', appSecret: '', groupMode: 'allowlist', c2cMode: 'allowlist', groupAllow: '', c2cAllow: '',
 };
 
-function accountName(robot: WorkbenchRobot): string {
+export function accountName(robot: WorkbenchRobot): string {
   return robot.alias || (robot.primary ? '主机器人' : `机器人 ${robot.appId}`);
 }
 
@@ -126,10 +126,21 @@ function AccessField({ scope, mode, allow, disabled, onMode, onAllow }: {
 export interface RobotAccountsProps {
   selectedAppId?: string;
   onSelect?: (appId: string) => void;
-  onRobotsChange?: (robots: readonly WorkbenchRobot[]) => void;
+  workbench?: {
+    collapsed: boolean;
+    onToggleCollapse: () => void;
+    onOpenSettings: (appId: string) => void;
+    onCloseSettings: () => void;
+    render: (view: {
+      robots: readonly WorkbenchRobot[] | null;
+      unavailable: boolean;
+      rail: ReactNode;
+      accountSettings: ReactNode;
+    }) => ReactNode;
+  };
 }
 
-export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: RobotAccountsProps = {}): ReactNode {
+export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccountsProps = {}): ReactNode {
   const [robots, setRobots] = useState<readonly WorkbenchRobot[] | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -144,10 +155,6 @@ export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: Robot
   const formId = useId();
 
   useEffect(() => () => { mutation.current?.abort(); mutation.current = null; }, []);
-  useEffect(() => {
-    if (robots !== null) onRobotsChange?.(robots);
-  }, [robots, onRobotsChange]);
-
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -196,7 +203,13 @@ export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: Robot
           ? list.map(item => item.appId === robot.appId ? robot : item)
           : [...list, robot];
       });
-      if (editing) setEditor(null);
+      if (editing) {
+        if (editor?.kind === 'edit' && workbench) setEditor(editRobot(robot));
+        else setEditor(null);
+      } else if (editor?.kind === 'edit' && editor.baseline.appId === robot.appId
+        && editor.baseline.revision === patch.revision) {
+        setEditor({ ...editor, baseline: robot });
+      }
     } catch (error) {
       if (controller.signal.aborted) return;
       const conflict = error instanceof HttpError && error.status === 409;
@@ -208,13 +221,12 @@ export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: Robot
       if (conflict) setReload(value => value + 1);
     } finally {
       if (mutation.current === controller) {
+        generation.current++;
         mutation.current = null;
         setBusy(false);
       }
     }
   };
-
-  if (unavailable || (robots === null && !loadError)) return null;
 
   const startEdit = (next: Editor): void => {
     setEditor(next);
@@ -234,45 +246,24 @@ export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: Robot
     }))
   );
 
-  return h('section', { className: 'imqb-card imqr-card', 'aria-label': '机器人账号' },
-    h('style', null, STYLES),
-    h('div', { className: 'imqr-header' },
-      h('h2', { className: 'imqb-status-title' }, '机器人账号'),
-      h(Button, {
-        size: 'sm', variant: 'outline', type: 'button', icon: h(IconPlusOutlineRegular, { size: 16 }),
-        disabled: busy || robots === null,
-        onClick: () => startEdit({ kind: 'add', draft: { ...EMPTY_DRAFT } }),
-      }, '添加机器人')),
-    loadError ? h('p', { className: 'imqb-error', role: 'alert' }, loadError) : null,
-    actionError ? h('p', { className: 'imqb-error', role: 'alert' }, actionError) : null,
-    robots?.length === 0 ? h('p', { className: 'imqb-status-sub' }, '还没有机器人。可在下方扫码绑定主机器人，也可以手动添加账号。') : null,
-    robots?.map(robot => {
-      const name = accountName(robot);
-      const label = h('span', { className: 'imqb-status-title imqr-name' }, name);
-      return h('div', { className: 'imqr-row', key: robot.appId, 'data-selected': selectedAppId === robot.appId || undefined },
-        h('svg', { width: 24, height: 24, viewBox: '0 0 24 24', fill: 'currentColor', 'aria-hidden': true },
-          h('path', { d: QQ_BOT_LOGO_PATH })),
-        h('div', { className: 'imqb-status-meta' },
-          onSelect ? h('button', { className: 'imqr-select', type: 'button', onClick: () => onSelect(robot.appId), 'aria-pressed': selectedAppId === robot.appId }, label) : label,
-          h('span', { className: 'imqb-status-sub' }, `AppID ${robot.appId} · ${STATE_LABELS[robot.state]}`)),
-        h('div', { className: 'imqr-actions' },
-          h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: busy, onClick: () => startEdit(editRobot(robot)), 'aria-label': `设置${name}` }, '设置'),
-          h(Switch, { checked: robot.enabled, label: `启用${name}`, disabled: busy, onChange: enabled => {
-            void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
-          } })),
-      );
-    }),
-    editor === null ? null : h(Modal, {
-      open: true, closeLabel: '关闭', onClose: () => { if (!busy) setEditor(null); },
-      title: editor.kind === 'add' ? '添加 QQ 机器人' : `设置${accountName(editor.baseline)}`,
-      description: editor.kind === 'add'
-        ? '保存后连接此机器人。私聊和群聊默认使用空白名单。'
-        : editor.baseline.primary ? '主机器人的凭据和访问权限在原绑定设置中管理。' : '访问规则仅适用于此机器人。填写新的 AppSecret 后会重新连接。',
-      className: 'imqr-modal',
-      footer: h('div', { className: 'imqr-footer' },
-        h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: busy, onClick: () => setEditor(null) }, '取消'),
-        h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave }, busy ? '保存中…' : '保存')),
-    }, h('form', {
+  const closeEditor = (): void => {
+    if (busy) return;
+    setEditor(null);
+    if (editor?.kind === 'edit') workbench?.onCloseSettings();
+  };
+  const openSettings = (robot: WorkbenchRobot): void => {
+    if (editor?.kind !== 'edit' || editor.baseline.appId !== robot.appId) startEdit(editRobot(robot));
+    workbench?.onOpenSettings(robot.appId);
+  };
+  const footer = h('div', { className: 'imqr-footer' },
+    h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: busy, onClick: closeEditor }, '取消'),
+    h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave }, busy ? '保存中…' : '保存'));
+  const description = editor?.kind === 'add'
+    ? '保存后连接此机器人。私聊和群聊默认使用空白名单。'
+    : editor?.baseline.primary
+      ? '主机器人的凭据和访问权限在原绑定设置中管理。'
+      : '访问规则仅适用于此机器人。填写新的 AppSecret 后会重新连接。';
+  const form = editor === null ? null : h('form', {
       id: formId, className: 'imqr-form', onSubmit: (event: FormEvent) => {
         event.preventDefault();
         if (canSave) void save(patch, true);
@@ -300,8 +291,82 @@ export function RobotAccounts({ selectedAppId, onSelect, onRobotsChange }: Robot
         } }, '合并到最新配置')) : null,
       editError && !stale ? h('p', { className: 'imqb-error', role: 'alert' }, editError) : null,
       rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, '草稿已合并，请核对后保存。') : null,
-    )),
   );
+  const inlineEditor = workbench && editor?.kind === 'edit';
+  const accountSettings = inlineEditor && editor?.kind === 'edit' ? h('div', { className: 'imqr-inline' },
+    h('p', { className: 'imqb-status-sub' }, description),
+    h('div', { className: 'imqr-inline-state' },
+      h(Switch, {
+        checked: current?.enabled ?? editor.baseline.enabled,
+        label: '启用机器人', disabled: busy,
+        onChange: enabled => {
+          const robot = current ?? editor.baseline;
+          void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
+        },
+      }),
+      h('span', null, '启用机器人'),
+    ),
+    form,
+    footer,
+  ) : null;
+  const modal = editor && !inlineEditor ? h(Modal, {
+    open: true, closeLabel: '关闭', onClose: closeEditor,
+    title: editor.kind === 'add' ? '添加 QQ 机器人' : `设置${accountName(editor.baseline)}`,
+    description, className: 'imqr-modal', footer,
+  }, form) : null;
+
+  if (unavailable || (robots === null && !loadError)) {
+    return workbench?.render({ robots, unavailable, rail: null, accountSettings: null }) ?? null;
+  }
+
+  const activeRobot = robots?.find(robot => robot.appId === selectedAppId) ?? robots?.[0];
+  const rail = h('section', { className: workbench ? 'imqr-rail' : 'imqb-card imqr-card', 'aria-label': '机器人账号' },
+    h('style', null, STYLES),
+    h('div', { className: 'imqr-header' },
+      workbench?.collapsed ? null : h('h2', { className: 'imqb-status-title' }, workbench ? '机器人' : '机器人账号'),
+      h('div', { className: 'imqr-actions' },
+        h(Button, {
+          size: 'sm', variant: 'ghost', type: 'button', title: '添加机器人', 'aria-label': '添加机器人',
+          disabled: busy || robots === null,
+          onClick: () => startEdit({ kind: 'add', draft: { ...EMPTY_DRAFT } }),
+        }, h(IconPlusOutlineRegular, { size: 16 })),
+        workbench ? h(Button, {
+          size: 'sm', variant: 'ghost', type: 'button', title: workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
+          'aria-label': workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
+          onClick: workbench.onToggleCollapse,
+        }, workbench.collapsed ? '›' : '‹') : null)),
+    loadError ? h('p', { className: 'imqb-error', role: 'alert' }, loadError) : null,
+    actionError ? h('p', { className: 'imqb-error', role: 'alert' }, actionError) : null,
+    robots?.length === 0 ? h('p', { className: 'imqb-status-sub' }, '还没有机器人') : null,
+    robots?.map(robot => {
+      const name = accountName(robot);
+      const selected = activeRobot?.appId === robot.appId;
+      const avatar = h('span', { className: 'imqr-avatar', 'data-state': robot.state, 'aria-hidden': true },
+        robot.alias ? [...robot.alias][0] : h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'currentColor' },
+          h('path', { d: QQ_BOT_LOGO_PATH })));
+      const label = workbench?.collapsed ? null : h('span', { className: 'imqb-status-meta' },
+        h('span', { className: 'imqb-status-title imqr-name' }, name),
+        h('span', { className: 'imqb-status-sub' }, ROBOT_STATE_LABELS[robot.state]));
+      return h('div', { className: 'imqr-row', key: robot.appId, 'data-selected': selected || undefined },
+        h('button', {
+          className: 'imqr-select', type: 'button', onClick: () => onSelect?.(robot.appId), 'aria-pressed': selected,
+          'aria-label': name, title: `${name} · ${ROBOT_STATE_LABELS[robot.state]}`,
+        }, avatar, label),
+        workbench?.collapsed ? null : h('div', { className: 'imqr-actions' },
+          h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: busy, onClick: () => openSettings(robot), 'aria-label': `设置${name}`, title: `设置${name}` }, h(IconSettingsOutlineRegular, { size: 16 })),
+          h(Switch, { checked: robot.enabled, label: `启用${name}`, disabled: busy, onChange: enabled => {
+            void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
+          } })),
+      );
+    }),
+    workbench?.collapsed && activeRobot
+      ? h(Button, {
+          size: 'sm', variant: 'ghost', type: 'button', title: '当前机器人设置', 'aria-label': '当前机器人设置', disabled: busy,
+          onClick: () => openSettings(activeRobot),
+        }, h(IconSettingsOutlineRegular, { size: 16 })) : null,
+    modal,
+  );
+  return workbench ? workbench.render({ robots, unavailable, rail, accountSettings }) : rail;
 }
 
 const STYLES = `
@@ -310,7 +375,15 @@ const STYLES = `
 .imqr-row { padding: 10px 0; border-top: 1px solid var(--dsw-alias-border-l2); margin-top: 8px; }
 .imqr-row[data-selected] { background: var(--dsw-alias-bg-layer-2); }
 .imqr-name { overflow-wrap: anywhere; }
-.imqr-select { font: inherit; color: inherit; background: none; border: 0; padding: 2px 0; text-align: left; cursor: pointer; }
+.imqr-select { font: inherit; color: inherit; background: none; border: 0; padding: 4px; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; border-radius: 8px; }
+.imqr-avatar { display: grid; place-items: center; position: relative; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 8px; background: var(--dsw-alias-bg-layer-3); }
+.imqr-avatar::after { content: ''; position: absolute; inset: auto 0 0 auto; width: 7px; height: 7px; background: var(--dsw-alias-label-tertiary); border-radius: 100%; }
+.imqr-avatar[data-state='connected']::after { background: var(--dsw-alias-text-green, #29966e); }
+.imqr-avatar[data-state='failed']::after { background: var(--dsw-alias-text-red, #ce5260); }
+.imqr-inline { display: flex; flex-direction: column; gap: 14px; }
+.imqr-inline-state { display: flex; align-items: center; gap: 8px; }
+.imqr-rail { display: grid; align-content: start; gap: 4px; min-width: 0; }
+.imqr-rail .imqr-row { border-radius: 8px; border: 0; padding: 3px; margin-top: 4px; }
 .imqr-actions, .imqr-footer { display: flex; align-items: center; gap: 8px; }
 .imqr-footer { justify-content: flex-end; }
 .imqr-modal { width: min(540px, 100%); max-height: 100%; overflow-y: auto; }

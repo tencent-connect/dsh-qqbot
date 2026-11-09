@@ -23,3 +23,5 @@ export const IconChevronDownOutlineRegular = stub();
 export const IconCopyOutlineRegular = stub();
 export const IconDownloadOutlineRegular = stub();
 export const IconPlusOutlineRegular = stub();
+
+export const IconSettingsOutlineRegular = stub();

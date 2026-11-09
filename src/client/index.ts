@@ -17,7 +17,7 @@ import { createElement, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
-import { RobotAccounts } from './robot-accounts.ts';
+import { QQWorkbench } from './workbench.ts';
 
 export const name = 'im-qqbot-client';
 export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
@@ -89,11 +89,9 @@ function QQBotSettingsSection(): ReactNode {
   );
 }
 
-/** 主面板页面：与设置栏目同一内容，包一层滚动留白容器（plugins.detail.actions 的跳转目标） */
-function QQBotPage(): ReactNode {
+function LegacyQQBotPage(): ReactNode {
   return createElement('div', { className: 'imqb-pluginPage' },
     createElement('div', { className: 'imqb-pluginPageContent' },
-      createElement(RobotAccounts),
       createElement(QQBotSettingsSection)),
   );
 }
@@ -170,6 +168,34 @@ export function apply(ctx: Context): void {
       const pageSlots = (pageCtx as unknown as { slots?: SlotsLike }).slots;
       const layout = (pageCtx as unknown as { layout?: { selectPanel(panelId: string | null): void } }).layout;
       if (pageSlots === undefined || layout === undefined) return undefined;
+      const QQBotPage = (): ReactNode => {
+        const workspace = pageCtx.get('uiWorkspace') as { openSession?(id: string): void } | undefined;
+        const sessions = pageCtx.get('sessions') as {
+          list?: { getSnapshot(): { byId: Record<string, { title?: string }> } };
+        } | undefined;
+        const workspaces = pageCtx.get('workspaces') as {
+          list?: { getSnapshot(): {
+            archivedSessionIds: readonly string[];
+            items: readonly { path: string; title: string; sessionIds: readonly string[] }[];
+          } };
+        } | undefined;
+        const open = workspace?.openSession?.bind(workspace);
+        return createElement(QQWorkbench, {
+          legacySettings: createElement(LegacyQQBotPage),
+          openSession: open ? id => {
+            if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
+              throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');
+            }
+            open(id);
+          } : undefined,
+          sessionTitle: id => sessions?.list?.getSnapshot().byId[id]?.title,
+          workspaceTitle: (id, cwd) => {
+            const items = workspaces?.list?.getSnapshot().items;
+            return items?.find(item => item.sessionIds.includes(id))?.title
+              ?? items?.find(item => item.path === cwd)?.title;
+          },
+        });
+      };
       const stopMain = pageSlots.inject('main', () => pageSlots.register(
         { name: 'main', key: IM_MAIN_PANEL_ID },
         QQBotPage,
