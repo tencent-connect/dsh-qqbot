@@ -17,7 +17,7 @@ import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
 import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
-import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
+import { createHostAdapter, type HostAdapter, type SessionSummaryLike } from '../host/adapter.ts';
 import { mkdirSync } from 'node:fs';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
@@ -41,6 +41,8 @@ import type {
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
+  SwitchTarget,
+  SwitchResult,
 } from './types.ts';
 
 /** ManualCompactionError 各 code 的友好提示 */
@@ -693,6 +695,114 @@ export class SessionManager {
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
     this.logger.info(`session removed: key=${key}`);
+  }
+
+  /** 当前桥接的 sessionId（per-peer 覆盖 > 0.5.x 派生候选），/switch 展示用 */
+  currentBoundSessionId(scope: ChatScope, peerId: string): string {
+    return this.currentSessionId(this.sessionKey(scope, peerId));
+  }
+
+  /**
+   * 枚举可切换的会话（/switch 无参列表）。
+   *
+   * 数据源是宿主持久化层，经 host adapter 读取（不裸调宿主服务：形态在版本间漂移）。
+   * 过滤 subagent 子会话——它们不是可桥接的对话；按创建时间倒序取前 limit 条。
+   *
+   * @returns `undefined` = 宿主没有枚举能力（或列举本身失败，已 warn），与
+   *          「有能力但一个会话都没有」（空数组）区分开，避免把能力缺失说成没会话。
+   */
+  async listSwitchTargets(limit = 10): Promise<SwitchTarget[] | undefined> {
+    let summaries: SessionSummaryLike[] | undefined;
+    try {
+      summaries = await this.host.listSessions();
+    } catch (err) {
+      this.logger.warn(`list switch targets failed: ${errorText(err)}`);
+      return undefined;
+    }
+    if (!summaries) return undefined;
+
+    return summaries
+      .filter((summary) => summary.origin !== 'subagent')
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+      .slice(0, limit)
+      .map((summary) => ({ sessionId: summary.id, cwd: summary.cwd, createdAt: summary.createdAt }));
+  }
+
+  /**
+   * 把本通道的桥接切换到另一个已有会话（/switch 核心操作，全程不重启宿主）。
+   *
+   * 绑定落在 prefs（`model-prefs.json` 的 sessionIds）：下一条消息走 getOrCreate，
+   * 读到新 id 后即 `agents.resume(目标)` 恢复该会话上下文。旧记录就地回收——
+   * 回收顺序与 idle 回收/remove() 一致（releasePrompt → cancel → dispose），
+   * prompt 注册项必须在 agent 销毁前摘掉，否则泄漏。
+   *
+   * @param targetSessionId 省略时清除 per-peer 覆盖，回到通道默认路由。
+   */
+  async switchSession(scope: ChatScope, peerId: string, targetSessionId?: string): Promise<SwitchResult> {
+    const key = this.sessionKey(scope, peerId);
+    const record = this.sessions.get(key);
+    // 生成中不能回收：dispose 会打断进行中的 turn（让用户等本轮结束）
+    if (record && record.agent.status !== 'idle') return { ok: false, reason: 'busy' };
+    const previous = this.currentSessionId(key);
+
+    // 恢复通道默认路由：清除 per-peer 覆盖
+    if (!targetSessionId) {
+      this.modelResolver.clearSessionId(key);
+      await this.disposeForSwitch(key, record);
+      this.logger.info(`session switched to default route: key=${key} (was ${previous})`);
+      return { ok: true, previous, target: legacyDerivedSessionId(key) };
+    }
+
+    if (targetSessionId === previous) return { ok: true, previous, target: previous, unchanged: true };
+
+    let bindable: boolean | undefined;
+    try {
+      bindable = await this.canBindTarget(targetSessionId);
+    } catch (err) {
+      // 求证本身失败（持久化后端故障）：无法断言目标存在，拒绝切换而非静默绑定
+      this.logger.warn(`switch target check failed: key=${key} target=${targetSessionId} err=${errorText(err)}`);
+      return { ok: false, reason: 'failed', message: '校验目标会话时持久化服务报错，请稍后重试' };
+    }
+    if (bindable === undefined) {
+      return { ok: false, reason: 'unavailable', message: '宿主未提供会话存在性校验（sessionPersistence.stat），无法确认目标会话' };
+    }
+    if (!bindable) {
+      return { ok: false, reason: 'not-found', message: `会话 ${targetSessionId} 不存在或不可绑定` };
+    }
+
+    // 目标可能正被别的通道持有：绑定本身允许（= 把桥接搬过去），但要留痕——
+    // 这条会话的 agent 此后被两处引用，任一通道回收都会释放它。
+    const shared = this.findBySessionId(targetSessionId);
+    if (shared && shared.sessionKey !== key) {
+      this.logger.warn(`switch target already held by another channel: target=${targetSessionId} owner=${shared.sessionKey}`);
+    }
+
+    this.modelResolver.setSessionId(key, targetSessionId);
+    await this.disposeForSwitch(key, record);
+    this.logger.info(`session switched: key=${key} ${previous} → ${targetSessionId}`);
+    return { ok: true, previous, target: targetSessionId };
+  }
+
+  /** 切换前回收当前记录（不推进绑定；绑定由调用方先写） */
+  private async disposeForSwitch(key: string, record: SessionRecord | undefined): Promise<void> {
+    if (!record) return;
+    this.sessions.delete(key);
+    this.releasePrompt(record.agent);
+    record.agent.cancel({ kind: 'user' });
+    await record.handle.dispose().catch(() => {});
+    // 待答问题/待批审批挂在旧会话上，不清理会悬挂到通道上没人能答
+    this.questionChannel?.cancelPending(key);
+    this.approvalChannel?.cancelPending(key);
+  }
+
+  /**
+   * 目标可绑定判定：进程内存活即绑定（无需读盘）；否则问持久化层的 `stat`。
+   *
+   * `undefined` = 宿主不提供求证手段，调用方不得把它当成「不存在」。
+   */
+  private async canBindTarget(sessionId: string): Promise<boolean | undefined> {
+    if (this.agents.get(sessionId)) return true;
+    return this.host.sessionExists(sessionId);
   }
 
   /** Agent 工作目录：显式配置优先，缺省独立目录 ~/.dsh-qqbot/workspace（不随宿主进程 cwd） */
