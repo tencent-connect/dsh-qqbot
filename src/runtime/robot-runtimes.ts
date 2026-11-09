@@ -18,6 +18,7 @@ import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts
 import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
+import { WorkbenchToolPolicies } from './workbench-tools.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -30,6 +31,7 @@ export class RobotRuntimes {
   readonly prefs: PrefsStore;
   readonly conversationSettings: ConversationSettingsStore;
   readonly timeline: QqTimeline;
+  readonly toolPolicies: WorkbenchToolPolicies;
   private readonly slots = new Map<string, GatewaySlot>();
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
@@ -44,6 +46,8 @@ export class RobotRuntimes {
     this.prefs = new PrefsStore(undefined, { onError: message => logger.warn(message) });
     this.conversationSettings = new ConversationSettingsStore(join(PLUGIN_HOME, 'conversation-settings.json'));
     this.timeline = new QqTimeline(join(PLUGIN_HOME, 'timeline'), logger);
+    this.toolPolicies = new WorkbenchToolPolicies(ctx, agents,
+      key => this.conversationSettings.get(key).agent, id => this.prefs.findKnownSessionKey(id));
     ctx.effect(() => () => {
       this.closed = true;
       for (const slot of this.slots.values()) this.deactivate(slot);
@@ -73,6 +77,12 @@ export class RobotRuntimes {
   }
 
   async start(): Promise<void> {
+    for (const robot of this.records()) for (const binding of this.prefs.listSessionBindings(robot.appId)) {
+      for (const id of [...binding.history, ...(binding.current ? [binding.current] : [])]) {
+        const agent = this.agents.get(id);
+        if (agent) await this.toolPolicies.attach(agent, binding.key);
+      }
+    }
     await Promise.all(this.records().map(record => this.sync(record.appId)));
   }
 
@@ -299,6 +309,7 @@ export class RobotRuntimes {
           },
           agent: {
             read: key => this.conversationSettings.get(key).agent,
+            constrain: (agent, key) => this.toolPolicies.attach(agent, key),
             defaults: () => this.defaults(config.appId).settings,
             update: (key, patch) => {
               const current = this.conversationSettings.get(key);

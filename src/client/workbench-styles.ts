@@ -237,6 +237,21 @@ export const WORKBENCH_STYLES = `
 }
 .imqw-settings .imqw-savebar { margin-top: auto; background: var(--dsw-alias-bg-layer-2); }
 .imqw-agent-fields, .imqw-model-fields { display: grid; gap: 12px; min-width: 0; }
+.imqw-tool-picker {
+  display: grid; gap: 8px; min-width: 0; margin: 0; padding: 8px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md);
+}
+.imqw-tool-picker legend { padding-inline: 4px; font-size: 12px; }
+.imqw-tool-picker input[type='search'] { min-width: 0; width: 100%; }
+.imqw-tool-list { display: grid; max-height: 220px; overflow: auto; }
+.imqw-tool-list:empty { display: none; }
+.imqw-tool-list label {
+  display: flex; align-items: flex-start; gap: 7px; padding: 6px;
+  cursor: pointer; font-size: 12px; overflow-wrap: anywhere;
+}
+.imqw-tool-list label:hover { background: var(--dsw-alias-bg-layer-3); }
+.imqw-tool-list input { flex: none; margin-block: 2px 0; accent-color: var(--dsw-focus-ring-color); }
+.imqw-tool-list small { display: block; color: var(--dsw-alias-label-tertiary); }
 .imqw-agent-fields textarea {
   box-sizing: border-box;
   width: 100%;

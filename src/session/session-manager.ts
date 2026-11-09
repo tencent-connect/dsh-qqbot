@@ -49,6 +49,7 @@ export interface PeerAgentSettings {
   read(key: string): WorkbenchAgentSettings | undefined;
   update(key: string, patch: Partial<WorkbenchAgentSettings>): boolean;
   defaults(): WorkbenchAgentSettings;
+  constrain?(agent: DshAgent, key: string): Promise<void>;
 }
 
 /** ManualCompactionError 各 code 的友好提示 */
@@ -348,6 +349,7 @@ export class SessionManager {
       setup: async (ctx, agent) => {
         await composed.setup?.(ctx, agent);
         if (effectiveRoute) agent?.model?.select(effectiveRoute);
+        if (agent) await this.peerSettings?.constrain?.(agent, key);
       },
     });
 
@@ -563,6 +565,7 @@ export class SessionManager {
     const live = this.agents.get(sessionId);
     if (live) {
       agent = live;
+      await this.peerSettings?.constrain?.(agent, key);
       this.persistSessionId(key, sessionId);
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
@@ -574,7 +577,10 @@ export class SessionManager {
         const resumed = await this.agents.resume({
           resumeSessionId: sessionId,
           ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
+          ...(composed.setup || this.peerSettings?.constrain ? { setup: async (ctx: Context, resumedAgent?: DshAgent) => {
+            await composed.setup?.(ctx, resumedAgent);
+            if (resumedAgent) await this.peerSettings?.constrain?.(resumedAgent, key);
+          } } : {}),
         });
         agent = resumed.agent;
         handle = resumed;
@@ -611,6 +617,7 @@ export class SessionManager {
               if (!session) throw new Error('无法为新 Session 应用执行权限。');
               permissions.set(session, permission);
             }
+            if (newAgent) await this.peerSettings?.constrain?.(newAgent, key);
           } } : {}),
         });
         agent = created.agent;
@@ -620,6 +627,7 @@ export class SessionManager {
       }
     }
 
+    await this.peerSettings?.constrain?.(agent, key);
     const record: SessionRecord = {
       sessionKey: key,
       sessionId,

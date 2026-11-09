@@ -174,3 +174,23 @@ it('discovers admitted recorded peers without a Session and reads only the expli
     expect((await (await f.history('appId=A&scope=group&openId=same')).json()).entries).toHaveLength(1);
   } finally { await f.close(); }
 });
+
+it('persists an empty custom list separately from native tools and snapshots it only for new peers', () => {
+  const path = join(dir, 'settings.json');
+  const store = new ConversationSettingsStore(path);
+  const native = legacyAgentSettings(ConfigSchema({} as ImQQBotConfig));
+  const first = peerKey('A', 'group', 'same');
+  const second = peerKey('A', 'c2c', 'same');
+  const otherRobot = peerKey('B', 'c2c', 'same');
+  store.initialize(first, native);
+  store.saveTemplate('A', { revision: 0, settings: { ...native, permission: 'read-only', tools: [] } }, new Map());
+  store.initialize(second, store.template('A')!.settings);
+  store.initialize(otherRobot, native);
+  store.save(second, { revision: 1, agent: { ...store.get(second).agent!, tools: ['read', 'read'] } });
+  const restored = new ConversationSettingsStore(path);
+  expect(restored.get(first).agent?.tools).toBeUndefined();
+  expect(restored.get(second).agent?.tools).toEqual(['read']);
+  expect(restored.get(otherRobot).agent?.tools).toBeUndefined();
+  expect(restored.template('A')?.settings.tools).toEqual([]);
+  expect(() => restored.save(second, { revision: 1, agent: native })).toThrow('已更新');
+});

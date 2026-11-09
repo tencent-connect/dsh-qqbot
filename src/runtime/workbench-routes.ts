@@ -1,8 +1,21 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
-import { WORKBENCH_DEFAULTS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
+import { workbenchToolChoices } from './workbench-tools.ts';
+
+export function registerWorkbenchTools(ctx: Context): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_TOOLS_PATH, ['GET'], async request => {
+    const preset = new URL(request.url).searchParams.get('preset') ?? '';
+    if (preset.length > 256 || preset.includes('\0')) return workbenchJson({ error: 'Agent 预设无效。' }, 400);
+    try {
+      return workbenchJson({ tools: await workbenchToolChoices(ctx, preset) });
+    } catch (error) {
+      return workbenchJson({ error: error instanceof Error ? error.message : '无法读取工具目录。' }, 503);
+    }
+  });
+}
 
 interface ConnectionFetchRegistry {
   register(route: {

@@ -156,7 +156,7 @@ interface ConversationAccount {
   peerName(scope: ChatScope, openId: string): string;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
 }
-type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & {
+type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & Partial<Pick<RobotRuntimes, 'toolPolicies'>> & {
   conversationAccount(appId: string): ConversationAccount | undefined;
 };
 interface SessionPersistence {
@@ -292,15 +292,37 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     }
     const [conversation] = await projectConversations(robots, patch.appId, persistence, patch);
     if (!conversation) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
-    if (patch.agent && conversation.agent) {
-      try {
-        await robots.conversationAccount(patch.appId)?.validateAgent?.(patch.agent, conversation.agent);
-      } catch (error) {
-        throw new WorkbenchRequestError(400, error instanceof Error ? error.message : 'Agent 设置无效。');
+    const key = peerKey(patch.appId, patch.scope, patch.openId);
+    const binding = robots.prefs.listSessionBindings(patch.appId).find(row => row.key === key);
+    const sessions = [...new Set([...conversation.sessions.map(session => session.id),
+      ...(binding?.history ?? []), ...(binding?.current ? [binding.current] : [])])];
+    const assertCurrent = () => {
+      assertWritable();
+      if (robots.conversationSettings.get(key).revision !== patch.revision) {
+        throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
       }
+    };
+    try {
+      let checkIdle: (() => void) | undefined;
+      if (patch.agent && conversation.agent) {
+        try {
+          await robots.conversationAccount(patch.appId)?.validateAgent?.(patch.agent, conversation.agent);
+        } catch (error) {
+          throw new WorkbenchRequestError(400, error instanceof Error ? error.message : 'Agent 设置无效。');
+        }
+        assertCurrent();
+        try {
+          checkIdle = await robots.toolPolicies?.beforeSave(key, sessions, patch.agent);
+          checkIdle?.();
+        } catch (error) {
+          throw new WorkbenchRequestError(409, error instanceof Error ? error.message : '会话正在运行，请稍后重试。');
+        }
+      }
+      assertCurrent();
+      const settings = robots.conversationSettings.save(key, { ...patch, agent: patch.agent ?? conversation.agent });
+      return workbenchJson({ conversation: { ...conversation, ...settings } });
+    } finally {
+      if (patch.agent) robots.toolPolicies?.reconcile(key, sessions);
     }
-    assertWritable();
-    const settings = robots.conversationSettings.save(peerKey(patch.appId, patch.scope, patch.openId), { ...patch, agent: patch.agent ?? conversation.agent });
-    return workbenchJson({ conversation: { ...conversation, ...settings } });
   });
 }

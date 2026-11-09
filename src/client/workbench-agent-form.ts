@@ -1,7 +1,10 @@
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
-import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { ChatScope } from '../types.ts';
-import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import {
+  WORKBENCH_BASE_PERMISSIONS, WORKBENCH_TOOLS_PATH, type WorkbenchAgentSettings, type WorkbenchToolChoice,
+} from '../shared/workbench-agent-settings.ts';
+import { fetchJson } from './http.ts';
 import {
   defaultModelLabel, defaultPresetLabel, findModel, modelChoiceId,
   parseAgentPresets, parseModelCatalog, parsePermissionCatalog,
@@ -71,6 +74,54 @@ interface AgentFieldsProps {
 }
 
 const ADD_WORKSPACE = 'add-workspace';
+const CUSTOM_TOOLS = 'qqbot-custom-tools';
+
+function WorkbenchToolPicker({ tools, preset, disabled, onChange }: {
+  tools: readonly string[];
+  preset: string;
+  disabled: boolean;
+  onChange: (tools: string[]) => void;
+}): ReactNode {
+  const [catalog, setCatalog] = useState<WorkbenchToolChoice[]>();
+  const [query, setQuery] = useState('');
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setCatalog(undefined);
+    setError('');
+    void fetchJson<{ tools: WorkbenchToolChoice[] }>(`${WORKBENCH_TOOLS_PATH}?${new URLSearchParams({ preset })}`, {
+      cache: 'no-store', signal: controller.signal,
+    }).then(result => { if (!controller.signal.aborted) setCatalog(result.tools); }, cause => {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '无法读取工具目录。');
+    });
+    return () => controller.abort();
+  }, [preset, attempt]);
+  const selected = new Set(tools);
+  const term = query.trim().toLocaleLowerCase();
+  const known = new Set(catalog?.map(tool => tool.name));
+  const available = catalog?.filter(tool => `${tool.name} ${tool.description ?? ''}`.toLocaleLowerCase().includes(term));
+  const missing = catalog ? tools.filter(name => !known.has(name)) : [];
+  return h('fieldset', { className: 'imqw-tool-picker', disabled },
+    h('legend', null, `允许的工具 · 已选 ${tools.length} 项`),
+    h(Input, { type: 'search', value: query, placeholder: '搜索工具', 'aria-label': '搜索工具',
+      onChange: event => setQuery(event.currentTarget.value) }),
+    error ? h('div', { className: 'imqw-actions' },
+      h('p', { className: 'imqb-error', role: 'alert' }, error),
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => setAttempt(value => value + 1) }, '重试')) : null,
+    !catalog && !error ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取工具…') : null,
+    available?.length === 0 ? h('p', { className: 'imqw-muted' }, '没有匹配的工具。') : null,
+    h('div', { className: 'imqw-tool-list' },
+      ...missing.map(name => h('label', { key: name },
+        h('input', { type: 'checkbox', checked: true, onChange: () => onChange(tools.filter(item => item !== name)) }),
+        h('span', null, name, h('small', null, '当前预设未提供')))),
+      ...(available ?? []).map(({ name, description }) => h('label', { key: name },
+        h('input', { type: 'checkbox', checked: selected.has(name),
+          onChange: event => onChange(event.currentTarget.checked ? [...tools, name].sort() : tools.filter(item => item !== name)) }),
+        h('span', null, name, description ? h('small', null, description) : null))),
+    ),
+  );
+}
 
 export function WorkbenchAgentFields({ settings, source, disabled, onChange }: AgentFieldsProps & { source?: AgentFormSource }): ReactNode {
   const [catalog, retry] = useCatalog(source);
@@ -104,6 +155,13 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange }: A
   const workspaces = source?.workspaces() ?? [];
   const permission = catalog.permissions.options.find(option => option.value === catalog.permissions.defaultPreset);
   const permissionLabel = permission?.name ?? catalog.permissions.defaultPreset;
+  const nativeOptions = catalog.permissions.options.map(option => ({
+    value: option.value, label: option.name, description: option.description,
+  }));
+  const baseOptions = WORKBENCH_BASE_PERMISSIONS.flatMap(value => nativeOptions.filter(option => option.value === value));
+  const otherOptions = nativeOptions.filter(option => !baseOptions.includes(option));
+  const customBase = [settings.permission, catalog.permissions.defaultPreset, baseOptions[0]?.value]
+    .find(value => baseOptions.some(option => option.value === value));
   const select = (label: string, value: string, options: readonly QQSelectOption[], onSelect: (value: string) => void, pending = false) =>
     h('div', { className: 'imqw-field' }, h('span', null, label),
       h(QQSelect, { label, value, options, disabled: disabled || pending, onChange: onSelect }));
@@ -135,10 +193,19 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange }: A
       else onChange({ cwd });
     }, adding),
     workspaceError ? h('p', { className: 'imqb-error', role: 'alert' }, workspaceError) : null,
-    select('执行权限', settings.permission, [{ value: '', label: permissionLabel ? `DSH 默认 · ${permissionLabel}` : 'DSH 默认权限' },
-      ...catalog.permissions.options.map(option => ({
-        value: option.value, label: option.name, description: option.description,
-      }))], permission => onChange({ permission })),
+    select('执行权限', settings.tools === undefined ? settings.permission : CUSTOM_TOOLS, [
+      ...baseOptions, { value: CUSTOM_TOOLS, label: '自定义工具', disabled: customBase === undefined }, ...otherOptions,
+      { value: '', label: permissionLabel ? `DSH 默认 · ${permissionLabel}` : 'DSH 默认权限' },
+    ], permission => {
+      if (permission === CUSTOM_TOOLS) {
+        if (customBase) onChange({ permission: customBase, tools: settings.tools ?? [] });
+      } else onChange({ permission, tools: undefined });
+    }),
+    settings.tools !== undefined ? h('div', { className: 'imqw-agent-fields' },
+      select('基础权限', settings.permission, baseOptions, permission => onChange({ permission })),
+      h(WorkbenchToolPicker, { tools: settings.tools, preset: settings.preset, disabled, onChange: tools => onChange({ tools }) }),
+      h('p', { className: 'imqw-muted' }, '只开放已选工具，仍须遵守原生权限和审批。若当前原生权限高于基础权限，工具暂停使用。'),
+    ) : null,
   );
 }
 

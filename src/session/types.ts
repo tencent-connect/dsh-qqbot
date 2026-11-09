@@ -33,6 +33,7 @@ export interface DshAgent {
   /** 底层 session（fork 时作为 source；snapshotEvents 用于统计/导出） */
   readonly session: {
     readonly id: string;
+    readonly header?: { agentPreset?: string; parentSession?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;

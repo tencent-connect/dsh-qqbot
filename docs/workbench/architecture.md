@@ -60,7 +60,7 @@ flowchart LR
 | 工作台入口和设置 | 现有插件主区与 `sidebar.panellist`，复用主题和组件 | 四列主区尺寸、固定设置栏折叠、窄屏内页以及原生 Session 返回。 |
 | 打开当前或历史 | `uiWorkspace.openSession` 与原生 Session 选择、投影 | 原生消息精确定位的公开接口。缺失时打开所属 Session 并显示可复制的引用。 |
 | 预设、目录、模型和推理 | 原生工作区、Agent preset 注册表与会话级模型能力 | 已开始预设的锁定规则。会话级模型接口是否改写宿主默认。存在副作用时只保存 QQ 下次偏好。 |
-| 自定义工具 | DSH 沙箱与审批，作用域内的 `tools.restrict` 和 `tools.guard` | 必须同时验证可见工具和实际执行。覆盖 Web 冷恢复、直接调用、PTC、子 Agent 和批准后撤销。作用域局部工具和无法保证限制的组合不进入可选范围。 |
+| 自定义工具 | DSH 原生执行器、会话作用域的 `tools.setExecutor` 和 `tools.guard` | 工具清单同时限制模型请求和执行，仍受原生权限及审批约束。没有可恢复的执行器覆盖接口时，仅标准模式可选。派生 Agent、计划任务和修改插件等入口不进入自定义目录。 |
 | 原生答复回传入口 | 目标发行版公开的会话或回答扩展点 | 缺少回答级插槽时，用插件面板选择同一个 Session 的完整回答预览，仍走服务端授权。 |
 
 工具有效范围是预设实际装配的工具、QQ 允许的工具、原生沙箱与审批约束的交集。工作区表示执行位置。文件范围还需由宿主沙箱和真实路径校验兑现。普通 DSH Session 按宿主原有流程执行。 [原生导航](https://github.com/deepseek-ai/deepseek-harness/blob/f3803c96974ad4a94195fb97e5c637e9c2a3afe3/packages/client/ui-workspace/src/client/navigation.ts#L34-L48) · [工具限制](https://github.com/deepseek-ai/deepseek-harness/blob/f3803c96974ad4a94195fb97e5c637e9c2a3afe3/packages/core/tools/src/index.ts#L155-L187) · [执行守卫](https://github.com/deepseek-ai/deepseek-harness/blob/f3803c96974ad4a94195fb97e5c637e9c2a3afe3/packages/core/tools/src/index.ts#L380-L401)
