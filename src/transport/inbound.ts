@@ -160,9 +160,9 @@ export async function handleInbound(
 // ══════════════════════════════════════════════════════════════
 
 /**
- * 组装 agentBody — AI 实际看到的完整上下文
+ * 组装 agentBody — AI 实际看到的完整上下文（导出仅供单测；运行路径仍经 handleInbound）
  */
-function assembleAgentBody(
+export function assembleAgentBody(
   msg: ProcessedMessage,
   state: MiddlewareState,
   scope: ChatScope,
@@ -283,15 +283,18 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
       lines.push(`- ${renderMediaLine(kind, att.filename, d?.localPath, att.url, att.size)}`);
     }
 
-    // 语音：有 ASR 文本才带文本，否则只带链接（纯文本模型无法消费音频）
+    // 语音：转录文本已由 Layer 1 的 [Voice message] 行承载（同一 ASR 来源，
+    // 再注入一份会让桌面端与模型输入出现两份相同文本）；此处仅为无转录的
+    // 语音降级给链接（纯文本模型无法消费音频）。
     if (voices.length > 0) {
-      const asrTexts = voices.map(a => a.asr_refer_text).filter(Boolean);
-      if (asrTexts.length > 0) {
-        lines.push(`- ASR: ${asrTexts.join(' | ')}`);
-      } else {
-        const urls = voices.map(a => a.url).filter(Boolean);
-        if (urls.length > 0) lines.push(`- Voice: ${urls.join(', ')}`);
-      }
+      const processedByFilename = new Map(
+        (state.processedAttachments ?? []).map(pa => [pa.filename, pa]),
+      );
+      const urls = voices
+        .filter(a => voiceTranscriptOf(a, processedByFilename) === undefined)
+        .map(a => a.url)
+        .filter(Boolean);
+      if (urls.length > 0) lines.push(`- Voice: ${urls.join(', ')}`);
     }
   }
 
@@ -377,6 +380,19 @@ interface VoiceText {
   text: string;
   duration?: number;
   source: 'stt' | 'asr' | 'fallback';
+}
+
+/**
+ * 该语音的可用转录（与 extractVoiceTexts 来源一致：处理后文本 > 原始 ASR）。
+ * Layer 4 据此判定是否需要降级给 URL，避免与 Layer 1 重复注入同一文本。
+ */
+function voiceTranscriptOf(
+  att: RawAttachment,
+  processedByFilename: Map<string | undefined, ProcessedAttachment>,
+): string | undefined {
+  const pa = processedByFilename.get(att.filename);
+  const trimmed = (pa?.voiceText ?? att.asr_refer_text)?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function extractVoiceTexts(

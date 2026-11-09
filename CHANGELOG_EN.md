@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Voice messages no longer show the transcript twice**: a QQ voice message used to enter the session as both an `- ASR: …` metadata line and a `[Voice message] …` body line (visible in the desktop UI and to the model); the transcript now appears exactly once in the message body, and voices without a transcript still fall back to a link line.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
 
 ## [0.5.5] - 2026-10-30
