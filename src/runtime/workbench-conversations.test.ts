@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
+import { WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { ConversationSettingsStore, peerKey, registerWorkbenchConversations } from './workbench-conversations.ts';
@@ -21,27 +23,30 @@ async function fixture(withPersistence = true) {
   const conversationSettings = new ConversationSettingsStore(settingsPath);
   const access = { c2cMode: 'allowlist' as const, c2cAllow: ['same'], groupMode: 'disabled' as const, groupAllow: [] };
   const account = { access, liveSessionId: () => undefined, peerName: () => '' };
-  const stat = vi.fn(async (id: string) => id === 'reserved' || id.startsWith('qqbot-') ? undefined : ({
+  const stat = vi.fn(async (id: string) => !['old-a', 'group-a', 'current-b'].includes(id) ? undefined : ({
     header: { id, cwd: '/test/workspace', agentPreset: 'test-preset', createdAt: 5 },
   }));
   const ctx = new Context();
-  let registered: TestRoute | undefined;
+  const timeline = new QqTimeline(join(dir, "timeline"), logger);
+  const registered = new Map<string, TestRoute>();
   const host = ctx.plugin(scope => {
     if (withPersistence) scope.provide('sessionPersistence', { stat });
     scope.provide('connection', { fetch: { register: (route: TestRoute) => {
-      registered = route;
-      return async () => { registered = undefined; };
+      registered.set(route.path, route);
+      return async () => { registered.delete(route.path); };
     } } });
   });
   await host.await();
   const plugin = ctx.plugin(scope => registerWorkbenchConversations(scope, {
-    prefs, conversationSettings, conversationAccount: id => ['A', 'B'].includes(id) ? account : undefined,
+    prefs, conversationSettings, timeline, conversationAccount: id => ['A', 'B'].includes(id) ? account : undefined,
   }, logger));
   await plugin.await();
-  if (!registered) throw new Error('QQ workbench route not registered');
-  const route = registered;
+  const route = registered.get(WORKBENCH_CONVERSATIONS_PATH);
+  const history = registered.get(WORKBENCH_TIMELINE_PATH);
+  if (!route || !history) throw new Error('QQ workbench route not registered');
   return {
-    route, stat, prefs, settingsPath, access, conversationSettings,
+    route, stat, prefs, settingsPath, access, conversationSettings, timeline,
+    history: (query: string) => history.fetch(new Request('http://dsh.internal' + WORKBENCH_TIMELINE_PATH + '?' + query)),
     get: (appId: string) => route.fetch(new Request(url + '?appId=' + appId)),
     post: (body: unknown) => route.fetch(new Request(url, { method: 'POST', body: JSON.stringify(body) })),
     close: async () => { await plugin.dispose(); await host.dispose(); },
@@ -65,7 +70,7 @@ it('projects only the selected robot and hides reserved Session IDs until the Ho
     const c2c = conversations.find(c => c.scope === 'c2c');
     const group = conversations.find(c => c.scope === 'group');
     expect(c2c).toEqual({
-      scope: 'c2c', openId: 'same', name: '', alias: '', receiving: true, admitted: true, revision: 0,
+      scope: 'c2c', openId: 'same', name: '', alias: '', receiving: true, recording: true, admitted: true, revision: 0,
       sessions: [{ id: 'old-a', createdAt: 5, cwd: '/test/workspace', preset: 'test-preset' }],
     });
     expect(group).toMatchObject({ currentSessionId: 'group-a', admitted: false });
@@ -94,9 +99,9 @@ it('keeps settings durable and scoped with stale-save rejection and separate adm
     expect((await f.post({ ...body, openId: 'a b' })).status).toBe(400);
 
     const restored = new ConversationSettingsStore(f.settingsPath);
-    expect(restored.get(peerKey('A', 'group', 'same'))).toEqual({ alias: '我的群', receiving: true, revision: 2 });
-    expect(restored.get(peerKey('A', 'c2c', 'same'))).toEqual({ alias: '', receiving: true, revision: 0 });
-    expect(restored.get(peerKey('B', 'group', 'same'))).toEqual({ alias: '', receiving: true, revision: 0 });
+    expect(restored.get(peerKey('A', 'group', 'same'))).toEqual({ alias: '我的群', receiving: true, recording: true, revision: 2 });
+    expect(restored.get(peerKey('A', 'c2c', 'same'))).toEqual({ alias: '', receiving: true, recording: true, revision: 0 });
+    expect(restored.get(peerKey('B', 'group', 'same'))).toEqual({ alias: '', receiving: true, recording: true, revision: 0 });
 
     // Even before the first read after a successful save, disappearance must not enable peers.
     rmSync(f.settingsPath);
@@ -116,4 +121,28 @@ it('explains when the Host cannot verify any Session IDs', async () => {
   } finally {
     await f.close();
   }
+});
+
+it('discovers admitted recorded peers without a Session and reads only the explicit robot and scope', async () => {
+  const f = await fixture();
+  try {
+    const record = (appId: string, scope: 'c2c' | 'group', text: string) => {
+      f.timeline.record(appId, { scope, targetId: 'same' }, {
+        id: receivedEntryId('platform-message'), at: 1, direction: 'inbound', text, status: 'received',
+      }, true);
+    };
+    record('A', 'group', 'one');
+    record('A', 'c2c', 'two');
+    record('B', 'group', 'three');
+    const peers = await (await f.get('A')).json();
+    expect(peers.conversations).toContainEqual(expect.objectContaining({ scope: 'group', sessions: [] }));
+    const group = await (await f.history('appId=A&scope=group&openId=same')).json();
+    expect(group.entries.map((row: { text: string }) => row.text)).toEqual(['one']);
+    expect((await f.history('appId=C&scope=group&openId=same')).status).toBe(404);
+    expect((await f.history('appId=A&scope=other&openId=same')).status).toBe(400);
+    expect((await f.post({ appId: 'A', scope: 'group', openId: 'same', revision: 0, recording: false })).status).toBe(200);
+    expect(f.conversationSettings.get(peerKey('A', 'group', 'same')).recording).toBe(false);
+    expect(f.conversationSettings.get(peerKey('B', 'group', 'same')).recording).toBe(true);
+    expect((await (await f.history('appId=A&scope=group&openId=same')).json()).entries).toHaveLength(1);
+  } finally { await f.close(); }
 });

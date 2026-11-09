@@ -147,7 +147,7 @@ export function registerSendFileTool(
         && (owner === undefined ? routing.defaultAppId() === appId : targets.targetFor(agentId) !== undefined);
       if (!allowed()) throw new Error('qqbot_send_file: 当前来源或目标不允许发送到 QQ');
       const replyTarget = bindDelivery(destination, {
-        key: deliveryKey('file-tool', agentId, exec.callId), allowed, fixed: true,
+        key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,
       });
 
       const cwd = resolveAgentCwd(config.cwd);

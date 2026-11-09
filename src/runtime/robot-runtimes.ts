@@ -13,6 +13,7 @@ import { registerAccountRoutes } from './account-routes.ts';
 import { AccountAccessService } from './account-service.ts';
 import { RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
 import { WorkbenchRequestError } from './workbench-routes.ts';
+import { QqTimeline } from './qq-timeline.ts';
 import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
 
 interface GatewaySlot {
@@ -25,6 +26,7 @@ interface GatewaySlot {
 export class RobotRuntimes {
   readonly prefs: PrefsStore;
   readonly conversationSettings: ConversationSettingsStore;
+  readonly timeline: QqTimeline;
   private readonly slots = new Map<string, GatewaySlot>();
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
@@ -38,6 +40,7 @@ export class RobotRuntimes {
   ) {
     this.prefs = new PrefsStore(undefined, { onError: message => logger.warn(message) });
     this.conversationSettings = new ConversationSettingsStore(join(PLUGIN_HOME, 'conversation-settings.json'));
+    this.timeline = new QqTimeline(join(PLUGIN_HOME, 'timeline'), logger);
     ctx.effect(() => () => {
       this.closed = true;
       for (const slot of this.slots.values()) this.deactivate(slot);
@@ -226,7 +229,10 @@ export class RobotRuntimes {
             return false;
           }
         };
-        slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs, receiving);
+        slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs, receiving, {
+          timeline: this.timeline,
+          recording: ({ scope, targetId }) => this.conversationSettings.get(peerKey(config.appId, scope, targetId)).recording,
+        });
       },
     });
     await slot.fiber.await();

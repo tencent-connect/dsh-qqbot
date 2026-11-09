@@ -9,12 +9,13 @@ import {
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
+import { QqTimelineView } from './workbench-timeline.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
 type SettingsPanel = 'peer' | 'robot' | 'legacy' | 'closed';
-type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving'>;
+type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording'>;
 
 interface Draft extends EditableSettings {
   baseline: EditableSettings & Pick<WorkbenchConversation, 'revision'>;
@@ -73,14 +74,15 @@ function accessLabel(robot: WorkbenchRobot, peer: WorkbenchConversation): string
 }
 
 function selectDraft(peer: WorkbenchConversation): Draft {
-  const { alias, receiving, revision } = peer;
-  return { alias, receiving, baseline: { alias, receiving, revision } };
+  const { alias, receiving, recording, revision } = peer;
+  return { alias, receiving, recording, baseline: { alias, receiving, recording, revision } };
 }
 
 function changes(draft: Draft): Partial<EditableSettings> {
   return {
     ...(draft.alias !== draft.baseline.alias ? { alias: draft.alias } : {}),
     ...(draft.receiving !== draft.baseline.receiving ? { receiving: draft.receiving } : {}),
+    ...(draft.recording !== draft.baseline.recording ? { recording: draft.recording } : {}),
   };
 }
 
@@ -361,13 +363,12 @@ function RobotConversations({ robot, panel, settings, openSession, sessionTitle,
         ),
       ),
       openError ? h('p', { className: 'imqb-error', role: 'alert' }, openError) : null,
-      peer ? h('div', { className: 'imqw-summary' },
-        h('h3', null, '当前 Session'),
-        current ? h(SessionDetails, { session: current, title: sessionTitle?.(current.id), workspace: workspaceTitle?.(current.id, current.cwd) })
-          : h('p', { className: 'imqw-muted' }, '此 QQ 会话尚无正在接收的 Session。'),
-        current && !openSession ? h('p', { className: 'imqw-muted' }, '当前宿主未提供原生 Session 导航。') : null,
-        h('p', { className: 'imqw-note' }, '此处暂未接入 QQ 消息记录。请打开原生 Session 查看已进入 DSH 的消息。'),
-      ) : null,
+      current ? h('p', { className: 'imqw-muted imqw-session-caption' }, [
+        sessionTitle?.(current.id),
+        workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd),
+        current.preset,
+      ].filter(Boolean).join(' · ')) : null,
+      peer ? h(QqTimelineView, { key: peerKey, appId, peer, robotName: accountName(robot), openSession: openSession && openNative }) : null,
     ),
     panel !== 'closed' ? h('aside', { className: 'imqw-settings', 'aria-label': panel === 'peer' ? '会话设置' : '机器人设置' },
       h('header', { className: 'imqw-column-head' },
@@ -443,6 +444,13 @@ function ConversationSettings({ robot, peer, workspace, draft, busy, feedback, o
       h(Switch, {
         checked: draft.receiving, label: '接收 QQ 消息', disabled: busy,
         onChange: receiving => onEdit({ ...draft, receiving }),
+      })),
+    h('div', { className: 'imqw-receiving' },
+      h('div', null, h('strong', null, '保存 QQ 消息'),
+        h('p', { className: 'imqw-muted' }, '关闭后停止新增 QQ 流水，已有记录保留。')),
+      h(Switch, {
+        checked: draft.recording, label: '保存 QQ 消息', disabled: busy,
+        onChange: recording => onEdit({ ...draft, recording }),
       })),
     h('dl', { className: 'imqw-details' },
       h('dt', null, '机器人接入规则'), h('dd', null, accessLabel(robot, peer)),

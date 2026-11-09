@@ -38,6 +38,7 @@ export function setupMiddlewares(
   isActive: () => boolean,
   mediaRoot?: string,
   receiving?: (target: ReplyTarget) => boolean,
+  onAdmitted?: (ctx: MiddlewareContext) => void,
 ): void {
   const blocked = (ctx: MiddlewareContext): boolean => {
     if (!isActive()) {
@@ -101,6 +102,11 @@ export function setupMiddlewares(
     })(ctx, next);
   };
   bot.use(admit);
+  if (onAdmitted) bot.use(async (ctx, next) => {
+    if (blocked(ctx)) return;
+    onAdmitted(ctx);
+    await next();
+  });
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
   //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空

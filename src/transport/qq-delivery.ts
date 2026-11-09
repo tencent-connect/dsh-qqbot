@@ -8,13 +8,14 @@ import type { StreamSessionLike } from './outbound-buffer.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 import { resolveReplyTarget } from './reply-target.ts';
 import { StreamTargetExpired } from './delivery-errors.ts';
+import type { TimelineRequest } from './timeline-observer.ts';
 
 class CheckedApiClient extends ApiClient {
-  constructor(private readonly client: ApiClient, private readonly check: () => void) { super(); }
+  constructor(private readonly submit: ApiClient['request'], private readonly check: () => void) { super(); }
 
   override async request<T>(token: string, method: string, path: string, body?: unknown, options?: RequestOptions): Promise<T> {
     this.check();
-    return this.client.request<T>(token, method, path, body, options);
+    return this.submit<T>(token, method, path, body, options);
   }
 }
 
@@ -25,9 +26,10 @@ export function sendDeliveryMarkdown(
   target: ReplyTarget,
   content: string,
   opts?: { keyboard?: InlineKeyboard },
+  observe?: TimelineRequest,
 ) {
   const reply = resolveReplyTarget(target, replyIds, limiter, true);
-  const client = new CheckedApiClient(bot.apiClient, () => assertDeliveryAllowed(target));
+  const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => assertDeliveryAllowed(target));
   const api = new MessageApi(client, bot.tokenManager, { markdownSupport: true });
   api.onMessageSent((ref, meta) => bot.messageApi.notifyMessageSent(ref, meta));
   return api.sendRaw(reply.scope, reply.targetId, bot.getCredentials(), {
@@ -39,7 +41,7 @@ export function sendDeliveryMarkdown(
   });
 }
 
-export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: ReplyTarget, logger: Logger): StreamSessionLike {
+export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: ReplyTarget, logger: Logger, observe?: TimelineRequest): StreamSessionLike {
   const { scope, targetId, msgId } = target;
   if (scope !== 'c2c' || !msgId || !replyIds.getCachedReplyIds(scope, targetId).some(id => id.kind === 'msg' && id.id === msgId)) {
     throw new StreamTargetExpired();
@@ -48,7 +50,7 @@ export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: R
   let canceled = false;
   let sent = false;
   let failure: { error: unknown } | undefined;
-  const client = new CheckedApiClient(bot.apiClient, () => {
+  const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => {
     if (canceled) throw new Error('QQ stream canceled');
     if (failure) throw failure.error;
     assertDeliveryAllowed(target);
@@ -97,12 +99,12 @@ export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: R
   };
 }
 
-export function createDeliveryMedia(bot: QQBot, replyIds: ReplyIdCache, limiter: ReplyLimiter): MediaSenderLike {
+export function createDeliveryMedia(bot: QQBot, replyIds: ReplyIdCache, limiter: ReplyLimiter, observe?: TimelineRequest): MediaSenderLike {
   const send = async (target: ReplyTarget, fileType: MediaFileType, source: { localPath?: string }, fileName?: string) => {
     const upload = await bot.uploadMedia({ target, fileType, ...source, fileName, srvSendMsg: false });
     assertDeliveryAllowed(target);
     const reply = resolveReplyTarget(target, replyIds, limiter, false);
-    const client = new CheckedApiClient(bot.apiClient, () => assertDeliveryAllowed(target));
+    const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => assertDeliveryAllowed(target));
     const api = new MediaApi(client, bot.tokenManager);
     const message = await api.sendMediaMessage(reply.scope, reply.targetId, upload.file_info, bot.getCredentials(), { msgId: reply.msgId });
     return { upload, message };

@@ -94,6 +94,7 @@ export async function handleInbound(
   logger: Logger,
   inputs: QqInputRegistry,
   allowTarget: (target: ReplyTarget) => boolean,
+  linked?: (target: ReplyTarget, sessionId: string) => void,
 ): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
@@ -161,6 +162,7 @@ export async function handleInbound(
     logger.info('im-qqbot: duplicate QQ input ignored');
     return;
   }
+  linked?.(replyTarget, record.sessionId);
   inputs.register(String(message.id));
   record.agent.followup(message);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);

@@ -28,6 +28,9 @@ import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '.
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
+import { observeTimelineRequests } from '../transport/timeline-observer.ts';
+import { messageSenderName } from '../shared/message-sender-name.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import type { PrefsStore } from '../model/prefs-store.ts';
@@ -64,6 +67,7 @@ export function bootstrapGateway(
   mediaRoot?: string,
   prefs?: PrefsStore,
   receiving?: (target: ReplyTarget) => boolean,
+  history?: { timeline: QqTimeline; recording: (target: ReplyTarget) => boolean },
 ): GatewayRuntime {
   const manager = new SessionManager(ctx, agents, config, logger, prefs);
 
@@ -100,7 +104,27 @@ export function bootstrapGateway(
 
   // ── 中间件链 ──
   const replyIds = new ReplyIdCache();
-  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving);
+  const canRecord = (target: ReplyTarget): boolean => {
+    try { return !!history && allowTarget(target) && history.recording(target); }
+    catch { return false; }
+  };
+  const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord);
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (messageContext => {
+    const { message, replyTarget } = messageContext;
+    const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
+    if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope
+      || !canRecord(replyTarget)) return;
+    const body = message.content.replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
+    const command = /^\/([a-z][a-z0-9_-]*)\b/i.exec(body);
+    const pairing = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(body);
+    history.timeline.record(config.appId, replyTarget, {
+      id: receivedEntryId(message.messageId), at: Date.parse(message.timestamp) || Date.now(),
+      direction: 'inbound', status: 'received', platformId: message.messageId,
+      text: pairing ? '配对码已隐藏' : command ? command[0] : timelineText(body),
+      senderId: message.senderId, senderName: messageSenderName(message),
+      attachments: message.attachments?.length || undefined,
+    }, true);
+  }));
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -111,7 +135,9 @@ export function bootstrapGateway(
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget);
+    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget, history && ((target, id) => {
+      if (canRecord(target)) history.timeline.link(config.appId, target, id);
+    }));
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──
@@ -127,14 +153,14 @@ export function bootstrapGateway(
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
   const sender: QQBotSender = guardSender({
-    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyIds, replyLimiter, target, content, opts),
-    openStream: (target) => openDeliveryStream(bot, replyIds, target, logger),
+    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyIds, replyLimiter, target, content, opts, observe),
+    openStream: (target) => openDeliveryStream(bot, replyIds, target, logger, observe),
   }, ledger);
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender = guardMedia(createDeliveryMedia(bot, replyIds, replyLimiter), ledger);
+  const mediaSender = guardMedia(createDeliveryMedia(bot, replyIds, replyLimiter, observe), ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
   const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger, mediaRoot);

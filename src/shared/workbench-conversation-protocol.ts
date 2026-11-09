@@ -15,6 +15,7 @@ export interface WorkbenchConversation {
   name: string;
   alias: string;
   receiving: boolean;
+  recording: boolean;
   admitted: boolean;
   revision: number;
   currentSessionId?: string;
@@ -28,4 +29,5 @@ export interface WorkbenchConversationPatch {
   revision: number;
   alias?: string;
   receiving?: boolean;
+  recording?: boolean;
 }

@@ -5,7 +5,7 @@ import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { isMessageRejected, MediaAlreadySubmitted, StreamTargetExpired } from './delivery-errors.ts';
 
-interface DeliveryContext { key: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
+interface DeliveryContext { key: string; sessionId?: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
 const contexts = new WeakMap<ReplyTarget, DeliveryContext>();
 
 /** Keep routing metadata out of the SDK payload and the public ReplyTarget. */
@@ -31,6 +31,11 @@ export function replyDelivery(target: ReplyTarget, step: unknown): ReplyTarget {
   if (!context) return target;
   const key = deliveryKey(context.key, 'reply', step);
   return bindDelivery(target, { ...context, key, streamKey: deliveryKey(key, 'stream'), staticKey: deliveryKey(key, 'static'), fixed: true });
+}
+
+export function deliveryTrace(target: ReplyTarget): { sessionId?: string; streamKey: string } | undefined {
+  const context = contexts.get(target);
+  return context && { sessionId: context.sessionId, streamKey: context.streamKey ?? deliveryKey(context.key, 'stream') };
 }
 
 function authorize(context: DeliveryContext): void {
