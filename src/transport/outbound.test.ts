@@ -593,7 +593,7 @@ describe('OutboundRouter 标题头注入', () => {
     const record = createRecord(c2cTarget); // c2c + msgId 才走流式；tracker 需能解析地址
     const manager = {
       findBySessionId: vi.fn(() => record),
-      replyHeaderLine: vi.fn(() => '▸ 流式标题'),
+      replyHeaderLine: vi.fn(() => '**A 项目 - 流式标题**'),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
 
@@ -601,7 +601,7 @@ describe('OutboundRouter 标题头注入', () => {
     outbound.routeStreamFrame('sess-qq', delta('a1', '内容'));
     await vi.advanceTimersByTimeAsync(200);
 
-    expect(session.update).toHaveBeenCalledWith('▸ 流式标题\n\n内容');
+    expect(session.update).toHaveBeenCalledWith('**A 项目 - 流式标题**\n\n内容');
   });
 
   it('直接发送路径（群聊不流式）：assistant/message 文本前置标题头', async () => {
@@ -610,7 +610,7 @@ describe('OutboundRouter 标题头注入', () => {
     const record = createRecord(groupTarget);
     const manager = {
       findBySessionId: vi.fn(() => record),
-      replyHeaderLine: vi.fn(() => '▸ 群聊标题'),
+      replyHeaderLine: vi.fn(() => '**B 项目 - 群聊标题**'),
     } as unknown as SessionManager;
     const outbound = createOutboundHandler(manager, bot, createConfig({ streaming: true }), createLogger());
 
@@ -622,7 +622,7 @@ describe('OutboundRouter 标题头注入', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(bot.sendMarkdown).toHaveBeenCalledWith(
       groupTarget,
-      '▸ 群聊标题\n\n回复正文',
+      '**B 项目 - 群聊标题**\n\n回复正文',
     );
   });
 

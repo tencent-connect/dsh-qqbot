@@ -22,7 +22,7 @@ export interface StreamingWriterDeps {
 
 export class StreamingWriter {
   private fullText = '';
-  /** 回复标题头（如 `▸ 标题`）：置于全部文本之前；reset 不清除（attempt 重写仍保留定位） */
+  /** 回复标题头（如 `**工作区 - 会话**`）：置于全部文本之前；reset 不清除（attempt 重写仍保留定位） */
   private prefix = '';
   private session: StreamSessionLike | null = null;
   private sentChunkCount = 0;

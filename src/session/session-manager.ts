@@ -19,6 +19,7 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import { createHostAdapter, type HostAdapter, type PermissionKnobs } from '../host/adapter.ts';
 import { mkdirSync, realpathSync } from 'node:fs';
+import { basename } from 'node:path';
 import { foldSessionDisplayTitle, clipTitle } from '../shared/session-title.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
@@ -1136,15 +1137,31 @@ export class SessionManager {
   }
 
   /**
-   * 回复标题头（`▸ 标题`）：出站链路每回合注入一次。
-   * 标题来自 live agent 的内存事件实时折叠（不缓存，标题更新下一回合自然生效）；
-   * 无 live agent 或无标题返回 undefined——调用方干净降级，不带前缀。
+   * 回复标题头：`**工作区名 - 会话名**`（粗体），出站链路每回合注入一次。
+   * 工作区名取自 live Session 的 durable header.cwd（零 I/O），经注册表匹配显示名，
+   * 未登记回退目录名；会话名来自内存事件实时折叠（标题更新下一回合自然生效）。
+   * 两部分都缺省才返回 undefined——调用方干净降级，不带前缀。
    */
   replyHeaderLine(sessionId: string): string | undefined {
     const agent = this.agents.get(sessionId);
     if (!agent) return undefined;
     const title = foldSessionDisplayTitle(this.host.sessionEvents(agent.session));
-    return title !== undefined ? `▸ ${clipTitle(title, 40)}` : undefined;
+    const cwd = (agent.session as { header?: { cwd?: string } }).header?.cwd;
+    const workspaceName = cwd !== undefined ? this.workspaceNameOf(cwd) : undefined;
+    const parts = [workspaceName, title].filter((part): part is string => part !== undefined);
+    if (parts.length === 0) return undefined;
+    return `**${parts.map(part => clipTitle(part, 24)).join(' - ')}**`;
+  }
+
+  /** 会话 cwd 对应的工作区显示名：注册表命中取 title；未登记回退目录名 */
+  private workspaceNameOf(cwd: string): string | undefined {
+    const registered = this.registeredWorkspacePath(cwd);
+    if (registered !== undefined) {
+      const workspace = this.host.listWorkspaces().find(w => w.path === registered);
+      if (workspace !== undefined) return workspace.title;
+    }
+    const base = basename(cwd);
+    return base !== '' && base !== '/' ? base : undefined;
   }
 
   async disposeAll(): Promise<void> {

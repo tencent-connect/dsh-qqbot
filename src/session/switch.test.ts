@@ -719,3 +719,51 @@ describe('会话显示标题（/sessions 列表项）', () => {
     expect(manager.getStatus('c2c', PEER)).toMatchObject({ active: true, title: '状态标题' });
   });
 });
+
+describe('回复标题头（工作区 - 会话）', () => {
+  function liveAgentWith(session: object) {
+    const agent = fakeAgent('session-live');
+    (agent as { session: unknown }).session = { id: 'session-live', snapshotEvents: () => [], ...session };
+    return agent;
+  }
+
+  it('已登记工作区 + 会话标题 → **工作区标题 - 会话标题**', () => {
+    const agent = liveAgentWith({
+      header: { cwd: WS_A },
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '登录页优化' } }],
+    });
+    const { manager } = createManager(workspaceCtx([{ path: WS_A, title: 'A 项目', sessionIds: [] }]), [], { live: agent });
+
+    expect(manager.replyHeaderLine('session-live')).toBe('**A 项目 - 登录页优化**');
+  });
+
+  it('未登记 cwd → 回退目录名；标题裁剪按码点', () => {
+    const agent = liveAgentWith({
+      header: { cwd: '/tmp/未登记/my-repo' },
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '很长的标题'.repeat(10) } }],
+    });
+    const { manager } = createManager(workspaceCtx([]), [], { live: agent });
+
+    const header = manager.replyHeaderLine('session-live');
+    expect(header).toMatch(/^\*\*my-repo - .{1,24}…\*\*$/);
+  });
+
+  it('无会话标题 → 只显示工作区；无 cwd → 只显示会话名', () => {
+    const noTitle = liveAgentWith({ header: { cwd: WS_A } });
+    const noCwd = liveAgentWith({
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '纯标题' } }],
+    });
+    const { manager } = createManager(workspaceCtx([{ path: WS_A, title: 'A', sessionIds: [] }]), [], { live: noTitle });
+
+    expect(manager.replyHeaderLine('session-live')).toBe('**A**');
+
+    const other = createManager(workspaceCtx([]), [], { live: noCwd });
+    expect(other.manager.replyHeaderLine('session-live')).toBe('**纯标题**');
+  });
+
+  it('无 live agent → undefined（干净降级）', () => {
+    const { manager } = createManager(workspaceCtx([]));
+    expect(manager.replyHeaderLine('session-gone')).toBeUndefined();
+  });
+});
+
