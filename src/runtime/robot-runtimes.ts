@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { describeCommands } from '../commands/index.ts';
-import { bootstrapGateway, type GatewayRuntime } from '../gateway/bootstrap.ts';
+import { bootstrapGateway, openDeliveryLedger, type GatewayRuntime } from '../gateway/bootstrap.ts';
 import { registerSendFileTool } from '../media/send-file-tool.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import type { DshAgentRegistry } from '../session/index.ts';
@@ -19,6 +19,7 @@ import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-se
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
+import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -139,6 +140,35 @@ export class RobotRuntimes {
         return legacy?.alias || legacy?.name || '';
       },
     };
+  }
+
+  manualStatus(appId: string, target: ReplyTarget, operation: string) {
+    this.configFor(appId);
+    const runtime = this.slots.get(appId)?.runtime;
+    return runtime ? runtime.manual.status(target, operation) : ManualQqSender.status(openDeliveryLedger(appId), appId, target, operation);
+  }
+
+  async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void) {
+    const account = this.conversationAccount(appId);
+    if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
+    const key = peerKey(appId, target.scope, target.targetId);
+    const peer = this.conversationSettings.get(key);
+    const listed = (target.scope === 'group' ? account.access.groupAllow : account.access.c2cAllow).includes(target.targetId);
+    if (!listed && peer.revision === 0 && !this.prefs.listSessionBindings(appId).some(binding => binding.key === key)) {
+      throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
+    }
+    const runtime = this.slots.get(appId)?.runtime;
+    if (!runtime) throw new WorkbenchRequestError(409, '当前机器人未连接。');
+    try {
+      return await runtime.manual.submit(target, operation, text, () => {
+        assertWritable();
+        return !this.closed && this.slots.get(appId)?.runtime === runtime && runtime.state === 'connected'
+          && runtime.allowTarget?.(target) === true;
+      }, () => this.conversationSettings.get(key).recording);
+    } catch (error) {
+      if (error instanceof ManualSendConflict) throw new WorkbenchRequestError(409, error.message);
+      throw error;
+    }
   }
 
   private legacySettings(config: ImQQBotConfig, key: string): WorkbenchAgentSettings {

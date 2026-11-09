@@ -10,7 +10,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
 import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
-import { WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -324,5 +324,42 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     } finally {
       if (patch.agent) robots.toolPolicies?.reconcile(key, sessions);
     }
+  });
+}
+
+export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 'manualStatus' | 'manualSend'>): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_SEND_PATH, ['GET', 'POST'], async (request, assertWritable) => {
+    let appId: string;
+    let target: { scope: ChatScope; targetId: string };
+    let operation: string;
+    let message: string | undefined;
+    try {
+      const fields = ['appId', 'scope', 'openId', 'operation'];
+      let row: Record<string, unknown>;
+      if (request.method === 'GET') {
+        const query = new URL(request.url).searchParams;
+        if (fields.some(field => query.getAll(field).length !== 1)) throw new Error();
+        row = Object.fromEntries(query);
+      } else {
+        const raw = await request.text();
+        if (Buffer.byteLength(raw) > 16 * 1024) throw new Error();
+        row = robotObject(JSON.parse(raw), [...fields, 'text']);
+        if (typeof row.text !== 'string' || row.text.length > QQ_MANUAL_MESSAGE_LIMIT || !row.text.trim() || row.text.includes('\0')) throw new Error();
+        message = row.text;
+      }
+      appId = robotAppId(row.appId);
+      if ((row.scope !== 'c2c' && row.scope !== 'group') || typeof row.openId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(row.openId)
+        || typeof row.operation !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.operation)) throw new Error();
+      target = { scope: row.scope, targetId: row.openId };
+      operation = row.operation;
+    } catch {
+      return workbenchJson({ error: '发送参数无效，请检查对话和消息长度。' }, 400);
+    }
+    if (message === undefined) {
+      const result = robots.manualStatus(appId, target, operation);
+      return result ? workbenchJson(result) : workbenchJson({ error: '未找到此发送操作。' }, 404);
+    }
+    assertWritable();
+    return workbenchJson(await robots.manualSend(appId, target, operation, message, assertWritable));
   });
 }

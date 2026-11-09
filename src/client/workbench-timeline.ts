@@ -3,12 +3,20 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson } from './http.ts';
+import { QqComposer } from './workbench-composer.ts';
 
 const statusLabel: Record<TimelineStatus, string> = {
   received: '收到', sending: '发送中', partial: 'QQ 已接受部分内容',
   accepted: 'QQ 接口已接受', rejected: 'QQ 拒绝', unknown: '结果未知',
 };
-const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'short' });
+const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
+const timeFormat = new Intl.DateTimeFormat('zh-CN', { timeStyle: 'short' });
+
+function grouped(previous: TimelineEntry | undefined, row: TimelineEntry): boolean {
+  return !!previous && previous.direction === row.direction
+    && (row.direction === 'outbound' || (!!row.senderId && previous.senderId === row.senderId))
+    && row.at >= previous.at && row.at - previous.at < 3 * 60_000;
+}
 
 function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): TimelinePage {
   if (!current || !latest.entries.length) return latest;
@@ -21,16 +29,19 @@ function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): 
   };
 }
 
-export function QqTimelineView({ appId, peer, robotName, openSession }: {
+export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }: {
   appId: string;
   peer: WorkbenchConversation;
   robotName: string;
+  disabledReason?: string;
   openSession?: (id: string) => void;
 }): ReactNode {
   const [page, setPage] = useState<TimelinePage>();
   const [error, setError] = useState('');
   const [readingOlder, setReadingOlder] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  const [newMessages, setNewMessages] = useState(false);
+  const latestId = useRef<string | undefined>(undefined);
   const list = useRef<HTMLDivElement>(null);
   const lifetime = useRef<AbortController | null>(null);
   const follow = useRef(true);
@@ -51,6 +62,9 @@ export function QqTimelineView({ appId, peer, robotName, openSession }: {
       try {
         const latest = await fetchJson<TimelinePage>(params(), { signal: controller.signal, cache: 'no-store' });
         if (controller.signal.aborted) return;
+        const tail = latest.entries.at(-1)?.id;
+        if (!follow.current && latestId.current && tail !== latestId.current) setNewMessages(true);
+        latestId.current = tail;
         setPage(previous => updateLatest(previous, latest));
         setError('');
       } catch (cause) {
@@ -96,43 +110,63 @@ export function QqTimelineView({ appId, peer, robotName, openSession }: {
     }
   };
 
-  return h('section', { className: 'imqw-timeline', 'aria-label': 'QQ 消息流水' },
+  const reload = (): void => setRefresh(value => value + 1);
+  const jump = (): void => {
+    follow.current = true;
+    setNewMessages(false);
+    if (list.current) list.current.scrollTop = list.current.scrollHeight;
+  };
+  const entries = page?.entries ?? [];
+  return h('section', { className: 'imqw-timeline', 'aria-label': 'QQ 消息' },
     h('div', { className: 'imqw-timeline-header' },
-      h('h3', null, 'QQ 消息流水'),
-      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: () => setRefresh(value => value + 1) }, '刷新流水')),
-    !recording ? h('p', { className: 'imqw-muted' }, '已停止保存新的 QQ 消息。') : null,
-    error || page?.incomplete ? h('p', { role: 'alert', className: 'imqb-error' }, error || 'QQ 流水可能不完整。') : null,
-    !page && !error ? h('p', { role: 'status', className: 'imqw-muted' }, '正在读取消息…') : null,
-    page?.entries.length === 0 ? h('p', { className: 'imqw-muted' }, '此对话暂无已保存的 QQ 消息。') : null,
+      h('span', { className: 'imqw-muted' }, !recording ? '消息保存已关闭' : 'QQ 消息'),
+      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '刷新消息')),
+    error || page?.incomplete ? h('p', { role: 'alert', className: 'imqb-error' }, error || '消息记录可能不完整。') : null,
     h('div', { className: 'imqw-timeline-scroll', ref: list, onScroll: () => {
       const node = list.current;
-      if (node) follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+      if (!node) return;
+      follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+      if (follow.current) setNewMessages(false);
     } },
+      !page && !error ? h('p', { role: 'status', className: 'imqw-timeline-empty imqw-muted' }, '正在读取消息…') : null,
+      page?.entries.length === 0 ? h('p', { className: 'imqw-timeline-empty imqw-muted' }, '还没有已保存的 QQ 消息。') : null,
       page?.before ? h('div', { className: 'imqw-timeline-older' },
-        h(Button, { variant: 'outline', size: 'sm', disabled: readingOlder, onClick: () => { void loadOlder(); } },
+        h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: () => { void loadOlder(); } },
           readingOlder ? '正在读取…' : '加载更早消息')) : null,
-      h('ol', { className: 'imqw-timeline-list' }, page?.entries.map(row => h(MessageRow, {
-        key: row.id, row, robotName, openSession,
-      }))),
+      h('ol', { className: 'imqw-timeline-list' }, entries.flatMap((row, index) => {
+        const previous = entries[index - 1];
+        const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
+        const message = h(MessageRow, { key: row.id, row, robotName, openSession, compact: !newDay && grouped(previous, row) });
+        return newDay ? [h('li', { key: 'date-' + row.id, className: 'imqw-message-day' }, dateFormat.format(row.at)), message] : [message];
+      })),
     ),
+    newMessages ? h('div', { className: 'imqw-message-jump' }, h(Button, { variant: 'outline', size: 'sm', onClick: jump }, '查看最新消息 ↓')) : null,
+    h(QqComposer, { appId, peer, robotName, disabledReason, onUpdate: reload }),
   );
 }
 
-function MessageRow({ row, robotName, openSession }: {
-  row: TimelineEntry; robotName: string; openSession?: (id: string) => void;
+function MessageRow({ row, robotName, openSession, compact }: {
+  row: TimelineEntry; robotName: string; openSession?: (id: string) => void; compact: boolean;
 }): ReactNode {
   const outbound = row.direction === 'outbound';
   const sender = outbound ? robotName : row.senderName || (row.senderId ? `成员 ${row.senderId.slice(-8)}` : 'QQ 成员');
   const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(' · ');
-  return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction },
-    h('div', { className: 'imqw-timeline-meta' },
-      h('strong', null, sender), h('time', { dateTime: new Date(row.at).toISOString() }, dateFormat.format(row.at))),
-    h('div', { className: 'imqw-timeline-bubble' },
-      row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
-      row.attachments ? h('div', { className: 'imqw-muted' }, `附件 · ${row.attachments} 项`) : null),
-    h('div', { className: 'imqw-timeline-meta' },
-      outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status], errorCode ? ` · ${errorCode}` : '') : null,
-      row.sessionId && openSession ? h(Button, { variant: 'ghost', size: 'sm',
-        onClick: () => { if (row.sessionId) openSession(row.sessionId); } }, '打开关联 Session') : null),
+  const linkedSession = row.sessionId;
+  return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction, 'data-compact': compact },
+    h('span', { className: 'imqw-message-avatar', 'aria-hidden': true }, !compact && [...sender][0]?.toUpperCase()),
+    h('div', { className: 'imqw-message-body' },
+      compact ? null : h('div', { className: 'imqw-timeline-meta' },
+        h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))),
+      h('div', { className: 'imqw-timeline-bubble' },
+        row.quote ? h('blockquote', null, row.quote.text) : null,
+        row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
+        row.attachments ? h('div', { className: 'imqw-muted' }, `附件 · ${row.attachments} 项`) : null),
+      h('div', { className: 'imqw-timeline-meta imqw-message-details' },
+        row.source === 'manual' ? h('span', null, '网页发送') : null,
+        outbound && row.status !== 'accepted' ? h('span', { 'data-status': row.status }, statusLabel[row.status], errorCode ? ` · ${errorCode}` : '') : null,
+        outbound && row.status === 'accepted' ? h('span', { className: 'imqw-message-action' }, statusLabel.accepted) : null,
+        linkedSession && openSession ? h('button', { type: 'button', className: 'imqw-message-action',
+          'aria-label': '打开关联 Session', title: '打开关联 Session', onClick: () => openSession(linkedSession) }, '↗') : null),
+    ),
   );
 }

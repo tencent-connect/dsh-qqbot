@@ -27,6 +27,8 @@ import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
+import { ManualQqSender, createManualTextTransport } from '../transport/manual-send.ts';
+import { resolveReplyTarget } from '../transport/reply-target.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
@@ -56,7 +58,12 @@ function dispatchInteraction(event: InteractionEvent, manager: SessionManager): 
 export interface GatewayRuntime extends SendFileRuntime {
   readonly manager: SessionManager;
   readonly state: WorkbenchRobot['state'];
+  readonly manual: ManualQqSender;
   deactivate(): void;
+}
+
+export function openDeliveryLedger(appId: string): DeliveryLedger {
+  return new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(appId)}.jsonl`));
 }
 
 export function bootstrapGateway(
@@ -79,7 +86,7 @@ export function bootstrapGateway(
 
   manager.accountAccess = accountAccess;
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
-  const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
+  const ledger = openDeliveryLedger(config.appId);
   let active = true;
   let state: WorkbenchRobot['state'] = 'connecting';
   const isActive = () => active;
@@ -97,11 +104,12 @@ export function bootstrapGateway(
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
+  const baseUrl = process.env.QQBOT_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com';
   const bot = new QQBot({
     appId: config.appId,
     appSecret: config.appSecret,
     transport: 'websocket',
-    baseUrl: process.env.QQBOT_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com',
+    baseUrl,
     tokenBaseUrl: process.env.QQBOT_TOKEN_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com',
     userAgent,
     logger,
@@ -124,12 +132,20 @@ export function bootstrapGateway(
     const body = message.content.replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
     const command = /^\/([a-z][a-z0-9_-]*)\b/i.exec(body);
     const pairing = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(body);
+    // Only display the quote actually carried by the QQ event. Never consult
+    // the SDK's cross-message cache for text to persist in this peer.
+    const quotedText = message.refMsgIdx && !command && !pairing ? message.msgElements?.[0]?.content?.trim().slice(0, 400) : undefined;
+    const quote = message.refMsgIdx && !command && !pairing ? {
+      text: quotedText && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(quotedText) ? '配对码已隐藏'
+        : quotedText && /^\/[a-z]/i.test(quotedText) ? quotedText.split(/\s+/, 1)[0]!
+          : quotedText || '引用消息不可用',
+    } : undefined;
     history.timeline.record(config.appId, replyTarget, {
       id: receivedEntryId(message.messageId), at: Date.parse(message.timestamp) || Date.now(),
       direction: 'inbound', status: 'received', platformId: message.messageId,
       text: pairing ? '配对码已隐藏' : command ? command[0] : timelineText(body),
       senderId: message.senderId, senderName: messageSenderName(message),
-      attachments: message.attachments?.length || undefined,
+      attachments: message.attachments?.length || undefined, quote,
     }, true);
   }));
 
@@ -278,7 +294,11 @@ export function bootstrapGateway(
       };
     }, 'im-qqbot.lifecycle');
 
+  const sendText = createManualTextTransport(bot, baseUrl, userAgent);
+  const manual = new ManualQqSender(config.appId, ledger, (target, text, beforeRequest) =>
+    sendText(resolveReplyTarget(target, replyIds, replyLimiter, false), text, beforeRequest), history?.timeline);
   return {
+    manual,
     bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,
     get state() { return state; },
     deactivate() { active = false; },
