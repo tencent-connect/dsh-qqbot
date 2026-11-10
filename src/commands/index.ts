@@ -1,3 +1,4 @@
+import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 /**
  * 斜杠命令注册中心
  *
@@ -40,5 +41,27 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   // help 需要访问完整列表（含自身），通过闭包惰性引用
   commands.push(helpCommand(deps, () => commands));
 
+  for (const command of commands) {
+    const original = command.handler;
+    command.handler = ctx => {
+      const service = deps.manager.accountAccess;
+      const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
+      return error ? Promise.resolve(error) : original(ctx);
+    };
+  }
   return commands;
+}
+export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
+  const mode = deps.manager.accountAccess?.currentAccess().commandMode ?? deps.config.access.commandMode ?? 'open';
+  return buildCommandList(deps).map((command): SlashCommandDescriptor => {
+    const names = Array.isArray(command.name) ? command.name : [command.name];
+    return {
+      name: names[0] ?? '',
+      aliases: names.slice(1),
+      description: command.description ?? '',
+      category: command.category,
+      scope: mode === 'open' ? 'all' : mode === 'disabled' ? 'disabled' : 'owner',
+      ...(command.hidden === true ? { hidden: true } : {}),
+    };
+  }).filter((descriptor) => descriptor.name !== '');
 }

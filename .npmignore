@@ -2,9 +2,12 @@ src/
 dev.ts
 cordis.dev.yml
 tsconfig.json
+vitest.config.ts
 docs/
 .env
 .env.example
 .dsh-sessions/
 *.tsbuildinfo
 node_modules/
+
+.audit/

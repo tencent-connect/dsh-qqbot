@@ -212,14 +212,10 @@ describe('/sessions 命令', () => {
     expect(String(result)).toContain('含空格 项目');
   });
 
-  it('鉴权：allowlist 名单内放行、名单外拒绝', async () => {
-    const restricted = {
-      textChunkLimit: 4500,
-      access: { c2cMode: 'allowlist', c2cAllow: ['admin1'] },
-    } as never;
-    const cmd = sessionsCommand({ manager: makeManager(), config: restricted });
-    expect(cmd.authorized!(makeCmdCtx('', [], 'admin1'), {} as never)).toBe(true);
-    expect(cmd.authorized!(makeCmdCtx('', [], 'stranger'), {} as never)).not.toBe(true);
+  it('鉴权：命令不再自带 authorized（统一由 buildCommandList 按 access.commandMode 包装）', async () => {
+    const cmd = sessionsCommand({ manager: makeManager(), config: CONFIG });
+
+    expect(cmd.authorized).toBeUndefined();
   });
 });
 

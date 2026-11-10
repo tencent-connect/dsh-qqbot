@@ -11,7 +11,6 @@
  * （直接走 dsh-sandbox-policy / dsh-user-approval 的模块函数，headless 组合可用）。
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
 import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
 import type { PermissionKnobs } from '../host/adapter.ts';
@@ -59,13 +58,12 @@ function displayKnobs(knobs: PermissionKnobs): string {
   return [knobs.sandbox, knobs.approval].filter(Boolean).join(' + ') || '未知';
 }
 
-export function permissionCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
+export function permissionCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {
     name: 'permission',
     category: 'agent',
-    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（与 /model /preset 同构）
+    // 管理类指令：私聊/群聊均可用；访问控制由 buildCommandList 统一按 access.commandMode 包装
     scope: 'all',
-    authorized: commandAllowlistAuth(config, logger),
     description: '查看或切换会话权限（用法: /permission [read-only|workspace-write|danger-full-access|reset]）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);

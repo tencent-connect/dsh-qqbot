@@ -14,7 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { QrConnectCallbacks, QrConnectOptions } from '@tencent-connect/qqbot-connector';
 import { registerBindRoutes, type WebRoute } from './bind-routes.ts';
 import { BindingService } from './binding-service.ts';
-import { persistCredentialsToProfile } from './persist.ts';
+import { persistCredentialsToProfile, accessRevision, readProfileAccess } from './persist.ts';
 import { BIND_CONFIG_PATH, BIND_MANUAL_PATH, BIND_STATE_PATH, BIND_UNBIND_PATH } from '../shared/bind-protocol.ts';
 
 /** 默认 persist 依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
@@ -186,6 +186,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
       model: 'deepseek-chat',
       groupPrompt: '群聊提示词',
       directPrompt: '私聊提示词',
+      accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] },
     })), res);
 
@@ -298,6 +299,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     const routes = registerRealRoutes(() => null);
     const res = fakeRes();
     await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({
+      accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: Array.from({ length: 5000 }, (_v, i) => `openid-${i}`), groupMode: 'open', groupAllow: [] },
     })), res);
 

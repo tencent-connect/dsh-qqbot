@@ -163,23 +163,9 @@ describe('/permission', () => {
     expect(String(await notSet.handler!(makeCmdCtx('reset', [])))).toContain('无需重置');
   });
 
-  it('鉴权：挂 commandAllowlistAuth（allowlist 模式名单外拒绝）', async () => {
-    const restricted = {
-      textChunkLimit: 4500,
-      access: { c2cMode: 'allowlist', c2cAllow: ['admin1'] },
-    } as never;
-    const cmd = permissionCommand({ manager: makeManager(), config: restricted });
+  it('鉴权：命令不再自带 authorized（统一由 buildCommandList 按 access.commandMode 包装）', async () => {
+    const cmd = permissionCommand({ manager: makeManager(), config: CONFIG });
 
-    expect(typeof cmd.authorized).toBe('function');
-    // 名单内放行
-    const allowed = cmd.authorized!({
-      message: { senderId: 'admin1', kind: 'c2c' },
-    } as never, {} as never);
-    expect(allowed).toBe(true);
-    // 名单外拒绝（fail-closed）
-    const denied = cmd.authorized!({
-      message: { senderId: 'stranger', kind: 'c2c' },
-    } as never, {} as never);
-    expect(denied).not.toBe(true);
+    expect(cmd.authorized).toBeUndefined();
   });
 });

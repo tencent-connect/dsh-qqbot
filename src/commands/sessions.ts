@@ -11,7 +11,6 @@
  * 与 dsh 桌面/Web 侧边栏"工作区 → 会话"心智模型一致。
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { commandAllowlistAuth } from './auth.ts';
 import { getScopePeer, sendMarkdownChunked, formatRelativeTime } from '../shared/index.ts';
 import { clipTitle, DIGEST_MESSAGE_CLIP, type DigestMessage } from '../shared/session-title.ts';
 import { renderCmdInput, renderCmdEnter } from './cmd-input.ts';
@@ -47,13 +46,12 @@ export function renderDigestLines(messages: readonly DigestMessage[]): string[] 
   return lines;
 }
 
-export function sessionsCommand({ manager, config, logger }: CommandDeps): CategorizedCommand {
+export function sessionsCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {
     name: 'sessions',
     category: 'agent',
-    // 管理类指令：私聊/群聊均可用，但仅限白名单用户（与 /model /preset 同构）
+    // 管理类指令：私聊/群聊均可用；访问控制由 buildCommandList 统一按 access.commandMode 包装
     scope: 'all',
-    authorized: commandAllowlistAuth(config, logger),
     description: '查看/切换会话（按工作区分组；/sessions [序号|id]；/sessions new <组序号|工作区>）',
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);

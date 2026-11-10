@@ -120,6 +120,16 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.c2cAllow` | string[] | `[]` | 私聊白名单（user openid） |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | 群聊访问模式 |
 | `access.groupAllow` | string[] | `[]` | 群聊白名单（group openid） |
+| `access.commandMode` | `open`/`allowlist`/`disabled` | `open` | QQ 斜杠命令模式，白名单按发送者 OpenID 独立校验 |
+
+QQ 斜杠命令与群聊、私聊共用“所有人／白名单／关闭”模式：先按接入规则进入对话，再按发送者身份校验命令；审批和提问按钮沿用各自鉴权。命令白名单保存在独立的身份文件中，切换模式不影响名单。
+
+三类名单（私聊、群、命令）均支持三种添加方式：**配对码**、**手动按 OpenID 批量添加**、**导出/复制**。注意 OpenID 不是 QQ 号或群号；拿不到 OpenID 时用配对码添加。
+
+- **配对码**：在账号设置中生成，让用户在对应对话里直接发给机器人即可加入名单。同一码可连续添加多人，错误场景（群码发到私聊等）不影响其有效性。
+- **撤销语义**：移除身份后，移除前生成的同类配对码不能将其重新加回，重新授权需生成新码；其余人仍可继续认领。
+
+配置接口的 GET 返回 `config.accessRevision`，更新 `access` 时应一并提交该值；名单或模式已变化时返回 409，不覆盖现有授权。
 
 ### 主动推送（proactiveDelivery）
 
