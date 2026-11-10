@@ -1,14 +1,15 @@
 /**
  * QuestionChannel — 把 dsh 的 ask_user_question 桥接到 QQ 通道。
  *
- * 接入方式：包装 `userQuestions.ask`（而非 registerProvider），按 `request.agent.id`
- * 路由到 QQ 会话；非 QQ 会话委托宿主默认 provider（如 Web 弹出框），多通道共存。
+ * 按 request.agent.id 路由公开的提问事件，旧宿主兼容 userQuestions.ask。
+ * 非 QQ 会话委托宿主默认答复通道。
  *
  * 每会话一个显式状态机，三态语义：
  *   - 待答（pending 中）：等待当前题的回答
  *   - 逐题推进：多问题时一次问一题，答完一题再问下一题
  *   - 完成 / 中断（abort / 超时 / 会话回收）：reject(ASK_ABORTED)
  */
+import { randomUUID } from 'node:crypto';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
@@ -16,6 +17,7 @@ import { buildKeyboard, formatQuestion } from './question-renderer.ts';
 import { decodeButtonData } from './button-utils.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 import { continueDelivery, deliveryPart } from '../transport/delivery-context.ts';
+import { deliveryKey } from '../transport/delivery-ledger.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 
 // ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
@@ -31,6 +33,7 @@ export interface UserQuestion {
   question: string;
   options?: UserQuestionOption[];
   multiSelect?: boolean;
+  intent?: unknown;
 }
 
 export interface UserQuestionAnswer {
@@ -43,6 +46,7 @@ export interface UserQuestionRequest {
   questions: UserQuestion[];
   agent?: { id?: string };
   signal?: AbortSignal;
+  wait?: { callId: string };
 }
 
 export interface UserQuestionResult {
@@ -96,6 +100,8 @@ interface PendingEntry {
   /** 提问时本回合的投递目标（首题与超时提示用；用户作答后的后续题被动回复其作答） */
   target: ReplyTarget;
   request: UserQuestionRequest;
+  requestId: string;
+  answerToken?: string;
   resolve: (result: UserQuestionResult) => void;
   reject: (err: Error) => void;
   onAbort?: () => void;
@@ -108,6 +114,7 @@ interface PendingEntry {
 
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
+  private readonly requestIds = new WeakMap<UserQuestionRequest, string>();
   private uq?: UserQuestionsServiceLike;
   private origAsk?: UserQuestionsServiceLike['ask'];
   private readonly manager: QuestionChannelManagerLike;
@@ -175,6 +182,15 @@ export class QuestionChannel {
     this.pending.clear();
   }
 
+  /** Answer the Host's scoped question event only for a live, owned QQ turn. */
+  public routeRequest(request: UserQuestionRequest, next: () => Promise<UserQuestionResult>): Promise<UserQuestionResult> {
+    const sessionId = request.agent?.id;
+    if (!sessionId || request.questions.some(question => question.intent !== undefined)) return next();
+    const record = this.manager.findBySessionId(sessionId);
+    const target = record && this.resolveTarget(sessionId, record);
+    return record && target ? this.askViaQQ(record, target, request) : next();
+  }
+
   /** 会话回收时清理其待答问题，避免 pending 悬挂导致 Promise 与闭包泄漏 */
   public cancelPending(sessionKey: string): void {
     const entry = this.pending.get(sessionKey);
@@ -191,7 +207,7 @@ export class QuestionChannel {
     if (!record) return false;
     const key = record.sessionKey;
     const entry = this.pending.get(key);
-    if (!entry) return false;
+    if (!entry?.answerToken) return false;
     if (!text) return false; // 纯图片/表情等：继续等待，消息走常规流程
 
     const current = entry.request.questions[entry.index];
@@ -217,9 +233,7 @@ export class QuestionChannel {
     if (!button || button.t !== 'question') return false;
     const current = entry.request.questions[entry.index];
     if (!current) return false;
-    // 校验按钮归属题：旧题按钮在新题推进后被点击（误点/延迟事件），
-    // 其 q 不等于当前题 id，直接忽略，避免错位映射到当前题选项。
-    if (button.q !== current.id) return false;
+    if (button.q !== entry.answerToken) return false;
     const idx = button.i;
     const opts = current.options ?? [];
     if (idx < 0 || idx >= opts.length) return false;
@@ -239,7 +253,13 @@ export class QuestionChannel {
     if (request.signal?.aborted) {
       throw new QuestionChannelError('ask_user_question was aborted before delivery', ASK_ABORTED);
     }
-    // 同会话已有待答问题（理论上不会发生：回合阻塞在第一个问题上）→ 拒绝旧的
+    const first = request.questions[0];
+    if (!first) throw new Error('ask_user_question with empty questions');
+
+    const requestId = this.requestId(request);
+    const answerToken = this.questionToken(requestId, 0);
+    await this.sendQuestion(record, target, first, answerToken);
+
     const prev = this.pending.get(key);
     if (prev) {
       this.pending.delete(key);
@@ -248,13 +268,8 @@ export class QuestionChannel {
       prev.reject(new QuestionChannelError('superseded by a new question', ASK_ABORTED));
     }
 
-    const first = request.questions[0];
-    if (!first) throw new Error('ask_user_question with empty questions');
-
-    await this.sendQuestion(record, target, first);
-
     return new Promise<UserQuestionResult>((resolve, reject) => {
-      const entry: PendingEntry = { record, target, request, resolve, reject, index: 0, collected: [] };
+      const entry: PendingEntry = { record, target, request, requestId, answerToken, resolve, reject, index: 0, collected: [] };
       if (request.signal) {
         const onAbort = (): void => {
           if (this.pending.get(key) !== entry) return;
@@ -278,12 +293,17 @@ export class QuestionChannel {
 
     if (entry.index < entry.request.questions.length) {
       const next = entry.request.questions[entry.index]!;
+      entry.answerToken = undefined;
+      const answerToken = this.questionToken(entry.requestId, entry.index);
       this.resetTimer(entry, key);
       // 用户刚在 QQ 作答：后续题被动回复其作答（replyTarget 携带最新 msgId 候选）
       const sessionId = entry.request.agent?.id;
       const source = this.targets && sessionId ? this.targets.targetFor(sessionId) : entry.record.replyTarget;
       const target = source && continueDelivery(source, entry.record.replyTarget);
-      void (target ? this.sendQuestion(entry.record, target, next) : Promise.reject(new Error('QQ question source is no longer authorized'))).catch((err) => {
+      void (target ? this.sendQuestion(entry.record, target, next, answerToken) : Promise.reject(new Error('QQ question source is no longer authorized'))).then(() => {
+        if (this.pending.get(key) === entry) entry.answerToken = answerToken;
+      }, (err) => {
+        if (this.pending.get(key) !== entry) return;
         this.pending.delete(key);
         this.clearTimer(entry);
         this.removeAbort(entry);
@@ -299,21 +319,35 @@ export class QuestionChannel {
     entry.resolve({ answers: entry.collected });
   }
 
+  private requestId(request: UserQuestionRequest): string {
+    if (request.wait?.callId) return 'call:' + request.wait.callId;
+    // Legacy Host requests have no call ID. Keep the identity for re-entry of the same request.
+    const id = this.requestIds.get(request) ?? 'request:' + randomUUID();
+    this.requestIds.set(request, id);
+    return id;
+  }
+
+  private questionToken(requestId: string, index: number): string {
+    return deliveryKey(requestId, index).slice(0, 24);
+  }
+
   /** 发送单个问题：优先带按钮，按钮发送失败降级纯文本 */
   private async sendQuestion(
     record: QuestionSessionRecordLike,
     target: ReplyTarget,
     question: UserQuestion,
+    answerToken: string,
   ): Promise<void> {
     const hint = record.scope === 'group' && this.config.requireMention === true;
-    const keyboard = buildKeyboard(question);
+    const keyboard = buildKeyboard(question, answerToken);
     const plain = formatQuestion(question, hint, false);
     try {
-      await this.sender.sendMarkdown(
-        deliveryPart(target, 'question', question.id),
+      const submitted = await this.sender.sendMarkdown(
+        deliveryPart(target, 'question', answerToken),
         keyboard ? formatQuestion(question, hint, true) : plain,
         keyboard ? { keyboard, fallbackText: plain } : undefined,
       );
+      if (submitted === false) throw new Error('QQ question was not submitted again');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`im-qqbot: question send failed key=${record.sessionKey}: ${msg}`);
