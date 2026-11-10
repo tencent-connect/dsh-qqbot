@@ -15,16 +15,17 @@ pnpm build
 
 这些命令不证明插件能在真实 Host 中加载。构建前先确认产物是否正在被其他实例使用；宿主集成启动器本身不会重建插件或 DSH。
 
-## 手动发送的形式化检查
+## 形式化检查
 
 安装 Java 11 或更高版本，下载 [TLC 1.7.4](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4) 的 `tla2tools.jar` 到仓库外。运行器验证 JAR 的 SHA-256。Java 不在 PATH 时可设置 `JAVA` 为可执行文件路径。
 
 ```bash
 TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal
 pnpm test src/transport/manual-send.test.ts src/transport/delivery-safety.test.ts
+pnpm test src/runtime/account-service.test.ts src/runtime/pairing-service.test.ts src/runtime/pairing-state.test.ts
 ```
 
-第一条检查账本完好与停机期间丢失时的模型，分别关掉发送前复查和账本保护作为负对照。第二条验证 TypeScript 实现中的撤权、账本迁移、重启防重和发送失败。两条都不依赖 DSH 或真实 QQ。当前仓库未接入此 CI 步骤。
+第一条运行手动发送和配对撤权的模型及负对照。后两条在实际插件代码中回放对应场景，包括账本丢失、配对状态重载和撤销记录回滚。全部使用本地夹具，无需 DSH 或 QQ 连接。当前仓库未接入此 CI 步骤。
 
 添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
 
