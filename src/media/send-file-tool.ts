@@ -1,8 +1,7 @@
 /**
  * 内置 qqbot_send_file 工具 — 将本地文件发送给 QQ 用户或群。
  *
- *   - 发送目标默认自动定位（exec.agent → SessionManager.findByAgent → replyTarget），
- *     无需模型手动传 openid；显式 target 参数作为覆盖。
+ *   - QQ 会话使用已验证的本轮对话。独立 DSH 会话可以显式指定目标。
  *   - 按扩展名分发到 SDK 的 sendImage / sendVideo / sendVoice / sendFile。
  *   - 路径白名单：默认只允许访问 media 目录 + agent cwd，可开关 + 扩展白名单。
  */
@@ -51,6 +50,10 @@ function parseTarget(input: string): ReplyTarget | undefined {
   return { scope, targetId };
 }
 
+function samePeer(current: ReplyTarget | undefined, destination: ReplyTarget): boolean {
+  return current?.scope === destination.scope && current.targetId === destination.targetId;
+}
+
 export interface SendFileRuntime {
   bot: MediaSenderLike;
   manager: Pick<SessionManager, 'findBySessionId' | 'deliveryAddress'>;
@@ -91,7 +94,7 @@ export function registerSendFileTool(
         },
         target: {
           type: 'string',
-          description: 'Optional send target as "c2c:openid" or "group:openid". Omit to send to the current conversation.',
+          description: 'Omit in a QQ session, or specify its current conversation only. Use "c2c:openid" or "group:openid" in a standalone DSH session.',
         },
       },
       required: ['file_path'],
@@ -141,10 +144,15 @@ export function registerSendFileTool(
       if (target && !explicit) {
         throw new Error('qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid');
       }
-      const destination = explicit ?? (owner ? targets.targetFor(agentId) : undefined);
+      const current = owner === undefined ? undefined : targets.targetFor(agentId);
+      if (owner !== undefined && !current) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
+      if (current && explicit && !samePeer(current, explicit)) {
+        throw new Error('qqbot_send_file: QQ 会话只能发送文件到当前对话');
+      }
+      const destination = current ?? explicit;
       if (!destination) throw new Error('qqbot_send_file: 无法确定发送目标');
       const allowed = () => runtime.active() && !exec.signal.aborted && allowTarget(destination)
-        && (owner === undefined ? routing.defaultAppId() === appId : targets.targetFor(agentId) !== undefined);
+        && (owner === undefined ? routing.defaultAppId() === appId : samePeer(targets.targetFor(agentId), destination));
       if (!allowed()) throw new Error('qqbot_send_file: 当前来源或目标不允许发送到 QQ');
       const replyTarget = bindDelivery(destination, {
         key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,

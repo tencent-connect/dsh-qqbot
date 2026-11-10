@@ -132,15 +132,15 @@ describe('durable delivery identities', () => {
 });
 
 describe('explicit file tool source and replay checks', () => {
-  function runtime(appId: string, sessionId: string) {
+  function runtime(appId: string, sessionId: string, current = target) {
     const cwd = directory(), file = join(cwd, 'test.txt'); writeFileSync(file, 'synthetic delivery');
-    const manager = { findBySessionId: () => undefined, deliveryAddress: (id: string) => id === sessionId ? target : undefined };
+    const manager = { findBySessionId: () => undefined, deliveryAddress: (id: string) => id === sessionId ? current : undefined };
     const raw = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'fixture' } }) };
     let eligible = true, active = true, admitted = true;
     const descriptor: SendFileRuntime = {
       bot: guardMedia(raw, new DeliveryLedger()), manager,
       config: { appId, cwd, sendFile: { restrictPaths: true, extraRoots: [] } },
-      targets: { targetFor: () => eligible ? target : undefined },
+      targets: { targetFor: () => eligible ? current : undefined },
       active: () => active,
       allowTarget: () => admitted,
     };
@@ -156,34 +156,52 @@ describe('explicit file tool source and replay checks', () => {
       defaultAppId: () => accounts.length === 1 ? accounts[0]?.descriptor.config.appId : undefined,
     }, logger);
     const definition = registry.register.mock.calls[0]?.[0] as { execute(args: unknown, exec: { agent: { id: string }; callId?: string; signal: AbortSignal }): Promise<unknown> };
-    return (file: string, callId: string | undefined, agentId: string) => definition.execute(
-      { file_path: file, target: 'group:explicit-target' },
+    return (file: string, callId: string | undefined, agentId: string, explicit?: string) => definition.execute(
+      { file_path: file, target: explicit },
       { agent: { id: agentId }, callId, signal: new AbortController().signal },
     );
   }
 
-  it('retains explicit targets but sends a repeated native call only once', async () => {
+  it('preserves the original reply target when explicitly sending to the current private chat', async () => {
     const f = runtime('app', 'qq-session'), execute = tool(f);
-    await expect(execute(f.file, 'native-call', f.sessionId)).resolves.toMatchObject({ target: 'group:explicit-target' });
+    await expect(execute(f.file, 'native-call', f.sessionId, 'c2c:synthetic-user')).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
     await expect(execute(f.file, 'native-call', f.sessionId)).rejects.toThrow('already submitted');
-    expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
+    expect(f.raw.sendFile).toHaveBeenCalledExactlyOnceWith(target, expect.anything(), expect.anything());
+  });
+
+  it.each<{ scope: ReplyTarget['scope']; explicit: string }>([
+    { scope: 'group', explicit: 'c2c:other-user' },
+    { scope: 'group', explicit: 'group:other-group' },
+    { scope: 'c2c', explicit: 'group:same-id' },
+  ])('rejects a $scope tool call to $explicit before invoking the SDK', async ({ scope, explicit }) => {
+    const current: ReplyTarget = { ...target, scope, targetId: 'same-id' };
+    const f = runtime('app', 'qq-session', current), execute = tool(f);
+    await expect(execute(f.file, 'file-call', f.sessionId, explicit)).rejects.toThrow('只能发送文件到当前对话');
+    expect(f.raw.sendFile).not.toHaveBeenCalled();
+  });
+
+  it('uses the original group target when the model omits the target', async () => {
+    const current: ReplyTarget = { ...target, scope: 'group', targetId: 'current-group' };
+    const f = runtime('app', 'qq-session', current), execute = tool(f);
+    await expect(execute(f.file, 'file-call', f.sessionId)).resolves.toMatchObject({ target: 'group:current-group' });
+    expect(f.raw.sendFile).toHaveBeenCalledExactlyOnceWith(current, expect.anything(), expect.anything());
   });
 
   it('an explicit target cannot override an ineligible QQ source or missing call identity', async () => {
     const f = runtime('app', 'qq-session'), execute = tool(f);
     await expect(execute(f.file, undefined, f.sessionId)).rejects.toThrow('调用身份');
     f.block();
-    await expect(execute(f.file, 'blocked', f.sessionId)).rejects.toThrow('当前来源');
+    await expect(execute(f.file, 'blocked', f.sessionId, 'group:explicit-target')).rejects.toThrow('当前来源');
     expect(f.raw.sendFile).not.toHaveBeenCalled();
   });
 
   it('preserves separately authorized explicit file calls outside a QQ Session', async () => {
     const f = runtime('app', 'qq-session'), execute = tool(f);
     f.block();
-    await expect(execute(f.file, 'external-explicit-call', 'native-web-session')).resolves.toMatchObject({ target: 'group:explicit-target' });
+    await expect(execute(f.file, 'external-explicit-call', 'native-web-session', 'group:explicit-target')).resolves.toMatchObject({ target: 'group:explicit-target' });
     expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
     f.revoke();
-    await expect(execute(f.file, 'revoked-call', 'native-web-session')).rejects.toThrow('目标不允许');
+    await expect(execute(f.file, 'revoked-call', 'native-web-session', 'group:explicit-target')).rejects.toThrow('目标不允许');
     expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
   });
 
@@ -199,10 +217,10 @@ describe('explicit file tool source and replay checks', () => {
     expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
 
     first.stop();
-    await expect(execute(second.file, 'stopped', first.sessionId)).rejects.toThrow('无法确定启用的 QQ 账号');
-    await expect(execute(second.file, 'ambiguous', 'native-web-session')).rejects.toThrow('无法确定启用的 QQ 账号');
+    await expect(execute(second.file, 'stopped', first.sessionId, 'group:explicit-target')).rejects.toThrow('无法确定启用的 QQ 账号');
+    await expect(execute(second.file, 'ambiguous', 'native-web-session', 'group:explicit-target')).rejects.toThrow('无法确定启用的 QQ 账号');
     expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
-    await expect(execute(second.file, 'still-running', second.sessionId)).resolves.toMatchObject({ target: 'group:explicit-target' });
+    await expect(execute(second.file, 'still-running', second.sessionId)).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
     expect(second.raw.sendFile).toHaveBeenCalledTimes(2);
   });
 });
@@ -371,7 +389,7 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.media.sendFile).toHaveBeenCalledWith(expect.objectContaining(target), { localPath: file }, { fileName: 'report.txt' });
   });
 
-  it('file calls use stable identities without removing explicit cross-conversation targeting', async () => {
+  it('the media guard deduplicates a file call to its authorized target', async () => {
     const ledger = new DeliveryLedger();
     const sender = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'id' } }) };
     const media = guardMedia(sender, ledger);
