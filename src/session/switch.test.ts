@@ -665,6 +665,8 @@ describe('会话显示标题（/sessions 列表项）', () => {
 
     const switched = await manager.switchSession('c2c', PEER, 'session-aaa');
     expect(switched).toMatchObject({ ok: true, title: '目标会话' });
+    // 目标会话所属工作区的显示名一并带回（确认文案用）
+    expect(switched.workspaceTitle).toBe('A');
 
     const current = await manager.switchSession('c2c', PEER, 'session-aaa');
     expect(current).toMatchObject({ ok: true, alreadyCurrent: true });

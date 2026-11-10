@@ -2,7 +2,7 @@
  * /sessions 命令层用例：分组渲染、QQ 标签、参数解析、准入错误与鉴权。
  */
 import { describe, it, expect, vi } from 'vitest';
-import { sessionsCommand, renderDigestLines } from './sessions.ts';
+import { sessionsCommand, renderDigestLines, formatSwitchTarget } from './sessions.ts';
 import { DIGEST_MESSAGE_CLIP } from '../shared/session-title.ts';
 
 const CONFIG = {
@@ -103,6 +103,7 @@ describe('/sessions 命令', () => {
     const manager = makeManager({
       switchSession: vi.fn(async () => ({
         ok: true,
+        workspaceTitle: 'A 项目',
         title: '登录页优化',
         recentMessages: [
           { role: 'user', text: '表单校验不生效' },
@@ -117,7 +118,7 @@ describe('/sessions 命令', () => {
     const result = await cmd.handler!(makeCmdCtx('2', []), {} as never);
 
     const text = String(result);
-    expect(text).toContain('✅ 已切换到会话 登录页优化');
+    expect(text).toContain('✅ 已切换到会话:[A 项目]>[登录页优化]');
     expect(text).toContain('**最近对话**');
     expect(text).toContain('🧑 表单校验不生效');
     expect(text).toContain('🤖 检查 zod schema 调用时机');
@@ -126,7 +127,7 @@ describe('/sessions 命令', () => {
     // 助手答句缩进挂在问句下（对话式排版）
     expect(text).toContain('\n   🤖 检查 zod schema 调用时机');
     // 预览块与确认标题之间空行分隔
-    expect(text).toContain('登录页优化\n\n**最近对话**');
+    expect(text).toContain('[A 项目]>[登录页优化]\n\n**最近对话**');
   });
 
   it('序号切换：无历史时省略摘要块；更早 0 条不提示', async () => {
@@ -150,7 +151,7 @@ describe('/sessions 命令', () => {
 
   it('序号切换：解析并切换目标，确认文案优先显示标题', async () => {
     const manager = makeManager({
-      switchSession: vi.fn(async () => ({ ok: true, title: '目标会话标题' })),
+      switchSession: vi.fn(async () => ({ ok: true, workspaceTitle: '工作区名', title: '目标会话标题' })),
     });
     const cmd = sessionsCommand({ manager, config: CONFIG });
 
@@ -158,7 +159,7 @@ describe('/sessions 命令', () => {
 
     expect(manager.resolveSessionTarget).toHaveBeenCalledWith('c2c', 'u1', '2');
     expect(manager.switchSession).toHaveBeenCalledWith('c2c', 'u1', 'session-free');
-    expect(String(result)).toContain('已切换到会话 目标会话标题');
+    expect(String(result)).toContain('已切换到会话:[工作区名]>[目标会话标题]');
     expect(String(result)).not.toContain('session-free');
   });
 
@@ -247,5 +248,27 @@ describe('renderDigestLines（最近对话排版）', () => {
     const lines = renderDigestLines([{ role: 'user', text: '字'.repeat(60) }]);
     expect(Array.from(lines[0]!.slice(3))).toHaveLength(DIGEST_MESSAGE_CLIP);
     expect(lines[0]!.endsWith('…')).toBe(true);
+  });
+});
+
+describe('formatSwitchTarget（切换目标标签）', () => {
+  it('工作区 + 会话名 → [工作区]>[会话]', () => {
+    expect(formatSwitchTarget({ workspaceTitle: 'A 项目', title: '登录页优化' }, 'session-x'))
+      .toBe('[A 项目]>[登录页优化]');
+  });
+
+  it('缺会话名 → 只显示工作区；缺工作区名 → 只显示会话名', () => {
+    expect(formatSwitchTarget({ workspaceTitle: 'A 项目' }, 'session-x')).toBe('[A 项目]');
+    expect(formatSwitchTarget({ title: '登录页优化' }, 'session-x')).toBe('登录页优化');
+  });
+
+  it('两者皆缺 → 回退 id 短码', () => {
+    expect(formatSwitchTarget({}, 'session-x')).toBe('session-x');
+  });
+
+  it('名称按码点裁剪（工作区 24 / 会话 40）', () => {
+    const label = formatSwitchTarget({ workspaceTitle: '工'.repeat(40), title: '会'.repeat(60) }, 'x');
+    expect(label).toContain('工'.repeat(23) + '…');
+    expect(label).toContain('会'.repeat(39) + '…');
   });
 });

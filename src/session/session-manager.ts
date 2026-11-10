@@ -1022,9 +1022,12 @@ export class SessionManager {
       }
       this.logger.info(`session switched: key=${key} -> ${targetSessionId}`);
       const digest = await this.host.sessionDigest(targetSessionId);
+      // 目标会话的工作区显示名（已登记取 title；未登记回退目录名）
+      const workspaceTitle = header?.cwd !== undefined ? this.workspaceNameOf(header.cwd) : undefined;
       return {
         ok: true as const,
         ...(digest?.title !== undefined ? { title: digest.title } : {}),
+        ...(workspaceTitle !== undefined ? { workspaceTitle } : {}),
         ...(digest && digest.recent.length > 0 ? {
           recentMessages: [...digest.recent],
           earlierMessages: Math.max(0, digest.totalMessages - digest.recent.length),

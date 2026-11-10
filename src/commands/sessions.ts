@@ -33,6 +33,22 @@ function displayName(session: { sessionId: string; title?: string }): string {
  * 用户问句顶格，助手答句缩进 3 空格挂在问句下（读起来像聊天记录）；
  * 每个回合之间空行分隔，避免 5 行等长文本挤成一堵墙。
  */
+/**
+ * 切换目标的可读标签：`[工作区名]>[会话名]`。
+ * 缺哪部分就省哪部分（工作区未登记 / 会话无标题），都缺时回退 id 短码。
+ */
+export function formatSwitchTarget(
+  target: { workspaceTitle?: string; title?: string },
+  fallbackId: string,
+): string {
+  const workspace = target.workspaceTitle !== undefined ? clipTitle(target.workspaceTitle, 24) : undefined;
+  const session = target.title !== undefined ? clipTitle(target.title, 40) : undefined;
+  if (workspace !== undefined && session !== undefined) return `[${workspace}]>[${session}]`;
+  if (workspace !== undefined) return `[${workspace}]`;
+  if (session !== undefined) return session;
+  return fallbackId;
+}
+
 export function renderDigestLines(messages: readonly DigestMessage[]): string[] {
   const lines: string[] = [];
   let previousRole: DigestMessage['role'] | undefined;
@@ -86,8 +102,9 @@ export function sessionsCommand({ manager, config }: CommandDeps): CategorizedCo
           if (outcome.reason === 'not-on-disk') return '切换失败：目标会话的磁盘记录已不存在';
           return '切换失败：目标会话不在宿主工作区账目内';
         }
-        if (outcome.alreadyCurrent) return `当前就在会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`;
-        const lines: string[] = [`✅ 已切换到会话 ${clipTitle(outcome.title ?? shortId(target), 40)}`];
+        const targetLabel = formatSwitchTarget(outcome, shortId(target));
+        if (outcome.alreadyCurrent) return `当前就在会话 ${targetLabel}`;
+        const lines: string[] = [`✅ 已切换到会话:${targetLabel}`];
         if (outcome.recentMessages !== undefined && outcome.recentMessages.length > 0) {
           lines.push('', '**最近对话**', '');
           lines.push(...renderDigestLines(outcome.recentMessages));
