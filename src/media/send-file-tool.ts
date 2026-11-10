@@ -1,8 +1,7 @@
 /**
  * 内置 qqbot_send_file 工具 — 将本地文件发送给 QQ 用户或群。
  *
- *   - 发送目标默认自动定位（exec.agent → SessionManager.findByAgent → replyTarget），
- *     无需模型手动传 openid；显式 target 参数作为覆盖。
+ *   - QQ 会话使用已验证的本轮对话。独立 DSH 会话可以显式指定目标。
  *   - 按扩展名分发到 SDK 的 sendImage / sendVideo / sendVoice / sendFile。
  *   - 路径白名单：默认只允许访问 media 目录 + agent cwd，可开关 + 扩展白名单。
  */
@@ -11,7 +10,7 @@ import { basename, resolve } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig } from '../config.ts';
-import type { DshAgent, SessionManager } from '../session/index.ts';
+import type { SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from './send-media.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
@@ -51,20 +50,8 @@ function parseTarget(input: string): ReplyTarget | undefined {
   return { scope, targetId };
 }
 
-/**
- * 当前会话的发送目标：优先回合投递解析（覆盖桌面恢复、不在会话表里的 agent，
- * 以及主动推送回合），否则回退到会话表里的 replyTarget。
- */
-function currentTarget(
-  agent: unknown,
-  manager: SessionManager,
-  targets: DeliveryTargetResolver | undefined,
-): ReplyTarget | undefined {
-  const agentId = (agent as { id?: unknown } | undefined)?.id;
-  if (targets !== undefined && typeof agentId === 'string' && agentId !== '') {
-    return targets.targetFor(agentId);
-  }
-  return manager.findByAgent(agent as DshAgent)?.replyTarget;
+function samePeer(current: ReplyTarget | undefined, destination: ReplyTarget): boolean {
+  return current?.scope === destination.scope && current.targetId === destination.targetId;
 }
 
 /** 注册 qqbot_send_file 工具（tools 服务缺失时优雅降级，不阻断插件启动） */
@@ -74,8 +61,8 @@ export function registerSendFileTool(
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
-  targets?: DeliveryTargetResolver,
-  active?: () => boolean,
+  targets: DeliveryTargetResolver,
+  active: () => boolean,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
@@ -97,7 +84,7 @@ export function registerSendFileTool(
         },
         target: {
           type: 'string',
-          description: 'Optional send target as "c2c:openid" or "group:openid". Omit to send to the current conversation.',
+          description: 'Omit in a QQ session, or specify its current conversation only. Use "c2c:openid" or "group:openid" in a standalone DSH session.',
         },
       },
       required: ['file_path'],
@@ -121,37 +108,31 @@ export function registerSendFileTool(
         return [{ type: 'text', text: `已发送 ${v.fileName} → ${v.target}` }];
       },
     },
-    async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown; callId?: string }): Promise<Record<string, unknown>> {
+    async execute(args: unknown, exec: { signal: AbortSignal; agent?: { id?: string }; callId?: string }): Promise<Record<string, unknown>> {
       const { file_path, target } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
       }
 
-      // 1. 解析发送目标：显式 target > 当前会话（exec.agent → SessionRecord）
-      let replyTarget: ReplyTarget | undefined;
-      if (target !== undefined && target !== '') {
-        replyTarget = parseTarget(target);
-        if (replyTarget === undefined) {
-          throw new Error(`qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid，收到: ${target}`);
-        }
-      } else if (exec.agent !== undefined) {
-        replyTarget = currentTarget(exec.agent, manager, targets);
-      }
-      if (replyTarget === undefined) {
-        throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
-      }
+      const agentId = exec.agent?.id;
+      if (!agentId || !exec.callId) throw new Error('qqbot_send_file: 缺少原生调用身份，不能确认发送归属');
 
-      if (active) {
-        const agentId = (exec.agent as { id?: string } | undefined)?.id;
-        if (!agentId || !exec.callId) throw new Error('qqbot_send_file: 缺少原生调用身份，不能确认发送归属');
-        const qqSession = manager.findBySessionId(agentId) ?? manager.deliveryAddress(agentId);
-        const allowed = () => active() && !exec.signal.aborted
-          && (!qqSession || targets?.targetFor(agentId) !== undefined);
-        if (!allowed()) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
-        // Explicit targets remain supported. The originating invocation still
-        // needs an eligible source and a stable callId, even with an override.
-        replyTarget = bindDelivery(replyTarget, { key: deliveryKey('file-tool', agentId, exec.callId), allowed, fixed: true });
+      const explicit = target ? parseTarget(target) : undefined;
+      if (target && !explicit) {
+        throw new Error('qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid');
       }
+      const qqSession = manager.deliveryAddress(agentId) !== undefined;
+      const current = qqSession ? targets.targetFor(agentId) : undefined;
+      if (qqSession && !current) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
+      if (current && explicit && !samePeer(current, explicit)) {
+        throw new Error('qqbot_send_file: QQ 会话只能发送文件到当前对话');
+      }
+      const destination = current ?? explicit;
+      if (!destination) throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
+      const allowed = () => active() && !exec.signal.aborted
+        && (!qqSession || samePeer(targets.targetFor(agentId), destination));
+      if (!allowed()) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
+      const replyTarget = bindDelivery(destination, { key: deliveryKey('file-tool', agentId, exec.callId), allowed, fixed: true });
 
       // 2. 校验文件 + 路径白名单
       const absPath = resolve(file_path);
