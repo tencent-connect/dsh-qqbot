@@ -680,6 +680,31 @@ describe('web workbench session switching', () => {
     expect(handles[0]?.dispose).toHaveBeenCalledOnce();
   });
 
+  it('stops archived ingress, resumes the same binding after restore, and allows an explicit new Session', async () => {
+    const old = fakeHandle('session-old');
+    const { registry } = createRegistry(async () => old);
+    const workspace = { archivedSessionIds: [old.agent.id] };
+    const ctx = {
+      get: (name: string) => name === 'workspaceRegistry' ? workspace
+        : name === 'sessionPersistence' ? { stat: async () => ({ header: {} }) } : undefined,
+      on: vi.fn(),
+    } as unknown as Context;
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, ctx);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+    workspace.archivedSessionIds = [];
+    const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(original.sessionId).toBe(old.agent.id);
+    workspace.archivedSessionIds = [old.agent.id];
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    const next = await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(next);
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+  });
+
   it('declines a new session when the current native agent is running', async () => {
     const old = fakeHandle('session-old');
     Object.defineProperty(old.agent, 'status', { value: 'running' });

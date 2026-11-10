@@ -12,7 +12,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { QqInputRegistry } from './qq-input-origin.ts';
 import { deliveryKey } from './delivery-ledger.ts';
-import type { SessionManager } from '../session/index.ts';
+import { SessionArchivedError, type SessionManager } from '../session/session-manager.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
 import {
@@ -137,10 +137,11 @@ export async function handleInbound(
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     if (!canSubmit()) return;
-    report?.(replyTarget, 'submit-failed');
+    const archived = err instanceof SessionArchivedError;
+    report?.(replyTarget, archived ? 'session-archived' : 'submit-failed');
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
-      await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');
+      await bot.sendMarkdown(replyTarget, archived ? err.message : '⚠️ 处理消息时出现异常，请稍后重试。');
     } catch (sendErr) {
       logger.error(`fallback reply failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
     }

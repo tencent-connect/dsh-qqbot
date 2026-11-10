@@ -13,7 +13,7 @@
  * 声明访问（声明缺失时插件保持 inactive，不阻塞浏览器启动）。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { createElement, type ReactNode } from 'react';
+import { createElement, useCallback, useSyncExternalStore, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
@@ -32,6 +32,8 @@ const TAB_ID = 'im-qqbot/bind';
 const PACKAGE_NAME = '@tencent-connect/dsh-qqbot';
 /** 主面板 id（layout.selectPanel 导航目标；keyed main 席位按其分发） */
 const IM_MAIN_PANEL_ID = 'im-qqbot';
+const emptyArchived: readonly string[] = [];
+const noop = (): void => {};
 
 /** ui-sidebar-right 的 Tab 注册表服务（局部投影） */
 interface TabRegistryLike {
@@ -239,21 +241,33 @@ export function apply(ctx: Context): void {
         } | undefined)?.list?.getSnapshot().items ?? [],
       };
       const QQBotPage = (): ReactNode => {
-        const workspace = pageCtx.get('uiWorkspace') as { openSession?(id: string): void } | undefined;
+        const workspace = pageCtx.get('uiWorkspace') as {
+          openSession?(id: string): void;
+          unarchiveSession?(id: string): Promise<void>;
+        } | undefined;
         const sessions = pageCtx.get('sessions') as {
           list?: { getSnapshot(): { byId: Record<string, { title?: string }> } };
         } | undefined;
         const workspaces = pageCtx.get('workspaces') as {
-          list?: { getSnapshot(): {
-            archivedSessionIds: readonly string[];
-            items: readonly { path: string; title: string; sessionIds: readonly string[] }[];
-          } };
+          list?: {
+            subscribe?(listener: () => void): () => void;
+            getSnapshot(): {
+              archivedSessionIds: readonly string[];
+              items: readonly { path: string; title: string; sessionIds: readonly string[] }[];
+            };
+          };
         } | undefined;
         const open = workspace?.openSession?.bind(workspace);
+        const list = workspaces?.list;
+        const archivedSessionIds = useSyncExternalStore(
+          useCallback(listener => list?.subscribe?.(listener) ?? noop, [list]),
+          () => list?.getSnapshot().archivedSessionIds ?? emptyArchived,
+        );
         return createElement(QQWorkbench, {
           primarySettings: createElement(QQBotSettingsSection),
           primaryAccountSettings: createElement<{ accountOnly?: boolean }>(QQBotSettingsSection, { accountOnly: true }),
-          agentSource,
+          agentSource, archivedSessionIds,
+          restoreSession: workspace?.unarchiveSession?.bind(workspace),
           openSession: open ? id => {
             if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
               throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');

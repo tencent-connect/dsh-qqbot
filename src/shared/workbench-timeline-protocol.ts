@@ -5,7 +5,7 @@ export const TIMELINE_PAGE_SIZE = 40;
 
 export type TimelineStatus = 'received' | 'sending' | 'partial' | 'accepted' | 'rejected' | 'unknown';
 
-export type TimelineInboundOutcome = 'mention-required' | 'rate-limited' | 'queue-full' | 'empty' | 'submitted' | 'submit-failed';
+export type TimelineInboundOutcome = 'mention-required' | 'rate-limited' | 'queue-full' | 'empty' | 'submitted' | 'submit-failed' | 'session-archived';
 
 export interface TimelineEntry {
   id: string;

@@ -65,11 +65,12 @@ function workspaceName(cwd: string | undefined): string {
   return cwd?.split(/[\\/]/).filter(Boolean).at(-1) || cwd || '';
 }
 
-function receivingLabel(robot: WorkbenchRobot, peer: WorkbenchConversation): string {
+function receivingLabel(robot: WorkbenchRobot, peer: WorkbenchConversation, archived = false): string {
   if (!robot.enabled) return '机器人已停用';
   if (!peer.admitted) return '未获准接入';
   if (!peer.receiving) return '已暂停接收';
   if (robot.state !== 'connected') return ROBOT_STATE_LABELS[robot.state];
+  if (archived) return '当前 Session 已归档';
   return peer.currentSessionId ? '当前接收' : '等待首个 Session';
 }
 
@@ -110,6 +111,8 @@ function mergeDraft(peer: WorkbenchConversation, draft: Draft, edited: Partial<E
 
 interface SessionNavigation {
   openSession?: (id: string) => void;
+  restoreSession?: (id: string) => Promise<void>;
+  archivedSessionIds?: readonly string[];
   sessionTitle?: (id: string) => string | undefined;
   workspaceTitle?: (id: string, cwd?: string) => string | undefined;
 }
@@ -218,7 +221,7 @@ interface RobotConversationsProps extends SessionNavigation {
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
   const [peers, setPeers] = useState<WorkbenchConversation[] | null>(null);
   const [selection, setSelection] = useState(() => peerSelections.get(appId));
@@ -227,6 +230,8 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
   const [reload, setReload] = useState(0);
   const [loadError, setLoadError] = useState('');
   const [openError, setOpenError] = useState('');
+  const [restoring, setRestoring] = useState<string>();
+  const [restoreError, setRestoreError] = useState<{ id: string; message: string }>();
   const [sessionNotice, setSessionNotice] = useState<{ key: string; text: string }>();
   const [newSession, setNewSession] = useState<{ peer: WorkbenchConversation; settings: WorkbenchAgentSettings }>();
   const [createError, setCreateError] = useState('');
@@ -293,7 +298,22 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
   const peer = peers?.find(item => conversationKey(item) === selection) ?? peers?.[0];
   const peerKey = peer ? scopedKey(appId, peer) : undefined;
   const current = peer?.sessions.find(session => session.id === peer.currentSessionId);
-  const label = peer ? receivingLabel(robot, peer) : '';
+  const isArchived = (id?: string): boolean => id !== undefined && archivedSessionIds?.includes(id) === true;
+  const currentArchived = isArchived(current?.id);
+  const label = peer ? receivingLabel(robot, peer, currentArchived) : '';
+
+  const restoreCurrent = async (): Promise<void> => {
+    if (!current || !currentArchived || !restoreSession || restoring || mutation.current) return;
+    setRestoreError(undefined);
+    setRestoring(current.id);
+    try {
+      await restoreSession(current.id);
+    } catch (error) {
+      setRestoreError({ id: current.id, message: error instanceof Error ? error.message : '无法恢复原会话。' });
+    } finally {
+      setRestoring(undefined);
+    }
+  };
 
   const save = async (target: WorkbenchConversation, draft: Draft): Promise<void> => {
     if (mutation.current) return;
@@ -436,7 +456,7 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
                 }, h(IconChevronDownOutlineRegular, { size: 14 })),
                 h('button', {
                   className: 'imqw-peer-select', type: 'button', 'aria-pressed': item === peer, onClick: () => selectPeer(item),
-                }, h('strong', { title: peerName(item) }, peerName(item)), h('span', { className: 'imqw-muted' }, receivingLabel(robot, item))),
+                }, h('strong', { title: peerName(item) }, peerName(item)), h('span', { className: 'imqw-muted' }, receivingLabel(robot, item, isArchived(item.currentSessionId)))),
               ),
               expanded ? h('ul', { className: 'imqw-sessions' },
                 list.map(session => {
@@ -448,7 +468,7 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
                   },
                     h('span', { className: 'imqw-session-title' }, title),
                     h('span', { className: 'imqw-muted' }, [
-                      activeSession ? receivingLabel(robot, item) : '历史',
+                      activeSession ? receivingLabel(robot, item, isArchived(session.id)) : isArchived(session.id) ? '已归档' : '历史',
                       workspaceTitle?.(session.id, session.cwd) || workspaceName(session.cwd), sessionDate(session),
                     ].filter(Boolean).join(' · ')),
                   ));
@@ -473,10 +493,13 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
           h('h2', { title: peer && peerName(peer) }, peer ? peerName(peer) : accountName(robot)),
           h('p', { className: 'imqw-muted' }, peer ? `${peer.scope === 'group' ? '群聊' : '私聊'} · ${label}` : '请从会话列表选择对话')),
         h('div', { className: 'imqw-actions' },
-          current ? h(Button, { size: 'sm', variant: 'outline', disabled: !openSession, onClick: () => openNative(current.id) }, '打开当前 Session') : null,
+          currentArchived
+            ? h(Button, { size: 'sm', variant: 'outline', disabled: !restoreSession || !!busyKey || !!restoring,
+              onClick: () => { void restoreCurrent(); } }, restoring === current?.id ? '恢复中…' : '恢复原会话')
+            : current ? h(Button, { size: 'sm', variant: 'outline', disabled: !openSession, onClick: () => openNative(current.id) }, '打开当前 Session') : null,
           peer ? h(Button, {
             size: 'sm', variant: 'outline', type: 'button',
-            disabled: !peer.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey,
+            disabled: !peer.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey || !!restoring,
             onClick: openNewSession,
           }, '新建 Session') : null,
           peer ? h(Button, {
@@ -486,6 +509,10 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
           }, h(IconSettingsOutlineRegular, { size: 14 }), '会话设置') : null,
         ),
       ),
+      currentArchived ? h('p', { className: 'imqw-muted', role: 'status' },
+        restoreSession ? '恢复原会话可继续原有上下文。也可以新建 Session 接收后续消息。'
+          : '请在 DSH 工作区取消归档，或新建 Session 接收后续消息。') : null,
+      current && restoreError?.id === current.id ? h('p', { className: 'imqb-error', role: 'alert' }, restoreError.message) : null,
       openError ? h('p', { className: 'imqb-error', role: 'alert' }, openError) : null,
       sessionNotice && sessionNotice.key === peerKey ? h('p', { className: 'imqw-muted', role: 'status' }, sessionNotice.text) : null,
       current ? h('p', { className: 'imqw-muted imqw-session-caption' }, [
@@ -500,7 +527,7 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
     settingsDivider,
     h('aside', { id: settingsId, className: 'imqw-settings', 'aria-label': '会话设置', hidden: !settingsOpen },
       peer && peerKey ? h(ConversationSettings, {
-            key: peerKey, robot, peer, agentSource, closeButton,
+            key: peerKey, robot, peer, agentSource, closeButton, archived: currentArchived,
             workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
             busy: busyKey === peerKey, feedback: feedback?.key === peerKey ? feedback : undefined,
             onEdit: draft => {
@@ -551,6 +578,7 @@ interface ConversationSettingsProps {
   peer: WorkbenchConversation;
   agentSource?: AgentFormSource;
   closeButton: ReactNode;
+  archived: boolean;
   workspace?: string;
   draft: Draft;
   busy: boolean;
@@ -559,7 +587,7 @@ interface ConversationSettingsProps {
   onSave: (draft: Draft) => void;
 }
 
-function ConversationSettings({ robot, peer, agentSource, closeButton, workspace, draft, busy, feedback, onEdit, onSave }: ConversationSettingsProps): ReactNode {
+function ConversationSettings({ robot, peer, agentSource, closeButton, archived, workspace, draft, busy, feedback, onEdit, onSave }: ConversationSettingsProps): ReactNode {
   const [adoptError, setAdoptError] = useState('');
   const [reading, setReading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -630,7 +658,7 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, workspace
     ) }),
     fields ? h(Fragment, null,
       h(SettingsGroup, { title: 'Agent 基本设置', children: h(Fragment, null,
-        current ? h('p', { className: 'imqw-muted' }, ['当前 Session', workspace || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ')) : null,
+        current ? h('p', { className: 'imqw-muted' }, [archived ? '当前 Session 已归档' : '当前 Session', workspace || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ')) : null,
         h('p', { className: 'imqw-muted' }, 'Agent 选项用于下次新建；工具限制保存即生效。'),
         h(WorkbenchAgentFields, { ...fields, source: agentSource }),
       ) }),

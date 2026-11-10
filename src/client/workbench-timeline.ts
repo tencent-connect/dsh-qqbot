@@ -16,6 +16,7 @@ const inboundLabel: Record<TimelineInboundOutcome, string> = {
   empty: '没有可提交给 DSH 的内容',
   submitted: '已提交到 DSH',
   'submit-failed': '提交到 DSH 失败',
+  'session-archived': '当前 Session 已归档，消息未提交',
 };
 const sourceLabel: Record<NonNullable<TimelineEntry['source']>, string> = {
   automatic: '自动回复', agent: 'Agent 投递', manual: '网页直发', answer: 'Session 回答',

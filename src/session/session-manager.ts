@@ -46,6 +46,7 @@ import type {
 } from './types.ts';
 
 export class SessionSwitchConflict extends Error {}
+export class SessionArchivedError extends Error {}
 
 export interface PeerAgentSettings {
   read(key: string): WorkbenchAgentSettings | undefined;
@@ -572,6 +573,14 @@ export class SessionManager {
     finally { this.switching.delete(key); }
   }
 
+  private assertNotArchived(sessionId: string): void {
+    const workspace = this.host.globalService('workspaceRegistry') as { archivedSessionIds?: readonly string[] } | undefined;
+    const archived = workspace?.archivedSessionIds;
+    if (Array.isArray(archived) && archived.includes(sessionId)) {
+      throw new SessionArchivedError('当前 DSH Session 已归档，请在 QQ 工作台恢复原会话或新建 Session。');
+    }
+  }
+
   /** 获取或恢复或创建会话（get → resume → create）；同 key 并发合并为一次 */
   async getOrCreate(
     scope: ChatScope,
@@ -584,6 +593,7 @@ export class SessionManager {
       await this.switching.get(key)?.catch(() => {});
     }
     const existing = this.sessions.get(key);
+    this.assertNotArchived(existing?.sessionId ?? this.currentSessionId(key));
 
     if (existing) {
       existing.replyTarget = replyTarget;
@@ -596,6 +606,7 @@ export class SessionManager {
     const pending = this.inflight.get(key);
     if (pending) {
       const shared = await pending;
+      this.assertNotArchived(shared.sessionId);
       shared.replyTarget = replyTarget;
       shared.lastActivity = Date.now();
       return shared;
@@ -604,7 +615,9 @@ export class SessionManager {
     const task = this.openSession(key, scope, peerId, senderId, replyTarget);
     this.inflight.set(key, task);
     try {
-      return await task;
+      const record = await task;
+      this.assertNotArchived(record.sessionId);
+      return record;
     } finally {
       this.inflight.delete(key);
     }
