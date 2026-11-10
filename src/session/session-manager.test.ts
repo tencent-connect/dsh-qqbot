@@ -6,7 +6,7 @@
  * - E3 连带：prefs 损坏导致映射丢失时必须留下可见日志
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -32,6 +32,10 @@ const KEY = `qqbot:${APP_ID}:c2c:${PEER}`;
 const LEGACY_ID = legacyDerivedSessionId(KEY);
 const MINTED = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REPLY: ReplyTarget = { scope: 'c2c', targetId: PEER, msgId: 'm1' };
+const WORKBENCH_SETTINGS: WorkbenchAgentSettings = {
+  model: { provider: 'p', model: 'm' }, reasoningEffort: '', preset: '', cwd: '', permission: '',
+  groupPrompt: '', directPrompt: '', streaming: false, showToolResults: false,
+};
 
 /** agents.resume 对不存在会话的报错 */
 const notFound = (id: string): Error =>
@@ -396,6 +400,54 @@ describe('getOrCreate — E1 resume 失败按会话是否存在分流', () => {
 });
 
 describe('getOrCreate — E2 确定性 id 不进入新建路径', () => {
+  it('does not restore the old binding when resume finishes after /new', async () => {
+    const old = fakeHandle('session-old');
+    const pending = deferred<DshAgentHandle>();
+    const { registry } = createRegistry(({ resumeSessionId }) =>
+      resumeSessionId === old.agent.id ? pending.promise : Promise.reject(notFound(resumeSessionId)));
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, onDiskCtx(old.agent.id));
+    const incoming = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await vi.waitFor(() => expect(registry.resume).toHaveBeenCalledTimes(1));
+
+    await manager.remove('c2c', PEER);
+    const newBinding = persistedId();
+    pending.resolve(old);
+
+    expect((await incoming).sessionId).toBe(newBinding);
+    expect(persistedId()).toBe(newBinding);
+    expect(manager.getSessionRecord('c2c', PEER)?.sessionId).toBe(newBinding);
+    expect(old.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each(['QQ', 'Web'] as const)('discards a retired manager candidate after the new manager binds through %s', async source => {
+    const gate = deferred<void>();
+    const { registry, handles } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const oldCreate = registry.create.getMockImplementation();
+    if (!oldCreate) throw new Error('test registry has no create implementation');
+    registry.create.mockImplementationOnce(async options => {
+      await gate.promise;
+      return oldCreate(options);
+    });
+    const oldManager = createManager(registry);
+    const incoming = oldManager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await vi.waitFor(() => expect(registry.create).toHaveBeenCalledTimes(1));
+
+    await oldManager.disposeAll();
+    const reloaded = createManagerWithCtx(registry, persistenceCtx(async id =>
+      handles.some(handle => handle.agent.id === id) ? { header: {} } : undefined));
+    if (source === 'QQ') await reloaded.remove('c2c', PEER);
+    else await reloaded.createAndBindSession('c2c', PEER, null, WORKBENCH_SETTINGS, () => {});
+    const current = await reloaded.getOrCreate('c2c', PEER, PEER, REPLY);
+    const rejected = expect(incoming).rejects.toThrow('已停用');
+    gate.resolve();
+    await rejected;
+
+    expect(persistedId()).toBe(current.sessionId);
+    expect(oldManager.getSessionRecord('c2c', PEER)).toBeUndefined();
+    expect(handles[1]?.dispose).toHaveBeenCalledOnce();
+  });
+
   it('E2-1 resume(legacy) 期间 /new 写入新 id → 采用 prefs 最新 id 新建，内存与 prefs 一致', async () => {
     const pending = deferred<DshAgentHandle>();
     const { registry } = createRegistry(() => pending.promise);
@@ -633,14 +685,12 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
 });
 
 describe('web workbench session switching', () => {
-  const settings: WorkbenchAgentSettings = {
-    model: { provider: 'p', model: 'm' }, reasoningEffort: '', preset: '', cwd: '', permission: '',
-    groupPrompt: '', directPrompt: '', streaming: false, showToolResults: false,
-  };
+  const settings = WORKBENCH_SETTINGS;
 
   it('waits for the new native session, keeps history, and sends waiting input to the new binding', async () => {
     const gate = deferred<void>();
     const old = fakeHandle('session-old');
+    vi.mocked(old.dispose).mockRejectedValueOnce(new Error('cleanup failed'));
     const stored = new Set([old.agent.id]);
     const { registry } = createRegistry(async () => old);
     registry.create.mockImplementation(async ({ sessionId }) => {
@@ -660,6 +710,7 @@ describe('web workbench session switching', () => {
     const id = await start;
     expect((await incoming).sessionId).toBe(id);
     expect(persistedId()).toBe(id);
+    await vi.waitFor(() => expect(old.dispose).toHaveBeenCalledOnce());
     expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
     await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('已变化');
     expect(registry.create).toHaveBeenCalledTimes(1);
@@ -678,6 +729,37 @@ describe('web workbench session switching', () => {
     expect(persistedId()).toBe(record.sessionId);
     expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(record);
     expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the current binding if saving either the Web or QQ switch fails', async () => {
+    const old = fakeHandle('session-old');
+    const { registry, handles } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    const current = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const prefsPath = join(env.home, 'model-prefs.json');
+    const backup = join(env.home, 'saved-prefs.json');
+    let checks = 0;
+
+    try {
+      await expect(manager.createAndBindSession('c2c', PEER, current.sessionId, settings, () => {
+        if (++checks !== 2) return;
+        renameSync(prefsPath, backup);
+        mkdirSync(prefsPath);
+      })).rejects.toThrow();
+      expect(checks).toBe(2);
+      await expect(manager.remove('c2c', PEER)).rejects.toThrow('无法保存新 Session');
+    } finally {
+      if (checks === 2) {
+        rmSync(prefsPath, { recursive: true, force: true });
+        renameSync(backup, prefsPath);
+      }
+    }
+
+    expect(persistedId()).toBe(current.sessionId);
+    expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(current);
+    expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+    expect(old.dispose).not.toHaveBeenCalled();
   });
 
   it('stops archived ingress, resumes the same binding after restore, and allows an explicit new Session', async () => {

@@ -99,6 +99,7 @@ export class SessionManager {
   private inflight = new Map<string, Promise<SessionRecord>>();
   private readonly switching = new Map<string, Promise<string>>();
   private readonly rebuilding = new Set<string>();
+  private active = true;
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -243,6 +244,7 @@ export class SessionManager {
    * 切换模型（fork + 重建会话，保留历史）
    */
   async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
+    this.assertActive();
     const key = this.sessionKey(scope, peerId);
 
     if (this.switching.has(key) || this.rebuilding.has(key)) {
@@ -331,6 +333,8 @@ export class SessionManager {
     }
 
     const seed = await this.host.buildForkSeed(events, boundary);
+    this.assertActive();
+    if (this.sessions.get(key) !== record) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
     if (seed === undefined) {
       this.logger.warn(`fork seed unavailable (old host), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
@@ -364,7 +368,14 @@ export class SessionManager {
       },
     });
 
-    this.modelResolver.setSessionId(key, childId);
+    try {
+      this.assertActive();
+      if (this.sessions.get(key) !== record) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+      this.modelResolver.setSessionId(key, childId, { durable: true });
+    } catch (error) {
+      await created.dispose().catch(() => {});
+      throw error;
+    }
 
     const oldHandle = record.handle;
     const oldAgent = record.agent;
@@ -488,7 +499,7 @@ export class SessionManager {
   /** 候选命中后落盘，后续永远走 prefs */
   private persistSessionId(sessionKey: string, sessionId: string): void {
     if (this.modelResolver.getSessionId(sessionKey) !== sessionId) {
-      this.modelResolver.setSessionId(sessionKey, sessionId);
+      this.modelResolver.setSessionId(sessionKey, sessionId, { durable: true });
     }
   }
 
@@ -525,6 +536,7 @@ export class SessionManager {
     settings: WorkbenchAgentSettings,
     assertCurrent: () => void,
   ): Promise<string> {
+    this.assertActive();
     const key = this.sessionKey(scope, peerId);
     const busy = () => new SessionSwitchConflict('此 QQ 会话正在处理任务，请在空闲后新建。');
     if (this.inflight.has(key) || this.switching.has(key) || this.rebuilding.has(key)) throw busy();
@@ -538,6 +550,7 @@ export class SessionManager {
       const exists = await this.host.sessionExists(previous);
       if (exists === undefined) throw new Error('当前宿主无法确认 Session 已保存。');
       if ((exists ? previous : null) !== expected) throw conflict();
+      this.assertActive();
       assertCurrent();
       const id = SessionId(mintSessionId());
       const { handle, cwd, agentPreset } = await this.createFresh(key, id, settings);
@@ -545,6 +558,7 @@ export class SessionManager {
         if (!await this.host.sessionExists(id)) throw new Error('新 Session 未保存，请检查宿主持久化。');
         if (this.currentSessionId(key) !== previous) throw conflict();
         if (previousAgent()?.status === 'running') throw busy();
+        this.assertActive();
         assertCurrent();
         this.modelResolver.setSessionId(key, id, { durable: true, previous: expected ?? undefined });
       } catch (error) {
@@ -592,6 +606,7 @@ export class SessionManager {
     while (this.switching.has(key)) {
       await this.switching.get(key)?.catch(() => {});
     }
+    this.assertActive();
     const existing = this.sessions.get(key);
     this.assertNotArchived(existing?.sessionId ?? this.currentSessionId(key));
 
@@ -606,6 +621,7 @@ export class SessionManager {
     const pending = this.inflight.get(key);
     if (pending) {
       const shared = await pending;
+      this.assertActive();
       this.assertNotArchived(shared.sessionId);
       shared.replyTarget = replyTarget;
       shared.lastActivity = Date.now();
@@ -616,6 +632,7 @@ export class SessionManager {
     this.inflight.set(key, task);
     try {
       const record = await task;
+      this.assertActive();
       this.assertNotArchived(record.sessionId);
       return record;
     } finally {
@@ -623,7 +640,7 @@ export class SessionManager {
     }
   }
 
-  /** getOrCreate 的实际打开流程（已通过 singleflight 保证同 key 串行） */
+  // A QQ /new can advance the binding while the host is opening a session.
   private async openSession(
     key: string,
     scope: ChatScope,
@@ -631,11 +648,31 @@ export class SessionManager {
     senderId: string,
     replyTarget: ReplyTarget,
   ): Promise<SessionRecord> {
+    for (;;) {
+      this.assertActive();
+      const binding = this.modelResolver.getSessionId(key);
+      try {
+        const record = await this.openSessionAttempt(key, binding, scope, peerId, senderId, replyTarget);
+        if (record) return record;
+      } catch (error) {
+        this.assertActive();
+        if (this.modelResolver.getSessionId(key) === binding) throw error;
+      }
+    }
+  }
+
+  private async openSessionAttempt(
+    key: string,
+    binding: string | undefined,
+    scope: ChatScope,
+    peerId: string,
+    senderId: string,
+    replyTarget: ReplyTarget,
+  ): Promise<SessionRecord | undefined> {
     const settings = this.peerSettings?.read(key);
     const route = this.configuredRoute(key, settings);
     // prefs 命中 = 已知存量会话；miss 时取 0.5.x 派生 id 仅作存量探测候选，不用于新建
-    const candidateIsLegacy = this.modelResolver.getSessionId(key) === undefined;
-    let sessionId = SessionId(this.currentSessionId(key));
+    let sessionId = SessionId(binding ?? legacyDerivedSessionId(key));
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
@@ -647,8 +684,6 @@ export class SessionManager {
     const live = this.agents.get(sessionId);
     if (live) {
       agent = live;
-      await this.peerSettings?.constrain?.(agent, key);
-      this.persistSessionId(key, sessionId);
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
       const presetId = header ? (header.agentPreset ?? this.config.preset) : this.getEffectivePresetByKey(key);
@@ -666,23 +701,35 @@ export class SessionManager {
         });
         agent = resumed.agent;
         handle = resumed;
-        // 0.5.x 迁移：候选命中老会话，沿用并落盘
-        this.persistSessionId(key, sessionId);
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
       } catch (err) {
         if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
-        sessionId = this.resolveCreateId(key, sessionId, candidateIsLegacy);
+        this.assertActive();
+        if (this.modelResolver.getSessionId(key) !== binding) return undefined;
+        if (binding === undefined) sessionId = SessionId(mintSessionId());
         const created = await this.createFresh(key, sessionId, settings);
         agentPreset = created.agentPreset;
         cwd = created.cwd;
         agent = created.handle.agent;
         handle = created.handle;
-        this.persistSessionId(key, sessionId);
         this.logger.info(`created new session: key=${key} sessionId=${sessionId} preset=${agentPreset ?? 'none'}`);
       }
     }
 
-    await this.peerSettings?.constrain?.(agent, key);
+    // The host and tool-policy setup above can both finish after a reset or reload.
+    try {
+      await this.peerSettings?.constrain?.(agent, key);
+      this.assertActive();
+      if (this.modelResolver.getSessionId(key) !== binding) {
+        await handle?.dispose().catch(() => {});
+        return undefined;
+      }
+      this.assertNotArchived(sessionId);
+      this.persistSessionId(key, sessionId);
+    } catch (error) {
+      await handle?.dispose().catch(() => {});
+      throw error;
+    }
     const record: SessionRecord = {
       sessionKey: key,
       sessionId,
@@ -770,28 +817,6 @@ export class SessionManager {
     return true;
   }
 
-  /**
-   * 确认候选会话缺失后决定用哪个 id 新建。
-   *
-   * - resume 等待期间 prefs 被并发改写（`/new` 换新会话）：采用 prefs 的最新 id，
-   *   否则内存与 prefs 指向不同会话，重启后用户被切走；
-   * - 候选来自 0.5.x 确定性派生：一律铸造新 id，确定性 id 不进入新建路径；
-   * - 候选来自 prefs 且确认缺失：沿用该 id 新建，prefs 无需改写。
-   */
-  private resolveCreateId(key: string, candidate: SessionId, candidateIsLegacy: boolean): SessionId {
-    const latest = this.modelResolver.getSessionId(key);
-    if (latest !== undefined && latest !== candidate) {
-      this.logger.info(`adopting concurrently written session id: key=${key} sessionId=${latest}`);
-      return SessionId(latest);
-    }
-    if (candidateIsLegacy) {
-      const minted = SessionId(mintSessionId());
-      this.logger.info(`migrated to minted session id: key=${key} sessionId=${minted}`);
-      return minted;
-    }
-    return candidate;
-  }
-
   findBySessionId(sessionId: string): SessionRecord | undefined {
     for (const record of this.sessions.values()) {
       if (record.sessionId === sessionId) return record;
@@ -832,10 +857,15 @@ export class SessionManager {
   }
 
   async remove(scope: ChatScope, peerId: string): Promise<void> {
+    this.assertActive();
     const key = this.sessionKey(scope, peerId);
-    if (this.switching.has(key)) throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
+    if (this.switching.has(key) || this.rebuilding.has(key)) throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
     const record = this.sessions.get(key);
-    this.modelResolver.setSessionId(key, mintSessionId());
+    try {
+      this.modelResolver.setSessionId(key, mintSessionId(), { durable: true });
+    } catch {
+      throw new SessionSwitchConflict('无法保存新 Session，原会话保持不变，请稍后重试。');
+    }
 
     if (!record) return;
     this.sessions.delete(key);
@@ -907,7 +937,16 @@ export class SessionManager {
     }
   }
 
+  deactivate(): void {
+    this.active = false;
+  }
+
+  private assertActive(): void {
+    if (!this.active) throw new SessionSwitchConflict('QQ 网关已停用，请稍后重试。');
+  }
+
   async disposeAll(): Promise<void> {
+    this.deactivate();
     this.evictor.dispose();
     const records = [...this.sessions.values()];
     this.sessions.clear();

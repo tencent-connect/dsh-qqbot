@@ -92,6 +92,10 @@ export function bootstrapGateway(
   let active = true;
   let state: WorkbenchRobot['state'] = 'connecting';
   const isActive = () => active;
+  const deactivate = () => {
+    active = false;
+    manager.deactivate();
+  };
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
   const allowTarget = (target: ReplyTarget) => {
     if (!active || receiving?.(target) === false) return false;
@@ -298,7 +302,7 @@ export function bootstrapGateway(
       });
 
       return async () => {
-        active = false;
+        deactivate();
         logger.info('Shutting down');
         const cleanups = [
           () => bot.stop(),
@@ -318,6 +322,6 @@ export function bootstrapGateway(
     manual,
     bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,
     get state() { return state; },
-    deactivate() { active = false; },
+    deactivate,
   };
 }
