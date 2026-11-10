@@ -74,6 +74,11 @@ export interface HostAdapter {
    * 无只读句柄、会话不存在或读取失败返回 undefined（fail-soft，调用方仅省略摘要）。
    */
   sessionDigest(sessionId: string): Promise<SessionDigest | undefined>;
+  /**
+   * 枚举宿主已存储的会话（无工作区服务时的 /sessions 回退数据源）。
+   * 只读 header 元数据，不读事件日志；服务不可用返回空数组。
+   */
+  listStoredSessions(): Promise<StoredSessionSummary[]>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
@@ -104,6 +109,17 @@ export interface WorkspaceSummary {
 export interface PermissionKnobs {
   sandbox: string;
   approval: string;
+}
+
+/** 已存储会话的最小元数据（/sessions 无工作区服务时的回退列表） */
+export interface StoredSessionSummary {
+  readonly sessionId: string;
+  /** 创建时间（Unix epoch ms，header 不可得时缺省） */
+  readonly createdAt?: number;
+  /** 会话创建时的绝对工作目录 */
+  readonly cwd?: string;
+  /** 是否为子代理会话（不面向用户导航） */
+  readonly isSubagent: boolean;
 }
 
 /** 一个已存储会话的显示信息：标题 + 最近对话摘要（/sessions 切换确认用） */
@@ -152,6 +168,11 @@ interface ReadCapablePersistence {
   open(id: string, access: 'read'): Promise<SessionReadHandleLike>;
 }
 
+/** 可枚举已存储会话的持久化服务（无工作区服务时的会话列表回退） */
+interface ListCapablePersistence {
+  list(): Promise<readonly { header?: { id?: string; createdAt?: number; cwd?: string; origin?: string } }[]>;
+}
+
 /**
  * 取出可用的持久化服务；形态不匹配返回 undefined。
  *
@@ -167,6 +188,12 @@ function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefine
 function readCapablePersistence(ctx: Context): ReadCapablePersistence | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as ReadCapablePersistence | undefined;
   return typeof persistence?.open === 'function' ? persistence : undefined;
+}
+
+/** 取出可枚举已存储会话的持久化服务；形态不匹配返回 undefined */
+function listCapablePersistence(ctx: Context): ListCapablePersistence | undefined {
+  const persistence = safeGet(ctx, 'sessionPersistence') as ListCapablePersistence | undefined;
+  return typeof persistence?.list === 'function' ? persistence : undefined;
 }
 
 /** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
@@ -414,6 +441,29 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         } catch {
           // 只读句柄关闭失败无副作用，吞掉避免盖过真实结果
         }
+      }
+    },
+
+    async listStoredSessions() {
+      const persistence = listCapablePersistence(ctx);
+      if (!persistence) return [];
+      try {
+        const snapshots = await persistence.list();
+        const out: StoredSessionSummary[] = [];
+        for (const snapshot of snapshots) {
+          const header = snapshot?.header;
+          if (!header || typeof header.id !== 'string' || header.id === '') continue;
+          out.push({
+            sessionId: header.id,
+            ...(typeof header.createdAt === 'number' ? { createdAt: header.createdAt } : {}),
+            ...(typeof header.cwd === 'string' ? { cwd: header.cwd } : {}),
+            isSubagent: header.origin === 'subagent',
+          });
+        }
+        return out;
+      } catch (err) {
+        logger?.warn?.(`host adapter: list stored sessions failed: ${err instanceof Error ? err.message : String(err)}`);
+        return [];
       }
     },
 

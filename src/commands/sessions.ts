@@ -80,6 +80,7 @@ export function sessionsCommand({ manager, config }: CommandDeps): CategorizedCo
 
         const outcome = await manager.startNewInWorkspace(scope, peerId, ref);
         if (!outcome.ok) {
+          if (outcome.reason === 'busy') return '当前会话正在生成中，等它结束再开新会话（可先 /stop 中止）';
           const known = manager.listWorkspaceRefs().map((w) => w.title === w.path ? w.path : `${w.title} (${w.path})`).join('、');
           return `未知工作区: ${ref}${known ? `\n可用工作区: ${known}` : ''}`;
         }
@@ -100,6 +101,7 @@ export function sessionsCommand({ manager, config }: CommandDeps): CategorizedCo
         if (!outcome.ok) {
           if (outcome.reason === 'occupied') return '切换失败：该会话已绑定其他 QQ 用户或群，不能切入';
           if (outcome.reason === 'not-on-disk') return '切换失败：目标会话的磁盘记录已不存在';
+          if (outcome.reason === 'busy') return '当前会话正在生成中，等它结束再切换（可先 /stop 中止）';
           return '切换失败：目标会话不在宿主工作区账目内';
         }
         const targetLabel = formatSwitchTarget(outcome, shortId(target));
@@ -155,9 +157,12 @@ export function sessionsCommand({ manager, config }: CommandDeps): CategorizedCo
         if (group.truncated > 0) {
           lines.push(`…另有 ${group.truncated} 个会话未展示（/sessions <id前缀> 直达）`);
         }
-        lines.push(scope === 'c2c'
-          ? `＋ 组${groupIndex + 1} 开新会话 ${renderCmdEnter(`/sessions new ${groupIndex + 1}`)}`
-          : renderCmdInput(`/sessions new ${groupIndex + 1}`, `＋ 组${groupIndex + 1} 开新会话`), '');
+        // 回退组（无工作区服务）不对应真实工作区，不提供「开新会话」入口
+        if (group.isFallback !== true) {
+          lines.push(scope === 'c2c'
+            ? `＋ 组${groupIndex + 1} 开新会话 ${renderCmdEnter(`/sessions new ${groupIndex + 1}`)}`
+            : renderCmdInput(`/sessions new ${groupIndex + 1}`, `＋ 组${groupIndex + 1} 开新会话`), '');
+        }
       }
 
       await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);

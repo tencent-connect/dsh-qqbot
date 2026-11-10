@@ -51,6 +51,7 @@ function workspaceCtx(
             read: async () => ({ events: eventsBySession[id] ?? [] }),
             close: async () => {},
           }),
+          list: async () => Object.entries(headers).map(([id, header]) => ({ header: { id, ...header } })),
         };
       }
       if (name === 'sandboxPolicy' || name === 'approval') return {};
@@ -804,5 +805,76 @@ describe('currentLocationHeader（/pwd 当前位置）', () => {
     const { manager } = createManager(workspaceCtx([]));
 
     await expect(manager.currentLocationHeader('c2c', PEER)).resolves.toBeUndefined();
+  });
+});
+
+describe('审查补强：busy 守卫与无工作区服务回退', () => {
+  it('切换时当前会话正在生成 → busy 拒绝（不掐断正在跑的轮）', async () => {
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-aaa'] }],
+      { 'session-aaa': { cwd: WS_A } },
+    ));
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    (record.agent as { status: string }).status = 'running';
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-aaa');
+
+    expect(outcome).toEqual({ ok: false, reason: 'busy' });
+    expect(prefs().getSessionId(KEY)).toBe(record.sessionId); // 映射未变
+    expect(record.agent.cancel).not.toHaveBeenCalled(); // 没掐断当前轮
+  });
+
+  it('空闲时切换正常（busy 不误伤）', async () => {
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: ['session-aaa'] }],
+      { 'session-aaa': { cwd: WS_A } },
+    ));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    const outcome = await manager.switchSession('c2c', PEER, 'session-aaa');
+    expect(outcome.ok).toBe(true);
+  });
+
+  it('/sessions new 在生成中同样拒绝（busy）', async () => {
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A', sessionIds: [] }],
+    ));
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    (record.agent as { status: string }).status = 'running';
+
+    const outcome = await manager.startNewInWorkspace('c2c', PEER, '1');
+    expect(outcome).toEqual({ ok: false, reason: 'busy' });
+  });
+
+  it('无工作区服务：回退到持久层枚举的平铺列表（过滤子代理会话）', async () => {
+    prefs().setSessionId(KEY, 'session-plain');
+    const ctx = workspaceCtx([], {
+      'session-plain': { cwd: WS_A, createdAt: 2 },
+    }, {
+      'session-plain': [{ type: 'session/title', data: { title: '平铺会话' } }],
+    });
+    // 标记一个子代理会话
+    const persistence = (ctx as unknown as { get: (n: string) => unknown }).get('sessionPersistence') as {
+      list: () => Promise<unknown[]>;
+    };
+    const original = persistence.list.bind(persistence);
+    persistence.list = async () => [
+      ...(await original()),
+      { header: { id: 'session-subagent', origin: 'subagent', createdAt: 3 } },
+    ];
+
+    const { manager } = createManager(ctx);
+    const groups = await manager.listSessionGroups('c2c', PEER);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.isFallback).toBe(true);
+    expect(groups[0]!.title).toBe('全部会话');
+    expect(groups[0]!.sessions.map((s) => s.sessionId)).toEqual(['session-plain']); // 子代理被过滤
+    expect(groups[0]!.sessions[0]).toMatchObject({ title: '平铺会话', isCurrent: true });
+  });
+
+  it('无工作区服务且无持久层会话：空列表（命令层给降级提示）', async () => {
+    const { manager } = createManager(workspaceCtx([]));
+    expect(await manager.listSessionGroups('c2c', PEER)).toEqual([]);
   });
 });

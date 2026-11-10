@@ -907,7 +907,11 @@ export class SessionManager {
     const currentPath = canonicalPath(this.effectiveWorkspacePath(key));
 
     const all = this.host.listWorkspaces();
-    if (all.length === 0) return [];
+    if (all.length === 0) {
+      // 无工作区服务（宿主未组合 dsh-workspace，如 headless 组合）→ 回退到
+      // 持久层枚举：平铺全部已存储会话，不分组。
+      return this.listFallbackGroup(scope, peerId, sessionCap);
+    }
 
     // 当前工作区排最前，其余保持注册表顺序（sort 稳定）
     const ordered = [...all].sort(
@@ -942,6 +946,45 @@ export class SessionManager {
         truncated,
       };
     }));
+  }
+
+  /**
+   * 无工作区服务时的回退列表：按持久层枚举已存储会话（过滤子代理会话），
+   * 平铺成一个组。组不带新建入口——没有工作区可落。
+   */
+  private async listFallbackGroup(
+    scope: ChatScope,
+    peerId: string,
+    sessionCap: number,
+  ): Promise<SessionGroup[]> {
+    const key = this.sessionKey(scope, peerId);
+    const stored = await this.host.listStoredSessions();
+    const candidates = stored
+      .filter((session) => !session.isSubagent)
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+    if (candidates.length === 0) return [];
+
+    const currentSessionId = this.sessions.get(key)?.sessionId ?? this.modelResolver.getSessionId(key);
+    const shown = candidates.slice(0, sessionCap);
+    const sessions = await Promise.all(shown.map(async (session): Promise<SessionGroupEntry> => {
+      const digest = await this.host.sessionDigest(session.sessionId);
+      return {
+        sessionId: session.sessionId,
+        ...(session.createdAt !== undefined ? { createdAt: session.createdAt } : {}),
+        isCurrent: session.sessionId === currentSessionId,
+        occupiedByOther: this.isOccupiedByOther(key, session.sessionId),
+        ...(digest?.title !== undefined ? { title: digest.title } : {}),
+      };
+    }));
+
+    return [{
+      path: '',
+      title: '全部会话',
+      isCurrentWorkspace: false,
+      sessions,
+      truncated: candidates.length - shown.length,
+      isFallback: true,
+    }];
   }
 
   /**
@@ -983,6 +1026,13 @@ export class SessionManager {
           ? foldSessionDisplayTitle(this.host.sessionEvents(record.agent.session))
           : await this.host.sessionTitle(targetSessionId);
         return { ok: true as const, alreadyCurrent: true, ...(liveTitle !== undefined ? { title: liveTitle } : {}) };
+      }
+
+      // busy 守卫：当前会话正在生成时拒绝切换（与 /compact 一致）——
+      // 否则切换会 cancel 掉正在跑的那一轮，用户已经拿到的半截输出被丢弃。
+      if (record !== undefined && record.agent.status !== 'idle') {
+        this.logger.info(`switch refused: session busy: key=${key} target=${targetSessionId}`);
+        return { ok: false as const, reason: 'busy' as const };
       }
 
       if (this.isOccupiedByOther(key, targetSessionId)) {
@@ -1056,6 +1106,13 @@ export class SessionManager {
       if (!workspace) {
         this.logger.warn(`new session in unknown workspace refused: key=${key} ref=${workspaceRef}`);
         return { ok: false as const, reason: 'unknown-workspace' as const };
+      }
+
+      // busy 守卫：当前会话正在生成时拒绝换工作区（与切换一致）
+      const current = this.sessions.get(key);
+      if (current !== undefined && current.agent.status !== 'idle') {
+        this.logger.info(`new session refused: session busy: key=${key}`);
+        return { ok: false as const, reason: 'busy' as const };
       }
 
       this.modelResolver.setWorkspace(key, workspace.path);

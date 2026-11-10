@@ -159,12 +159,14 @@ export interface SessionGroup {
   sessions: SessionGroupEntry[];
   /** 被上限截断未展示的会话数 */
   truncated: number;
+  /** 是否为「无工作区服务」时的平铺回退组（不对应真实工作区，无新建入口） */
+  isFallback?: boolean;
 }
 
 /** /sessions <id> 切换结果 */
 export interface SwitchSessionOutcome {
   ok: boolean;
-  reason?: 'unknown-session' | 'not-on-disk' | 'occupied';
+  reason?: 'unknown-session' | 'not-on-disk' | 'occupied' | 'busy';
   /** 目标即当前会话（幂等成功） */
   alreadyCurrent?: boolean;
   /** 目标会话显示标题（确认文案用；缺省由命令层回退 id 短码） */
@@ -180,7 +182,7 @@ export interface SwitchSessionOutcome {
 /** /sessions new <工作区> 结果 */
 export interface StartNewOutcome {
   ok: boolean;
-  reason?: 'unknown-workspace';
+  reason?: 'unknown-workspace' | 'busy';
   path?: string;
 }
 

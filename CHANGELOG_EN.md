@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### New Features
 
 - **New `/pwd` command**: one command confirms which workspace and session you are in, rendered like the reply header (`**Workspace - Session**`); it still works after the session was evicted for idleness.
+- **Switching no longer cancels a running reply**: while the current session is still generating, `/sessions` (and starting a new session) is refused with a hint to `/stop`, so a half-finished answer is not thrown away — matching `/compact` behavior.
+- **`/sessions` also works without the workspace service**: on deployments that do not compose it, the list falls back to a flat list of stored sessions (sub-agent sessions excluded) instead of workspace groups.
 - **One-tap list actions in DMs**: in private chats the `/sessions` rows, new-session buttons, and `/permission` presets now use enter-command tags (`qqbot-cmd-enter`) — tapping runs the command immediately instead of inserting it for a manual send; group chats keep the insert-into-input interaction because the platform does not support the enter tag there.
 - **Switching shows recent conversation**: a `/sessions` switch confirmation now includes the target session's last 5 messages (with an "N earlier" hint), so you preview the context before continuing instead of switching blind.
 - **Replies carry a session title header**: every reply starts with a bold `**Workspace - Session**` line, keeping you oriented across long conversations and workspaces; it is omitted until a title exists, survives streaming retries, and `/bot-status` shows the title too.
