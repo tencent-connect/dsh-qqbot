@@ -10,6 +10,7 @@ import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
 import { registerWorkbenchDefaults, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
 import { registerWorkbenchConversations, registerWorkbenchSend } from './runtime/workbench-conversations.ts';
+import { registerWorkbenchAnswer } from './runtime/workbench-answer.ts';
 import type { Logger } from './types.ts';
 
 export const name = 'im-qqbot';
@@ -30,6 +31,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   registerWorkbenchTools(ctx);
   registerWorkbenchConversations(ctx, robots, logger);
   registerWorkbenchSend(ctx, robots);
+  registerWorkbenchAnswer(ctx, robots);
 
   const appId = resolveEnv(config.appId, 'QQBOT_APPID');
   const appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');

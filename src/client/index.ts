@@ -18,6 +18,7 @@ import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 import { QQWorkbench } from './workbench.ts';
+import { QqAnswerAction } from './workbench-answer.ts';
 import type { AgentFormSource } from './workbench-agent-form.ts';
 
 export const name = 'im-qqbot-client';
@@ -126,6 +127,14 @@ export function apply(ctx: Context): void {
     disposers.push(    slots.inject('settings.section', () => slots.register(
       { name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人' },
       QQBotSettingsSection,
+    )));
+  }
+
+  if (slots) {
+    const slot = 'conversation.chat.assistant-actions';
+    disposers.push(slots.inject(slot, () => slots.register(
+      { name: slot, id: 'im-qqbot-send-answer', order: 30 },
+      QqAnswerAction,
     )));
   }
 

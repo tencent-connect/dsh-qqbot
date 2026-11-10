@@ -41,6 +41,19 @@ it('keeps one bubble and durable operation per robot and target even after a los
   expect(readFileSync(path, 'utf8')).not.toContain('secret body');
 });
 
+it('links a submitted native answer to its Session in the same conversation timeline', async () => {
+  const timeline = new QqTimeline(join(dir, 'timeline'), log);
+  const send = new ManualQqSender('A', new DeliveryLedger(), async (_target, _text, fence) => {
+    fence();
+    return { id: 'receipt' };
+  }, timeline);
+  const result = await send.submit(peer, 'answer', 'Native answer', yes, yes, 'source-session');
+  expect(timeline.page('A', peer)?.entries).toMatchObject([{
+    id: result.id, source: 'answer', sessionId: 'source-session', text: 'Native answer', status: 'accepted',
+  }]);
+  expect(timeline.page('B', peer)?.entries).toEqual([]);
+});
+
 it('rechecks permission before HTTP and does not persist text when recording is off', async () => {
   const timeline = new QqTimeline(join(dir, 'timeline'), log);
   let allowed = true;

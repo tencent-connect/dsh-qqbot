@@ -162,7 +162,7 @@ function MessageRow({ row, robotName, openSession, compact }: {
         row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
         row.attachments ? h('div', { className: 'imqw-muted' }, `附件 · ${row.attachments} 项`) : null),
       h('div', { className: 'imqw-timeline-meta imqw-message-details' },
-        row.source === 'manual' ? h('span', null, '网页发送') : null,
+        row.source ? h('span', null, row.source === 'answer' ? 'Session 回答' : '网页发送') : null,
         outbound && row.status !== 'accepted' ? h('span', { 'data-status': row.status }, statusLabel[row.status], errorCode ? ` · ${errorCode}` : '') : null,
         outbound && row.status === 'accepted' ? h('span', { className: 'imqw-message-action' }, statusLabel.accepted) : null,
         linkedSession && openSession ? h('button', { type: 'button', className: 'imqw-message-action',

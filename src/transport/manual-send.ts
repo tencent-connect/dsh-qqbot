@@ -38,7 +38,7 @@ export class ManualQqSender {
     return ManualQqSender.status(this.ledger, this.appId, target, operation, this.pending.has(keyFor(this.appId, target, operation)));
   }
 
-  async submit(target: ReplyTarget, operation: string, text: string, allowed: () => boolean, recording: () => boolean): Promise<WorkbenchSendResult> {
+  async submit(target: ReplyTarget, operation: string, text: string, allowed: () => boolean, recording: () => boolean, sourceSessionId?: string): Promise<WorkbenchSendResult> {
     const id = keyFor(this.appId, target, operation);
     const fingerprint = deliveryKey(text);
     const prior = this.ledger.delivery(id);
@@ -50,7 +50,7 @@ export class ManualQqSender {
     if (!this.ledger.begin(id, fingerprint)) return this.status(target, operation)!;
     this.pending.add(id);
     let posted = false;
-    const entry = { id, at: Date.now(), direction: 'outbound' as const, source: 'manual' as const, text };
+    const entry = { id, at: Date.now(), direction: 'outbound' as const, source: sourceSessionId ? 'answer' as const : 'manual' as const, text, sessionId: sourceSessionId };
     const transmit = async (): Promise<Outcome> => {
       try {
         const result = await this.send(target, text, () => {

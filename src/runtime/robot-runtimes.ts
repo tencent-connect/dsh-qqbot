@@ -22,6 +22,7 @@ import { SessionSwitchConflict } from '../session/session-manager.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
 import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
+import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -183,13 +184,39 @@ export class RobotRuntimes {
     }
   }
 
+  answerDestination(sessionId: string): AnswerDestination | undefined {
+    const key = this.prefs.findUniqueCurrentSessionKey(sessionId);
+    const binding = key && /^qqbot:([^:]+):(group|c2c):([A-Za-z0-9_-]{1,256})$/.exec(key);
+    if (!key || !binding) return undefined;
+    const [, appId, scope, openId] = binding;
+    if (!appId || !openId || (scope !== 'c2c' && scope !== 'group')) return undefined;
+    const account = this.conversationAccount(appId);
+    const robot = this.list().find(item => item.appId === appId);
+    if (!account || !robot || this.prefs.getSessionId(key) !== sessionId) return undefined;
+    const live = account.liveSessionId(scope, openId);
+    if (live !== undefined && live !== sessionId) return undefined;
+    const peer = this.conversationSettings.get(key);
+    const runtime = this.slots.get(appId)?.runtime;
+    const blockedReason = !runtime || robot.state !== 'connected'
+      ? '当前机器人未连接。'
+      : runtime.allowTarget?.({ scope, targetId: openId }) !== true
+        ? '这个 QQ 会话已暂停或不再允许接入。' : undefined;
+    const externalTurns = this.configFor(appId).proactiveDelivery?.externalTurns ?? 'c2c';
+    return {
+      appId, scope, openId, recording: peer.recording, blockedReason,
+      automaticWebReplies: externalTurns === 'all' || (externalTurns === 'c2c' && scope === 'c2c'),
+      robotName: robot.alias || (robot.primary ? '主机器人' : `机器人 ${appId}`),
+      peerName: peer.alias || account.peerName(scope, openId) || `${scope === 'group' ? '群聊' : '私聊'} ${openId.slice(-8)}`,
+    };
+  }
+
   manualStatus(appId: string, target: ReplyTarget, operation: string) {
     this.configFor(appId);
     const runtime = this.slots.get(appId)?.runtime;
     return runtime ? runtime.manual.status(target, operation) : ManualQqSender.status(openDeliveryLedger(appId), appId, target, operation);
   }
 
-  async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void) {
+  async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void, sourceSessionId?: string) {
     const account = this.conversationAccount(appId);
     if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
     const key = peerKey(appId, target.scope, target.targetId);
@@ -205,7 +232,7 @@ export class RobotRuntimes {
         assertWritable();
         return !this.closed && this.slots.get(appId)?.runtime === runtime && runtime.state === 'connected'
           && runtime.allowTarget?.(target) === true;
-      }, () => this.conversationSettings.get(key).recording);
+      }, () => this.conversationSettings.get(key).recording, sourceSessionId);
     } catch (error) {
       if (error instanceof ManualSendConflict) throw new WorkbenchRequestError(409, error.message);
       throw error;

@@ -77,6 +77,16 @@ describe('PrefsStore 并发安全（E3）', () => {
     expect(restored.getSessionId('botB:peer')).toBe('session-b2');
   });
 
+  it('显式发送只解析唯一的当前映射，拒绝历史或重复映射', () => {
+    const a = store();
+    a.setSessionId('qqbot:A:c2c:same', 'old');
+    a.setSessionId('qqbot:A:c2c:same', 'current');
+    expect(a.findUniqueCurrentSessionKey('old')).toBeUndefined();
+    expect(a.findUniqueCurrentSessionKey('current')).toBe('qqbot:A:c2c:same');
+    a.setSessionId('qqbot:B:group:same', 'current');
+    expect(store().findUniqueCurrentSessionKey('current')).toBeUndefined();
+  });
+
   it('严格写入失败后保留原 Session，后续保存不重试失败的切换', () => {
     const a = store();
     const key = 'qqbot:botA:c2c:peer';

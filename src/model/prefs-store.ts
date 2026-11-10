@@ -91,6 +91,15 @@ export class PrefsStore {
     return this.sessionKeys.get(sessionId);
   }
 
+  findUniqueCurrentSessionKey(sessionId: string): string | undefined {
+    const indexed = this.findSessionKey(sessionId);
+    if (!indexed) return undefined;
+    for (const [key, id] of this.sessionIds) {
+      if (id === sessionId && key !== indexed) return undefined;
+    }
+    return indexed;
+  }
+
   findKnownSessionKey(sessionId: string): string | undefined {
     const current = this.findSessionKey(sessionId);
     if (current !== undefined) return current;

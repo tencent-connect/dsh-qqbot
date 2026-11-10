@@ -18,7 +18,7 @@ export interface TimelineEntry {
   platformId?: string;
   httpStatus?: number;
   platformCode?: number;
-  source?: 'manual';
+  source?: 'manual' | 'answer';
   quote?: { text: string };
 }
 
