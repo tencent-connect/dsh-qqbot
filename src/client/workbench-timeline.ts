@@ -1,9 +1,9 @@
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
-import { WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
+import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson } from './http.ts';
-import { QqComposer } from './workbench-composer.ts';
+import { QqComposer, type QqComposerHandle } from './workbench-composer.ts';
 
 const statusLabel: Record<TimelineStatus, string> = {
   received: '已收到', sending: '发送中', partial: 'QQ 已接受部分内容',
@@ -55,6 +55,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   const [newMessages, setNewMessages] = useState(false);
   const latestId = useRef<string | undefined>(undefined);
   const list = useRef<HTMLDivElement>(null);
+  const composer = useRef<QqComposerHandle>(null);
   const lifetime = useRef<AbortController | null>(null);
   const follow = useRef(true);
   const olderHeight = useRef<number | undefined>(undefined);
@@ -157,16 +158,18 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
       h('ol', { className: 'imqw-timeline-list' }, entries.flatMap((row, index) => {
         const previous = entries[index - 1];
         const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
-        const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openSession, refreshEntry, compact: !newDay && grouped(previous, row) });
+        const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openSession, refreshEntry,
+          onReply: !disabledReason && canQuoteTimelineEntry(row) ? (sender: string) => composer.current?.replyTo(row, sender) : undefined,
+          compact: !newDay && grouped(previous, row) });
         return newDay ? [h('li', { key: 'date-' + row.id, className: 'imqw-message-day' }, dateFormat.format(row.at)), message] : [message];
       })),
     ),
     newMessages ? h('div', { className: 'imqw-message-jump' }, h(Button, { variant: 'outline', size: 'sm', onClick: jump }, '查看最新消息 ↓')) : null,
-    h(QqComposer, { appId, peer, robotName, disabledReason, onUpdate: reload }),
+    h(QqComposer, { ref: composer, appId, peer, robotName, disabledReason, onUpdate: reload }),
   );
 }
 
-function MessageRow({ row, appId, scope, openId, robotName, openSession, refreshEntry, compact }: {
+function MessageRow({ row, appId, scope, openId, robotName, openSession, refreshEntry, onReply, compact }: {
   row: TimelineEntry;
   appId: string;
   scope: WorkbenchConversation['scope'];
@@ -174,6 +177,7 @@ function MessageRow({ row, appId, scope, openId, robotName, openSession, refresh
   robotName: string;
   openSession?: (id: string) => void;
   refreshEntry(id: string): Promise<TimelineEntry | undefined>;
+  onReply?: (sender: string) => void;
   compact: boolean;
 }): ReactNode {
   const [checking, setChecking] = useState(false);
@@ -204,6 +208,7 @@ function MessageRow({ row, appId, scope, openId, robotName, openSession, refresh
         h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))),
       h('div', { className: 'imqw-timeline-bubble' },
         row.quote ? h('blockquote', null,
+          row.quote.senderName ? h('strong', null, row.quote.senderName) : null,
           row.quote.text ? h('div', null, row.quote.text) : null,
           row.quote.attachments ? h('span', { className: 'imqw-muted' }, `引用附件 · ${row.quote.attachments} 项`) : null) : null,
         row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
@@ -216,6 +221,7 @@ function MessageRow({ row, appId, scope, openId, robotName, openSession, refresh
       h('div', { className: 'imqw-timeline-meta imqw-message-details' },
         outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status]) : null,
         row.source ? h('span', null, sourceLabel[row.source]) : null,
+        onReply ? h('button', { type: 'button', className: 'imqw-message-action', onClick: () => onReply(sender) }, '引用回复') : null,
         linkedSession && openSession ? h('button', { type: 'button', className: 'imqw-message-action',
           'aria-label': '打开关联 Session', title: '打开关联 Session', onClick: () => openSession(linkedSession) }, '↗') : null),
       h('details', { className: 'imqw-response-detail' },

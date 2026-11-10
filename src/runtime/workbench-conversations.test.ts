@@ -4,12 +4,16 @@ import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
-import { WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
-import { ConversationSettingsStore, peerKey, registerWorkbenchConversations } from './workbench-conversations.ts';
+import { ConversationSettingsStore, peerKey, registerWorkbenchConversations, registerWorkbenchSend } from './workbench-conversations.ts';
 import { legacyAgentSettings } from './workbench-agent-settings.ts';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
+import { DeliveryLedger } from '../transport/delivery-ledger.ts';
+import type { ReplyTarget } from '../types.ts';
+import { WorkbenchRequestError } from './workbench-routes.ts';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'qq-conversation-tests-')); });
@@ -239,4 +243,67 @@ it('persists an empty custom list separately from native tools and snapshots it 
   expect(restored.get(otherRobot).agent?.tools).toBeUndefined();
   expect(restored.template('A')?.settings.tools).toEqual([]);
   expect(() => restored.save(second, { revision: 1, agent: native })).toThrow('已更新');
+});
+
+it('accepts an opaque quote row from the addressed robot and peer, with durable replay protection', async () => {
+  const timeline = new QqTimeline(join(dir, 'quote-timeline'), logger);
+  const receiptFile = join(dir, 'quote-delivery.jsonl');
+  const transmit = vi.fn(async (_target: ReplyTarget, _text: string, before: () => void, _attachment?: unknown, _quote?: string) => {
+    before();
+    return { id: 'accepted-platform-id' };
+  });
+  const senderFor = (appId: string) => new ManualQqSender(appId, new DeliveryLedger(receiptFile), transmit, timeline);
+  const ctx = new Context();
+  const capture = vi.fn<(route: TestRoute) => () => Promise<void>>(() => async () => {});
+  const host = ctx.plugin(scope => scope.provide('connection', { fetch: { register: capture } }));
+  await host.await();
+  const plugin = ctx.plugin(scope => registerWorkbenchSend(scope, {
+    manualStatus: (appId, target, operation) => senderFor(appId).status(target, operation),
+    async manualSend(appId, target, operation, text, assertWritable, source, attachment, replyTo) {
+      try {
+        return await senderFor(appId).submit(target, operation, text, () => { assertWritable(); return true; },
+          () => true, source, attachment, replyTo);
+      } catch (error) {
+        if (error instanceof ManualSendConflict) throw new WorkbenchRequestError(409, error.message);
+        throw error;
+      }
+    },
+  }));
+  await plugin.await();
+  try {
+    const route = capture.mock.calls[0]![0];
+    const group = { scope: 'group', targetId: 'same' } satisfies ReplyTarget;
+    const record = (platformId: string, text: string) => {
+      const id = receivedEntryId(platformId);
+      timeline.record('A', group, { id, at: 1, platformId, direction: 'inbound', status: 'received', text, senderName: '成员' });
+      return id;
+    };
+    const original = record('actual-message-id', '原消息');
+    const other = record('different-message-id', '另一条消息');
+    const redacted = record('sensitive-message-id', '配对码已隐藏');
+    const payload = { appId: 'A', scope: 'group', openId: 'same', operation: '00000000-0000-4000-8000-000000000001', text: '回复', replyTo: original };
+    const send = (patch: Record<string, unknown> = {}) => route.fetch(new Request('http://dsh.internal' + WORKBENCH_SEND_PATH, {
+      method: 'POST', body: JSON.stringify({ ...payload, ...patch }),
+    }));
+
+    expect((await send({ appId: 'B' })).status).toBe(409);
+    expect((await send({ scope: 'c2c' })).status).toBe(409);
+    expect((await send({ openId: 'other' })).status).toBe(409);
+    expect((await send({ replyTo: redacted })).status).toBe(409);
+    expect((await send({ replyTo: 'actual-message-id' })).status).toBe(400);
+    expect((await send({ message_reference: { message_id: 'actual-message-id' } })).status).toBe(400);
+    expect(transmit).not.toHaveBeenCalled();
+
+    expect(await (await send()).json()).toMatchObject({ status: 'accepted' });
+    expect(await (await send()).json()).toMatchObject({ status: 'accepted' });
+    expect((await send({ replyTo: other })).status).toBe(409);
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(transmit.mock.calls[0]?.[4]).toBe('actual-message-id');
+    expect(timeline.page('A', group)?.entries.at(-1)).toMatchObject({
+      direction: 'outbound', status: 'accepted', text: '回复', quote: { text: '原消息', senderName: '成员' },
+    });
+  } finally {
+    await plugin.dispose();
+    await host.dispose();
+  }
 });

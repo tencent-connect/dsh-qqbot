@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import { ApiError, MediaFileType, MsgType, type QQBot } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, MediaApi, MessageApi, sanitizeFileName, type RequestOptions } from '@tencent-connect/qqbot-nodejs/protocol';
 import { deliveryKey, type DeliveryLedger } from './delivery-ledger.ts';
-import type { WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
+import { canQuoteTimelineEntry, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
 import type { ReplyTarget } from '../types.ts';
-import type { QqTimeline } from '../runtime/qq-timeline.ts';
+import { receivedEntryId, type QqTimeline } from '../runtime/qq-timeline.ts';
 import { imageExtension } from './attachment.ts';
 
 export interface ManualAttachment { name: string; bytes: Buffer }
-type Send = (target: ReplyTarget, text: string, beforeRequest: (phase?: 'upload') => void, attachment?: ManualAttachment) => Promise<{ id: string }>;
+type Send = (target: ReplyTarget, text: string, beforeRequest: (phase?: 'upload') => void,
+  attachment?: ManualAttachment, quoteId?: string) => Promise<{ id: string }>;
 type Outcome = Omit<WorkbenchSendResult, 'id' | 'status'> & { status: 'accepted' | 'rejected' | 'unknown'; platformId?: string };
 
 export class ManualSendConflict extends Error {}
@@ -42,23 +43,30 @@ export class ManualQqSender {
   }
 
   async submit(target: ReplyTarget, operation: string, text: string, allowed: () => boolean, recording: () => boolean,
-    sourceSessionId?: string, attachment?: ManualAttachment): Promise<WorkbenchSendResult> {
+    sourceSessionId?: string, attachment?: ManualAttachment, replyTo?: string): Promise<WorkbenchSendResult> {
     const id = keyFor(this.appId, target, operation);
     const fingerprint = attachment
       ? deliveryKey(text, attachment.name, createHash('sha256').update(attachment.bytes).digest('hex'))
-      : deliveryKey(text);
+      : replyTo ? deliveryKey('quote', text, replyTo) : deliveryKey(text);
     const prior = this.ledger.delivery(id);
     if (prior) {
-      if (prior.fingerprint !== fingerprint) throw new ManualSendConflict('这次发送的正文已变更或附件不同，请先查询原发送结果。');
+      if (prior.fingerprint !== fingerprint) throw new ManualSendConflict('这次发送的正文已变更、附件不同或引用不同，请先查询原发送结果。');
       return this.status(target, operation)!;
     }
     if (!allowed()) throw new ManualSendConflict('当前机器人或会话不允许发送。');
+    const quoted = replyTo ? this.timeline?.entry(this.appId, target, replyTo) : undefined;
+    if (replyTo && (attachment || !canQuoteTimelineEntry(quoted) || receivedEntryId(quoted.platformId) !== replyTo)) {
+      throw new ManualSendConflict('引用消息不可用。请在当前 QQ 对话选择一条收到的消息。');
+    }
     if (!this.ledger.begin(id, fingerprint)) return this.status(target, operation)!;
     this.pending.add(id);
     let posted = false;
+    const quote = quoted && {
+      text: quoted.text.slice(0, 400), attachments: quoted.attachments, senderName: quoted.senderName,
+    };
     const entry = {
       id, at: Date.now(), direction: 'outbound' as const, source: sourceSessionId ? 'answer' as const : 'manual' as const,
-      text, sessionId: sourceSessionId, ...(attachment ? { attachments: 1, attachmentName: attachment.name } : {}),
+      text, sessionId: sourceSessionId, quote, ...(attachment ? { attachments: 1, attachmentName: attachment.name } : {}),
     };
     const transmit = async (): Promise<Outcome> => {
       try {
@@ -67,7 +75,7 @@ export class ManualQqSender {
           if (phase === 'upload') return;
           if (posted) throw new Error('QQ manual operation already submitted');
           posted = true;
-        }, attachment);
+        }, attachment, quoted?.platformId);
         return { status: 'accepted', platformId: result.id };
       } catch (error) {
         const httpStatus = error instanceof ApiError && error.httpStatus > 0 ? error.httpStatus : undefined;
@@ -98,7 +106,7 @@ export class ManualQqSender {
  * redirects or retry a POST whose delivery status is unclear. */
 export function createManualTransport(bot: QQBot, baseUrl: string, userAgent: string,
   replyFor: (target: ReplyTarget) => ReplyTarget = target => target): Send {
-  return async (target, text, beforeRequest, attachment) => {
+  return async (target, text, beforeRequest, attachment, quoteId) => {
     const client = new ApiClient();
     client.request = async <T>(token: string, method: string, path: string, body?: unknown, options?: RequestOptions): Promise<T> => {
       const upload = options?.uploadRequest === true;
@@ -130,9 +138,10 @@ export function createManualTransport(bot: QQBot, baseUrl: string, userAgent: st
         content: text.trim() ? text : undefined, msg_type: MsgType.MEDIA, msg_id: reply.msgId, media: { file_info },
       });
     }
-    const reply = replyFor(target);
+    const reply = replyFor(quoteId ? { ...target, msgId: quoteId } : target);
     return api.sendRaw(target.scope, target.targetId, bot.getCredentials(), {
       content: text, msg_type: MsgType.TEXT, msg_id: reply.msgId,
+      ...(quoteId ? { message_reference: { message_id: quoteId, ignore_get_message_error: false } } : {}),
     });
   };
 }

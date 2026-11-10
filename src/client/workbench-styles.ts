@@ -160,6 +160,8 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
 }
 .imqw-composer-input button[type='submit'] { flex: none; min-height: 32px; }
 .imqw-composer-attachment { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.imqw-composer-quote { border-inline-start: 2px solid var(--dsw-alias-border-l2); padding-inline-start: 8px; color: var(--dsw-alias-label-secondary); }
+.imqw-composer-quote button { margin-inline-start: auto; flex: none; }
 .imqw-composer-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imqw-composer-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 14px; font-size: 11px; }
 .imqw-actions { display: flex; flex-wrap: wrap; gap: 6px; }

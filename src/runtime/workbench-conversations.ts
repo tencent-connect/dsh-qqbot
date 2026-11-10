@@ -379,6 +379,7 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
     let operation: string;
     let message: string | undefined;
     let attachment: ManualAttachment | undefined;
+    let replyTo: string | undefined;
     try {
       const fields = ['appId', 'scope', 'openId', 'operation'];
       let row: Record<string, unknown>;
@@ -409,7 +410,11 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
         } else {
           const raw = await request.text();
           if (Buffer.byteLength(raw) > 16 * 1024) throw new Error();
-          row = robotObject(JSON.parse(raw), [...fields, 'text']);
+          row = robotObject(JSON.parse(raw), [...fields, 'text', 'replyTo']);
+          if (row.replyTo !== undefined) {
+            if (typeof row.replyTo !== 'string' || !/^[a-f0-9]{64}$/.test(row.replyTo)) throw new Error();
+            replyTo = row.replyTo;
+          }
         }
         if (typeof row.text !== 'string' || row.text.length > QQ_MANUAL_MESSAGE_LIMIT || row.text.includes('\0') || (!attachment && !row.text.trim())) throw new Error();
         message = row.text;
@@ -428,6 +433,6 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
       return result ? workbenchJson(result) : workbenchJson({ error: '未找到此发送操作。' }, 404);
     }
     assertWritable();
-    return workbenchJson(await robots.manualSend(appId, target, operation, message, assertWritable, undefined, attachment));
+    return workbenchJson(await robots.manualSend(appId, target, operation, message, assertWritable, undefined, attachment, replyTo));
   });
 }

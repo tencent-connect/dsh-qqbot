@@ -26,7 +26,14 @@ export interface TimelineEntry {
   platformCode?: number;
   source?: 'manual' | 'answer' | 'automatic' | 'agent';
   inboundOutcome?: TimelineInboundOutcome;
-  quote?: { text: string; attachments?: number };
+  quote?: { text: string; attachments?: number; senderName?: string };
+}
+
+export function canQuoteTimelineEntry(row: TimelineEntry | undefined): row is TimelineEntry & { platformId: string } {
+  return row?.direction === 'inbound' && row.status === 'received'
+    && typeof row.platformId === 'string' && row.platformId.length > 0
+    && row.text !== '配对码已隐藏' && !/^\/[a-z]/i.test(row.text)
+    && (!!row.text || !!row.attachments);
 }
 
 export interface TimelinePage {

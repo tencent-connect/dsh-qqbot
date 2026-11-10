@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ApiError, type QQBot } from '@tencent-connect/qqbot-nodejs';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { QqTimeline } from '../runtime/qq-timeline.ts';
+import { QqTimeline, receivedEntryId } from '../runtime/qq-timeline.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { createManualTransport, ManualQqSender } from './manual-send.ts';
 
@@ -86,6 +86,8 @@ it('uses one SDK plaintext POST and does not follow a platform redirect', async 
     body = JSON.parse(Buffer.concat(chunks).toString());
     if (body.content === 'redirect') {
       response.writeHead(307, { Location: '/unexpected' }); response.end();
+    } else if (body.content === 'quote-rejected') {
+      response.writeHead(400, { 'Content-Type': 'application/json' }); response.end('{"code":304023}');
     } else {
       response.writeHead(200, { 'Content-Type': 'application/json' }); response.end('{"id":"test-platform-id"}');
     }
@@ -98,13 +100,26 @@ it('uses one SDK plaintext POST and does not follow a platform redirect', async 
       getCredentials: () => ({ appId: 'robot', clientSecret: 'fixture' }),
       messageApi: { notifyMessageSent: vi.fn() },
     } as unknown as QQBot;
-    const send = new ManualQqSender('robot', new DeliveryLedger(), createManualTransport(bot, 'http://127.0.0.1:' + port, 'test'));
+    const timeline = new QqTimeline(join(dir, 'timeline'), log);
+    const send = new ManualQqSender('robot', new DeliveryLedger(), createManualTransport(bot, 'http://127.0.0.1:' + port, 'test',
+      target => target.msgId === 'quoted-id' ? { ...target, msgId: 'fresh-reply-id' } : target), timeline);
     expect((await send.submit(peer, 'first', 'redirect', yes, yes)).status).toBe('unknown');
     expect(paths).toEqual(['/v2/groups/same/messages']);
     expect((await send.submit({ scope: 'c2c', targetId: 'same', msgId: 'reply-to' }, 'second', 'ordinary **text**', yes, yes)).status).toBe('accepted');
     expect(paths).toEqual(['/v2/groups/same/messages', '/v2/users/same/messages']);
     expect(body).toMatchObject({ content: 'ordinary **text**', msg_type: 0, msg_id: 'reply-to' });
     expect(body).not.toHaveProperty('markdown');
+    expect(body).not.toHaveProperty('message_reference');
+
+    const quote = receivedEntryId('quoted-id');
+    timeline.record('robot', peer, { id: quote, at: 1, platformId: 'quoted-id', text: 'original', direction: 'inbound', status: 'received' });
+    expect(await send.submit(peer, 'quote', 'quote-rejected', yes, yes, undefined, undefined, quote))
+      .toMatchObject({ status: 'rejected', httpStatus: 400, platformCode: 304023 });
+    expect(paths).toEqual(['/v2/groups/same/messages', '/v2/users/same/messages', '/v2/groups/same/messages']);
+    expect(body).toMatchObject({
+      content: 'quote-rejected', msg_type: 0, msg_id: 'fresh-reply-id',
+      message_reference: { message_id: 'quoted-id', ignore_get_message_error: false },
+    });
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }

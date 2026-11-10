@@ -223,7 +223,7 @@ export class RobotRuntimes {
   }
 
   async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void,
-    sourceSessionId?: string, attachment?: ManualAttachment) {
+    sourceSessionId?: string, attachment?: ManualAttachment, replyTo?: string) {
     const account = this.conversationAccount(appId);
     if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
     const key = peerKey(appId, target.scope, target.targetId);
@@ -239,7 +239,7 @@ export class RobotRuntimes {
         assertWritable();
         return !this.closed && this.slots.get(appId)?.runtime === runtime && runtime.state === 'connected'
           && runtime.allowTarget?.(target) === true;
-      }, () => this.conversationSettings.get(key).recording, sourceSessionId, attachment);
+      }, () => this.conversationSettings.get(key).recording, sourceSessionId, attachment, replyTo);
     } catch (error) {
       if (error instanceof ManualSendConflict) throw new WorkbenchRequestError(409, error.message);
       throw error;

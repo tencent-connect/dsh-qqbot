@@ -1,10 +1,11 @@
-import { createElement as h, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { createElement as h, forwardRef, useEffect, useImperativeHandle, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
-import { QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
+import { QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, type TimelineEntry, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 
-interface ComposerDraft { text: string; attachment?: File }
+interface ComposerDraft { text: string; attachment?: File; quote?: Pick<TimelineEntry, 'id' | 'text' | 'attachments'> & { sender: string } }
+export interface QqComposerHandle { replyTo(row: TimelineEntry, sender: string): void }
 const drafts = new Map<string, ComposerDraft>();
 const activeOperations = new Map<string, string>();
 
@@ -22,9 +23,9 @@ function rememberOperation(key: string, id?: string): void {
   } catch { /* Session storage is optional; keep the in-memory operation. */ }
 }
 
-export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }: {
+export const QqComposer = forwardRef<QqComposerHandle, {
   appId: string; peer: WorkbenchConversation; robotName: string; disabledReason?: string; onUpdate(): void;
-}): ReactNode {
+}>(function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }, ref): ReactNode {
   const target = { appId, scope: peer.scope, openId: peer.openId };
   const key = 'qqbot-send:' + JSON.stringify([appId, peer.scope, peer.openId]);
   const [draft, setDraft] = useState<ComposerDraft>(() => drafts.get(key) ?? { text: '' });
@@ -38,7 +39,7 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
   const fileInput = useRef<HTMLInputElement>(null);
 
   const edit = (value: ComposerDraft): void => {
-    if (value.text || value.attachment) {
+    if (value.text || value.attachment || value.quote) {
       drafts.delete(key);
       drafts.set(key, value);
       if (drafts.size > 100) drafts.delete(drafts.keys().next().value!);
@@ -80,7 +81,7 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
       } else if (submit) {
         request = {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...target, operation: id, text: submit.text }),
+          body: JSON.stringify({ ...target, operation: id, text: submit.text, replyTo: submit.quote?.id }),
         };
       }
       const result = await fetchJson<WorkbenchSendResult>(
@@ -126,13 +127,25 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
   };
 
   const editLocked = !!disabledReason || busy || !!operation;
+  useImperativeHandle(ref, () => ({
+    replyTo(row, sender) {
+      if (editLocked || inFlight.current || rememberedOperation(key)) return;
+      if (draft.attachment) {
+        setStatus('请先移除附件，再引用回复。');
+        return;
+      }
+      edit({ ...draft, quote: { id: row.id, text: row.text.slice(0, 400), attachments: row.attachments, sender } });
+      setStatus('');
+      input.current?.focus();
+    },
+  }));
   return h('form', { className: 'imqw-composer', onSubmit: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); send(); } },
     h('input', {
       ref: fileInput, type: 'file', hidden: true, 'aria-label': '选择 QQ 附件', disabled: editLocked,
       onChange: (event: ChangeEvent<HTMLInputElement>) => {
         const file = event.currentTarget.files?.[0];
         event.currentTarget.value = '';
-        if (!file || editLocked) return;
+        if (!file || editLocked || draft.quote) return;
         if (!file.size || file.size > QQ_MANUAL_ATTACHMENT_LIMIT) {
           setStatus('请选择一个非空附件，最多 4 MiB。');
           return;
@@ -147,9 +160,15 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
         edit({ text: draft.text }); setStatus('');
       } }, '移除附件'),
     ) : null,
+    draft.quote ? h('div', { className: 'imqw-composer-attachment imqw-composer-quote' },
+      h('span', { title: draft.quote.text }, `回复 ${draft.quote.sender} · ${draft.quote.text || `附件 ${draft.quote.attachments} 项`}`),
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: editLocked, onClick: () => {
+        edit({ text: draft.text }); setStatus(''); input.current?.focus();
+      } }, '取消引用'),
+    ) : null,
     h('div', { className: 'imqw-composer-input' },
-      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: editLocked,
-        onClick: () => fileInput.current?.click(), title: '每次可发送一个附件，最多 4 MiB' }, '附件'),
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: editLocked || !!draft.quote,
+        onClick: () => fileInput.current?.click(), title: draft.quote ? '取消引用后可添加附件' : '每次可发送一个附件，最多 4 MiB' }, '附件'),
       h('textarea', {
         ref: input, 'aria-label': '发送到 QQ 的消息', rows: 1, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
         value: draft.text, readOnly: !!operation, disabled: !!disabledReason,
@@ -169,4 +188,4 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
       }, '结束查询') : null,
     ),
   );
-}
+});
