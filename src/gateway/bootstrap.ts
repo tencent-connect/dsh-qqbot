@@ -17,7 +17,7 @@ import { ReplyLimiter } from '../transport/reply-limiter.ts';
 import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
-import { QuestionChannel } from '../features/question-channel.ts';
+import { QuestionChannel, type UserQuestionRequest, type UserQuestionResult } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
 import { buildUserAgent } from '../shared/index.ts';
@@ -217,6 +217,13 @@ export function bootstrapGateway(
   const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
   questionChannel.install(ctx);
+  const questionEvents = ctx as unknown as { on(
+    event: 'user-questions/request',
+    handler: (request: UserQuestionRequest, next: () => Promise<UserQuestionResult>) => Promise<UserQuestionResult>,
+    options: { global: true; prepend: true },
+  ): void };
+  questionEvents.on('user-questions/request', (request, next) =>
+    active ? questionChannel.routeRequest(request, next) : next(), { global: true, prepend: true });
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
   const approvalChannel = new ApprovalChannel(manager, sender, config, logger, turnTracker);

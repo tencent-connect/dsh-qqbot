@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Context, Service } from '@deepseek-ai/cordis';
-import { ApiError, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { ApiError, type InlineKeyboard, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import { bindDelivery, guardSender } from '../transport/delivery-context.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import {
@@ -20,12 +20,12 @@ function createLogger(): Logger {
 
 interface SentMessage {
   text: string;
-  opts?: { keyboard?: unknown };
+  opts?: { keyboard?: InlineKeyboard };
 }
 
 function createSender(sent: SentMessage[]) {
   return {
-    sendMarkdown: vi.fn(async (_target: ReplyTarget, content: string, o?: { keyboard?: unknown }) => {
+    sendMarkdown: vi.fn(async (_target: ReplyTarget, content: string, o?: { keyboard?: InlineKeyboard }) => {
       sent.push({ text: content, opts: o });
     }),
   };
@@ -59,6 +59,10 @@ function startAsk(
   const request: UserQuestionRequest = { questions, ...(signal ? { signal } : {}) };
   const record = makeRecord(key, scope);
   return ch.askViaQQ(record, record.replyTarget, request);
+}
+
+function sentButton(sent: SentMessage[], message: number, option: number): string | undefined {
+  return sent[message]?.opts?.keyboard?.content.rows[0]?.buttons[option]?.action.data;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -214,7 +218,7 @@ describe('QuestionChannel.askViaQQ', () => {
     const sender = guardSender({ sendMarkdown, openStream: vi.fn() }, ledger);
     const manager = createManager({ getSessionRecord: () => record });
     const channel = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const request = { questions: [q2()] };
+    const request = { questions: [q2()], wait: { callId: 'native-call' } };
     if (!rejected) {
       await expect(channel.askViaQQ(record, target, request)).rejects.toThrow('response timeout');
       expect(sendMarkdown).toHaveBeenCalledTimes(1);
@@ -230,11 +234,8 @@ describe('QuestionChannel.askViaQQ', () => {
     expect(sendMarkdown.mock.calls[0]?.[2]).toHaveProperty('keyboard');
     expect(sendMarkdown.mock.calls[1]?.[1]).toContain('回复编号选择');
 
-    const replay = channel.askViaQQ(record, target, request);
-    await vi.waitFor(() => {
-      expect(channel.tryAnswer('c2c', 'x', '1')).toBe(true);
-    });
-    await replay;
+    await expect(channel.askViaQQ(record, target, { ...request })).rejects.toThrow('not submitted again');
+    expect(channel.tryAnswer('c2c', 'x', '1')).toBe(false);
     expect(sendMarkdown).toHaveBeenCalledTimes(2);
   });
 
@@ -301,7 +302,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 1), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
   });
 
@@ -310,7 +311,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'group', 'G1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'someone', group: 'G1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
   });
 
@@ -320,8 +321,31 @@ describe('QuestionChannel.handleInteraction', () => {
     const long = '这是一个非常非常长的选项标签超过十八个字符的限制了吧';
     const p = startAsk(ch, 'c2c', 'U7', [{ id: 'q', question: 't', options: [{ label: long }] }]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'U7' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'U7' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: [long] }] });
+  });
+
+  it.each([false, true])('delivers independent requests with the same question id (native call identity: %s)', async withCallId => {
+    const record = makeRecord('same-session');
+    const sent: SentMessage[] = [];
+    const sender = guardSender({ ...createSender(sent), openStream: vi.fn() }, new DeliveryLedger());
+    const channel = new QuestionChannel(createManager({ getSessionRecord: () => record }), sender,
+      { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const target = bindDelivery(record.replyTarget, { key: 'same-turn', allowed: () => true });
+    const ask = (label: string) => channel.askViaQQ(record, target, {
+      questions: [{ id: 'confirm', question: label, options: [{ label }] }],
+      ...(withCallId ? { wait: { callId: label } } : {}),
+    });
+    const first = ask('build');
+    await vi.waitFor(() => expect(channel.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'x' }))).toBe(true));
+    expect(await first).toEqual({ answers: [{ id: 'confirm', selected: ['build'] }] });
+    const second = ask('deploy');
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent.map(message => message.text)).toEqual([expect.stringContaining('build'), expect.stringContaining('deploy')]);
+    expect(sentButton(sent, 0, 0)).not.toBe(sentButton(sent, 1, 0));
+    expect(channel.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'x' }))).toBe(false);
+    await vi.waitFor(() => expect(channel.handleInteraction(makeEvent(sentButton(sent, 1, 0), { user: 'x' }))).toBe(true));
+    expect(await second).toEqual({ answers: [{ id: 'confirm', selected: ['deploy'] }] });
   });
 
   it('rejects malformed or stale clicks without consuming the question', async () => {
@@ -347,14 +371,39 @@ describe('QuestionChannel.handleInteraction', () => {
     const p = startAsk(ch, 'c2c', 'U1', [q1, q2b]);
     await sleep(20);
     // 答第一题（按钮点击），推进到第二题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 0 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'U1' }))).toBe(true);
     await sleep(20);
     expect(sent).toHaveLength(2); // 第二题已发出
     // 旧题（q=a）按钮在新题发出后被点击 → 忽略，不消费当前题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 1 }), { user: 'U1' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 1), { user: 'U1' }))).toBe(false);
     // 当前题（q=b）仍可正常作答
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'b', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 1, 1), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'a', selected: ['A1'] }, { id: 'b', selected: ['B2'] }] });
+  });
+});
+
+describe('QuestionChannel.routeRequest', () => {
+  it('answers through QQ only for an owned eligible turn and delegates other requests', async () => {
+    const record = makeRecord('qq-session');
+    const sent: SentMessage[] = [];
+    const targetFor = vi.fn((): ReplyTarget | undefined => record.replyTarget);
+    const channel = new QuestionChannel(createManager({
+      findBySessionId: id => id === 'qq-session' ? record : undefined,
+      getSessionRecord: () => record,
+    }), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger(), { targetFor });
+    const next = vi.fn(async () => ({ answers: [] }));
+    const request = { agent: { id: 'qq-session' }, questions: [q2()] };
+    await expect(channel.routeRequest({ ...request, agent: { id: 'web-session' } }, next)).resolves.toEqual({ answers: [] });
+    await expect(channel.routeRequest({ ...request, questions: [{ ...q2(), intent: {} }] }, next)).resolves.toEqual({ answers: [] });
+    targetFor.mockReturnValueOnce(undefined);
+    await expect(channel.routeRequest(request, next)).resolves.toEqual({ answers: [] });
+    expect(next).toHaveBeenCalledTimes(3);
+    expect(sent).toHaveLength(0);
+    const pending = channel.routeRequest(request, next);
+    await vi.waitFor(() => expect(channel.tryAnswer('c2c', 'x', '2')).toBe(true));
+    await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
+    expect(sent).toHaveLength(1);
+    expect(next).toHaveBeenCalledTimes(3);
   });
 });
 

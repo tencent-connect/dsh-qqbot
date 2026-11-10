@@ -21,7 +21,7 @@ export function buttonLabel(text: string | undefined): string {
 
 // ── button_data 统一编码 ──
 
-/** 问答按钮：q=问题 id，i=选项下标 */
+/** 问答按钮：q=当前题目令牌，i=选项下标 */
 export interface QuestionButtonData {
   t: 'question';
   q: string;
