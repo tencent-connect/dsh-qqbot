@@ -132,6 +132,9 @@ export const WORKBENCH_STYLES = `
 .imqw-timeline-row[data-direction='outbound'] .imqw-timeline-bubble { border-radius: 12px 4px 12px 12px; background: color-mix(in srgb, var(--dsw-alias-button-info-fill) 15%, var(--dsw-alias-bg-layer-2)); }
 .imqw-timeline-bubble blockquote { border-inline-start: 2px solid var(--dsw-alias-border-l2); margin: 0 0 5px; padding: 2px 6px; color: var(--dsw-alias-label-secondary); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .imqw-timeline-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.imqw-message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 4px; }
+.imqw-message-image { display: block; width: min(200px, 100%); aspect-ratio: 4 / 3; overflow: hidden; border-radius: 8px; }
+.imqw-message-image img { display: block; width: 100%; height: 100%; object-fit: contain; background: var(--dsw-alias-bg-layer-2); }
 .imqw-timeline-older { display: flex; justify-content: center; padding-bottom: 8px; }
 .imqw-message-action { color: var(--dsw-alias-label-secondary); opacity: .65; }
 button.imqw-message-action { background: transparent; border: 0; padding: 0 4px; cursor: pointer; border-radius: 4px; }

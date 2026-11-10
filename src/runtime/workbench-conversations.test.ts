@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -51,6 +51,7 @@ async function fixture(withPersistence = true) {
   const conversationSettings = new ConversationSettingsStore(settingsPath);
   const access = { c2cMode: 'allowlist' as const, c2cAllow: ['same'], groupMode: 'disabled' as const, groupAllow: [] };
   const account = { access, liveSessionId: () => undefined, peerName: () => '' };
+  const mediaRoot = (appId: string) => join(dir, 'media', appId);
   const stat = vi.fn(async (id: string) => !['old-a', 'group-a', 'current-b'].includes(id) ? undefined : ({
     header: { id, cwd: '/test/workspace', agentPreset: 'test-preset', createdAt: 5 },
   }));
@@ -66,14 +67,15 @@ async function fixture(withPersistence = true) {
   });
   await host.await();
   const plugin = ctx.plugin(scope => registerWorkbenchConversations(scope, {
-    prefs, conversationSettings, timeline, conversationAccount: id => ['A', 'B'].includes(id) ? account : undefined,
+    prefs, conversationSettings, timeline,
+    conversationAccount: id => ['A', 'B'].includes(id) ? { ...account, mediaRoot: mediaRoot(id) } : undefined,
   }, logger));
   await plugin.await();
   const route = registered.get(WORKBENCH_CONVERSATIONS_PATH);
   const history = registered.get(WORKBENCH_TIMELINE_PATH);
   if (!route || !history) throw new Error('QQ workbench route not registered');
   return {
-    route, stat, prefs, settingsPath, access, conversationSettings, timeline,
+    route, stat, prefs, settingsPath, access, conversationSettings, timeline, mediaRoot,
     history: (query: string) => history.fetch(new Request('http://dsh.internal' + WORKBENCH_TIMELINE_PATH + '?' + query)),
     get: (appId: string) => route.fetch(new Request(url + '?appId=' + appId)),
     post: (body: unknown) => route.fetch(new Request(url, { method: 'POST', body: JSON.stringify(body) })),
@@ -178,6 +180,44 @@ it('discovers admitted recorded peers without a Session and reads only the expli
     expect(f.conversationSettings.get(peerKey('A', 'group', 'same')).recording).toBe(false);
     expect(f.conversationSettings.get(peerKey('B', 'group', 'same')).recording).toBe(true);
     expect((await (await f.history('appId=A&scope=group&openId=same')).json()).entries).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+it('serves downloaded GIF bytes only to the matching timeline row and keeps paths out of JSON', async () => {
+  const f = await fixture();
+  try {
+    const target = { scope: 'c2c' as const, targetId: 'same', msgId: 'platform-image' };
+    const id = receivedEntryId(target.msgId);
+    const root = f.mediaRoot('A');
+    mkdirSync(root, { recursive: true });
+    const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+    const file = join(root, 'attachment.jpg');
+    writeFileSync(file, gif);
+    writeFileSync(join(root, 'disguised.png'), '<svg onload="alert(1)"></svg>');
+    if (process.platform !== 'win32') symlinkSync(file, join(root, 'linked.gif'));
+    f.timeline.record('A', target, {
+      id, at: 1, direction: 'inbound', status: 'received', text: '图片回复', attachments: 4,
+      quote: { text: '原文', attachments: 1 },
+    });
+    f.timeline.recordImages('A', target, [file, join(root, 'disguised.png'), join(root, 'missing.gif'), join(root, 'linked.gif')]);
+    f.timeline.reportInbound('A', target, 'submitted', 'session');
+
+    const query = `appId=A&scope=c2c&openId=same&entryId=${id}`;
+    const row = await (await f.history(query)).json();
+    expect(row).toMatchObject({ imageCount: 4, sessionId: 'session', quote: { text: '原文', attachments: 1 } });
+    expect(row).not.toHaveProperty('imageFiles');
+    expect(JSON.stringify(row)).not.toContain('attachment.jpg');
+    const image = await f.history(query + '&image=0');
+    expect(image.status).toBe(200);
+    expect(image.headers.get('content-type')).toBe('image/gif');
+    expect(image.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(Buffer.from(await image.arrayBuffer())).toEqual(gif);
+
+    expect((await f.history(query.replace('appId=A', 'appId=B') + '&image=0')).status).toBe(404);
+    expect((await f.history(query.replace('scope=c2c', 'scope=group') + '&image=0')).status).toBe(404);
+    expect((await f.history(query.replace('openId=same', 'openId=other') + '&image=0')).status).toBe(404);
+    for (const index of [1, 2, 3]) expect((await f.history(query + '&image=' + index)).status).toBe(404);
+    expect((await f.history(query + '&image=0&image=1')).status).toBe(400);
   } finally { await f.close(); }
 });
 

@@ -1,14 +1,15 @@
 import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
-import { TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
+import { MAX_TIMELINE_IMAGES, TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
 import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 interface Peer { scope: ChatScope; openId: string }
+type StoredEntry = TimelineEntry & { imageFiles?: string[] };
 interface Journal {
   signature: string;
-  rows: Map<string, TimelineEntry>;
+  rows: Map<string, StoredEntry>;
 }
 
 function missing(error: unknown): boolean {
@@ -59,6 +60,20 @@ export class QqTimeline {
     this.update(appId, target, entry.id, previous => once && previous ? undefined : entry);
   }
 
+  recordImages(appId: string, target: ReplyTarget, localPaths: readonly string[]): void {
+    if (!target.msgId || localPaths.length === 0) return;
+    const id = receivedEntryId(target.msgId);
+    this.update(appId, target, id, previous => {
+      if (previous?.direction !== 'inbound' || previous.imageFiles?.length) return undefined;
+      return { ...previous, imageFiles: localPaths.slice(0, MAX_TIMELINE_IMAGES).map(path => basename(path)) };
+    });
+  }
+
+  imageFile(appId: string, target: ReplyTarget, id: string, index: number): string | undefined {
+    const directory = this.peerDir(appId, target);
+    return this.load(join(directory, 'rows.jsonl')).rows.get(id)?.imageFiles?.[index];
+  }
+
   reportInbound(appId: string, target: ReplyTarget, inboundOutcome: TimelineInboundOutcome, sessionId?: string): void {
     if (!target.msgId) return;
     this.update(appId, target, receivedEntryId(target.msgId), previous => {
@@ -105,7 +120,8 @@ export class QqTimeline {
     };
   }
 
-  private observedStatus(directory: string, row: TimelineEntry): TimelineEntry {
+  private observedStatus(directory: string, { imageFiles, ...row }: StoredEntry): TimelineEntry {
+    if (imageFiles?.length) row.imageCount = imageFiles.length;
     return row.status === 'sending' && !this.pending.has(join(directory, row.id))
       ? { ...row, status: 'unknown' } : row;
   }
@@ -118,7 +134,7 @@ export class QqTimeline {
     return join(this.accountDir(appId), deliveryKey(target.scope, target.targetId));
   }
 
-  private update(appId: string, target: ReplyTarget, id: string, change: (previous?: TimelineEntry) => TimelineEntry | undefined): void {
+  private update(appId: string, target: ReplyTarget, id: string, change: (previous?: StoredEntry) => StoredEntry | undefined): void {
     const directory = this.peerDir(appId, target);
     const file = join(directory, 'rows.jsonl');
     try {
@@ -158,12 +174,12 @@ export class QqTimeline {
       this.remember(file, cached);
       return cached;
     }
-    const rows = new Map<string, TimelineEntry>();
+    const rows = new Map<string, StoredEntry>();
     const text = readFileSync(file, 'utf8');
     if (text && !text.endsWith('\n')) throw new Error('Incomplete QQ timeline');
     for (const line of text.split('\n')) {
       if (!line) continue;
-      const row = JSON.parse(line) as TimelineEntry;
+      const row = JSON.parse(line) as StoredEntry;
       if (!row || typeof row.id !== 'string' || typeof row.text !== 'string' || !Number.isFinite(row.at)
         || (row.direction !== 'inbound' && row.direction !== 'outbound')
         || !['received', 'sending', 'partial', 'accepted', 'rejected', 'unknown'].includes(row.status)) throw new Error('Invalid QQ timeline');

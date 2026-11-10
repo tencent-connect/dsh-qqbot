@@ -23,6 +23,11 @@ import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
 import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
+import { MEDIA_ROOT } from '../media/media-cleaner.ts';
+
+function robotMediaRoot(appId: string, kind: RobotConfigRecord['kind']): string {
+  return kind === 'primary' ? MEDIA_ROOT : join(PLUGIN_HOME, 'robots', appId, 'media');
+}
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -128,6 +133,7 @@ export class RobotRuntimes {
     const profiles = members?.memberProfiles();
     const config = this.configFor(appId);
     return {
+      mediaRoot: robotMediaRoot(appId, record.kind),
       access: record.kind === 'additional' ? record.access : this.primary!.access.currentAccess(),
       liveSessionId: (scope: ChatScope, openId: string) => manager?.getSessionRecord(scope, openId)?.sessionId,
       agentSettings: (scope: ChatScope, openId: string, existing: boolean) => {
@@ -353,7 +359,6 @@ export class RobotRuntimes {
         await this.mount(primary.config, primary.access);
         return;
       }
-      const root = join(PLUGIN_HOME, 'robots', appId);
       const config = this.configFor(appId);
       const read = () => {
         const current = this.store?.get(appId);
@@ -367,7 +372,7 @@ export class RobotRuntimes {
           this.store!.save({ ...current, access: update(current.access) });
         },
       } });
-      await this.mount(config, access, join(root, 'media'));
+      await this.mount(config, access, robotMediaRoot(appId, record.kind));
     } catch {
       this.logger.error(`QQ 网关初始化失败（AppID ${appId}）`);
     }

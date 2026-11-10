@@ -157,7 +157,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
       h('ol', { className: 'imqw-timeline-list' }, entries.flatMap((row, index) => {
         const previous = entries[index - 1];
         const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
-        const message = h(MessageRow, { key: row.id, row, robotName, openSession, refreshEntry, compact: !newDay && grouped(previous, row) });
+        const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openSession, refreshEntry, compact: !newDay && grouped(previous, row) });
         return newDay ? [h('li', { key: 'date-' + row.id, className: 'imqw-message-day' }, dateFormat.format(row.at)), message] : [message];
       })),
     ),
@@ -166,8 +166,11 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   );
 }
 
-function MessageRow({ row, robotName, openSession, refreshEntry, compact }: {
+function MessageRow({ row, appId, scope, openId, robotName, openSession, refreshEntry, compact }: {
   row: TimelineEntry;
+  appId: string;
+  scope: WorkbenchConversation['scope'];
+  openId: string;
   robotName: string;
   openSession?: (id: string) => void;
   refreshEntry(id: string): Promise<TimelineEntry | undefined>;
@@ -192,15 +195,24 @@ function MessageRow({ row, robotName, openSession, refreshEntry, compact }: {
     }
   };
   const detail = row.inboundOutcome ? inboundLabel[row.inboundOutcome] : statusLabel.received;
+  const imageCount = row.imageCount ?? 0;
+  const remaining = (row.attachments ?? 0) - imageCount;
   return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction, 'data-compact': compact },
     h('span', { className: 'imqw-message-avatar', 'aria-hidden': true }, !compact && [...sender][0]?.toUpperCase()),
     h('div', { className: 'imqw-message-body' },
       compact ? null : h('div', { className: 'imqw-timeline-meta' },
         h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))),
       h('div', { className: 'imqw-timeline-bubble' },
-        row.quote ? h('blockquote', null, row.quote.text) : null,
+        row.quote ? h('blockquote', null,
+          row.quote.text ? h('div', null, row.quote.text) : null,
+          row.quote.attachments ? h('span', { className: 'imqw-muted' }, `引用附件 · ${row.quote.attachments} 项`) : null) : null,
         row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
-        row.attachments ? h('div', { className: 'imqw-muted' }, `附件 · ${row.attachments} 项`) : null),
+        imageCount > 0 ? h('div', { className: 'imqw-message-images' },
+          Array.from({ length: imageCount }, (_, index) => {
+            const query = new URLSearchParams({ appId, scope, openId, entryId: row.id, image: String(index) });
+            return h(MessageImage, { key: index, url: `${WORKBENCH_TIMELINE_PATH}?${query}`, number: index + 1 });
+          })) : null,
+        remaining > 0 ? h('div', { className: 'imqw-muted' }, `附件 · ${remaining} 项`) : null),
       h('div', { className: 'imqw-timeline-meta imqw-message-details' },
         outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status]) : null,
         row.source ? h('span', null, sourceLabel[row.source]) : null,
@@ -218,4 +230,11 @@ function MessageRow({ row, robotName, openSession, refreshEntry, compact }: {
         receiptNote ? h('p', { role: 'status' }, receiptNote) : null),
     ),
   );
+}
+
+function MessageImage({ url, number }: { url: string; number: number }): ReactNode {
+  const [unavailable, setUnavailable] = useState(false);
+  if (unavailable) return h('span', { className: 'imqw-muted' }, '图片已过期或无法预览');
+  return h('a', { className: 'imqw-message-image', href: url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `打开原图 ${number}` },
+    h('img', { src: url, alt: `QQ 图片 ${number}`, loading: 'lazy', decoding: 'async', onError: () => setUnavailable(true) }));
 }

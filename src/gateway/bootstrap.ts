@@ -33,6 +33,7 @@ import { AccountAccessService } from '../runtime/account-service.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
+import type { DownloadedFile } from '../transport/attachment.ts';
 import { observeTimelineRequests } from '../transport/timeline-observer.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
@@ -138,11 +139,14 @@ export function bootstrapGateway(
     const pairing = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(body);
     // Only display the quote actually carried by the QQ event. Never consult
     // the SDK's cross-message cache for text to persist in this peer.
-    const quotedText = message.refMsgIdx && !command && !pairing ? message.msgElements?.[0]?.content?.trim().slice(0, 400) : undefined;
+    const quoted = message.refMsgIdx && !command && !pairing ? message.msgElements?.[0] : undefined;
+    const quotedText = quoted?.content?.trim().slice(0, 400);
+    const quotedAttachments = quoted?.attachments?.length || undefined;
     const quote = message.refMsgIdx && !command && !pairing ? {
       text: quotedText && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(quotedText) ? '配对码已隐藏'
         : quotedText && /^\/[a-z]/i.test(quotedText) ? quotedText.split(/\s+/, 1)[0]!
-          : quotedText || '引用消息不可用',
+          : quotedText || (quotedAttachments ? '' : '引用消息不可用'),
+      attachments: quotedAttachments,
     } : undefined;
     history.timeline.record(config.appId, replyTarget, {
       id: receivedEntryId(message.messageId), at: Date.parse(message.timestamp) || Date.now(),
@@ -156,6 +160,11 @@ export function bootstrapGateway(
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
     if (mCtx.signal.aborted || !allowTarget(mCtx.replyTarget)) return;
+    if (history && canRecord(mCtx.replyTarget)) {
+      const { downloadedFiles } = mCtx.state as { downloadedFiles?: DownloadedFile[] };
+      history.timeline.recordImages(config.appId, mCtx.replyTarget,
+        downloadedFiles?.filter(file => file.contentType === 'image').map(file => file.localPath) ?? []);
+    }
     const msg = mCtx.message;
     // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
     replyIds.cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);

@@ -11,10 +11,11 @@ import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
 import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
-import { QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { MAX_TIMELINE_IMAGES, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { workbenchImage } from './workbench-image.ts';
 
 interface PeerSettings {
   alias: string;
@@ -152,6 +153,7 @@ function recordingValue(value: unknown): boolean {
 
 interface ConversationAccount {
   access: AccessControlConfig;
+  mediaRoot?: string;
   agentSettings?(scope: ChatScope, openId: string, existing: boolean): WorkbenchAgentSettings;
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
@@ -251,19 +253,27 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     const openId = query.get('openId');
     const before = query.get('before') ?? undefined;
     const entryId = query.get('entryId') ?? undefined;
+    const image = query.get('image');
     try {
-      if (['appId', 'scope', 'openId', 'before', 'entryId'].some(key => query.getAll(key).length > 1)) throw new Error();
+      if (['appId', 'scope', 'openId', 'before', 'entryId', 'image'].some(key => query.getAll(key).length > 1)) throw new Error();
       appId = robotAppId(query.get('appId'));
       if ((scope !== 'group' && scope !== 'c2c') || !validOpenId(openId)
         || (before !== undefined && !/^[a-f0-9-]{36,64}$/.test(before))
-        || (entryId !== undefined && (before !== undefined || !/^[a-f0-9-]{36,64}$/.test(entryId)))) throw new Error();
+        || (entryId !== undefined && (before !== undefined || !/^[a-f0-9-]{36,64}$/.test(entryId)))
+        || (image !== null && (entryId === undefined || !/^\d$/.test(image) || Number(image) >= MAX_TIMELINE_IMAGES))) throw new Error();
     } catch {
       return workbenchJson({ error: 'QQ 流水查询参数无效。' }, 400);
     }
-    if (!robots.conversationAccount(appId)) return workbenchJson({ error: '找不到这个 QQ 机器人。' }, 404);
+    const account = robots.conversationAccount(appId);
+    if (!account) return workbenchJson({ error: '找不到这个 QQ 机器人。' }, 404);
     try {
       const target: { scope: ChatScope; targetId: string } = { scope, targetId: openId };
       if (entryId !== undefined) {
+        if (image !== null) {
+          const file = robots.timeline.imageFile(appId, target, entryId, Number(image));
+          const preview = account.mediaRoot && file ? await workbenchImage(account.mediaRoot, file) : undefined;
+          return preview ?? workbenchJson({ error: '图片已过期或无法预览。' }, 404);
+        }
         const entry = robots.timeline.entry(appId, target, entryId);
         return entry ? workbenchJson(entry) : workbenchJson({ error: '这条记录已不可用。' }, 404);
       }
