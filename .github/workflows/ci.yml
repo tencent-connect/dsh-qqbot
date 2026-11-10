@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 package.json 的 engines.node（>=20.3.0）一致，覆盖仍在维护的 LTS 线
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # 与生成 pnpm-lock.yaml 的版本一致，避免 frozen-lockfile 解析差异
+          version: 11.28.5
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (host)
+        run: pnpm exec tsc --noEmit
+
+      - name: Typecheck (client)
+        run: pnpm typecheck:client
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify build artifacts are committed
+        # lib/ 的构建产物随仓库发布（GitHub 路径安装开箱即用），
+        # 因此必须与 src/ 保持一致——漏提交产物会让安装方拿到旧代码。
+        run: git diff --exit-code -- lib/
