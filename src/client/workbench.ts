@@ -8,7 +8,7 @@ import {
   type WorkbenchNewSession,
   type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
-import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
 import { QqTimelineView } from './workbench-timeline.ts';
@@ -573,6 +573,36 @@ function SettingsGroup({ title, hint, defaultOpen, children }: { title: string; 
     h('div', { className: 'imqw-settings-group-body' }, children));
 }
 
+const groupPermissionGuide = [
+  {
+    title: '获取群内全部消息',
+    description: '在「机器人可获取的群聊消息范围」中选择此项，工作台才能接收普通群消息。是否记录消息和是否仅在 @ 时回复由 DSH 设置决定。',
+    image: WORKBENCH_GROUP_GUIDE_IMAGES['message-scope.png'],
+  },
+  {
+    title: '机器人主动在群聊内发言',
+    description: '开启后，工作台可在没有可用回复凭据时主动发言。网页回答的自动推送仍由机器人的主动推送配置决定。',
+    image: WORKBENCH_GROUP_GUIDE_IMAGES['proactive.png'],
+  },
+] as const;
+
+function GroupPermissionGuide(): ReactNode {
+  const [preview, setPreview] = useState<typeof groupPermissionGuide[number]>();
+  return h(SettingsGroup, { title: 'QQ 群权限', hint: '在手机 QQ 设置', children: h(Fragment, null,
+    h('p', { className: 'imqw-muted' }, '请群主在手机 QQ 的群聊中打开机器人的设置。'),
+    groupPermissionGuide.map(item => h('div', { key: item.image },
+      h('div', { className: 'imqw-group-guide-heading' },
+        h('strong', null, item.title),
+        h(Button, { type: 'button', size: 'sm', variant: 'ghost', 'aria-haspopup': 'dialog',
+          'aria-label': `看图：${item.title}`, onClick: () => setPreview(item) }, '看图')),
+      h('p', { className: 'imqw-muted' }, item.description))),
+    preview ? h(Modal, {
+      open: true, title: preview.title, closeLabel: '关闭', onClose: () => setPreview(undefined),
+      className: 'imqw-group-guide-dialog', contentClassName: 'imqw-group-guide-scroll',
+    }, h('img', { className: 'imqw-group-guide-image', src: preview.image, alt: `手机 QQ 设置截图：${preview.title}` })) : null,
+  ) });
+}
+
 interface ConversationSettingsProps {
   robot: WorkbenchRobot;
   peer: WorkbenchConversation;
@@ -656,6 +686,7 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
           h('dt', null, 'OpenID'), h('dd', null, h('code', null, peer.openId)),
         )),
     ) }),
+    peer.scope === 'group' ? h(GroupPermissionGuide) : null,
     fields ? h(Fragment, null,
       h(SettingsGroup, { title: 'Agent 基本设置', children: h(Fragment, null,
         current ? h('p', { className: 'imqw-muted' }, [archived ? '当前 Session 已归档' : '当前 Session', workspace || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ')) : null,

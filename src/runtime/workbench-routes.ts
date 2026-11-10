@@ -1,9 +1,18 @@
+import { readFile } from 'node:fs/promises';
 import type { Context } from '@deepseek-ai/cordis';
-import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
 import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
+
+export function registerWorkbenchGroupGuideImages(ctx: Context): void {
+  for (const [filename, path] of Object.entries(WORKBENCH_GROUP_GUIDE_IMAGES)) {
+    const image = new URL(`../../assets/qq-group-permissions/${filename}`, import.meta.url);
+    registerWorkbenchFetch(ctx, path, ['GET'], async () =>
+      new Response(await readFile(image), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' } }));
+  }
+}
 
 export function registerWorkbenchTools(ctx: Context): void {
   registerWorkbenchFetch(ctx, WORKBENCH_TOOLS_PATH, ['GET'], async request => {

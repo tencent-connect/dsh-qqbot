@@ -8,7 +8,7 @@ import { ensureCredentials, persistCredentialsToProfile, registerBoundCredential
 import { ensureVisionInputModal, registerDescribeImageTool } from './media/vision-tool.ts';
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
-import { registerWorkbenchDefaults, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
+import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
 import { registerWorkbenchConversations, registerWorkbenchSend } from './runtime/workbench-conversations.ts';
 import { registerWorkbenchAnswer } from './runtime/workbench-answer.ts';
 import type { Logger } from './types.ts';
@@ -28,6 +28,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const robots = new RobotRuntimes(ctx, agents, logger, store);
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
   registerWorkbenchDefaults(ctx, robots);
+  registerWorkbenchGroupGuideImages(ctx);
   registerWorkbenchTools(ctx);
   registerWorkbenchConversations(ctx, robots, logger);
   registerWorkbenchSend(ctx, robots);

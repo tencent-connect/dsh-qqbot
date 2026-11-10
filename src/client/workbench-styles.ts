@@ -253,6 +253,11 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
 .imqw-settings-group:not([open]) > summary > svg { transform: rotate(-90deg); }
 .imqw-settings-group > summary > .imqw-muted { margin-inline-start: auto; text-align: end; }
 .imqw-settings-group-body, .imqw-defaults-section { display: grid; gap: 12px; min-width: 0; padding-bottom: 12px; }
+.imqw-group-guide-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.imqw-group-guide-heading button { flex: none; }
+.imqw-group-guide-dialog { max-height: 100%; }
+.imqw-group-guide-scroll { min-height: 0; overflow-y: auto; }
+.imqw-group-guide-image { display: block; width: 100%; height: auto; border-radius: 6px; }
 .imqw-settings-meta > summary { color: var(--dsw-alias-label-tertiary); font-size: 12px; cursor: pointer; }
 .imqw-settings-meta[open] > summary { margin-bottom: 8px; }
 .imqw-settings summary:focus-visible { outline: 2px solid var(--dsw-focus-ring-color); outline-offset: 2px; }

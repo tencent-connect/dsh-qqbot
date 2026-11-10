@@ -1,6 +1,10 @@
 import type { AccessControlConfig } from '../config.ts';
 
 export const WORKBENCH_ROBOTS_PATH = '/api/qqbot/workbench/robots';
+export const WORKBENCH_GROUP_GUIDE_IMAGES = {
+  'message-scope.png': '/api/qqbot/workbench/group-permissions/message-scope.png',
+  'proactive.png': '/api/qqbot/workbench/group-permissions/proactive.png',
+} as const;
 
 export type WorkbenchRobotState = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disabled';
 
