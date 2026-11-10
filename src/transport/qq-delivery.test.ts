@@ -1,5 +1,12 @@
+import { EventEmitter } from 'node:events';
+import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import https from 'node:https';
+import { syncBuiltinESMExports } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ApiError, MediaFileType, QQBot, StreamInputState, type InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
+import { LARGE_FILE_THRESHOLD } from '@tencent-connect/qqbot-nodejs/protocol';
 import { bindDelivery, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { ReplyIdCache } from './msgid-cache.ts';
@@ -167,6 +174,78 @@ it('rechecks file access if token acquisition delays submission', async () => {
   await expect(delivery).rejects.toThrow('no longer authorized');
   expect(request).not.toHaveBeenCalled();
 });
+
+it.each(['c2c', 'group'] as const)('blocks %s upload while the SDK waits for a token', async scope => {
+  const { bot, media, request } = setup();
+  const dir = await mkdtemp(join(tmpdir(), 'qqbot-upload-'));
+  const localPath = join(dir, 'small.txt');
+  await writeFile(localPath, 'QQ upload fixture');
+  const token = Promise.withResolvers<string>();
+  const acquiring = vi.spyOn(bot.tokenManager, 'getAccessToken').mockReturnValueOnce(token.promise);
+  const target = bindDelivery({ scope, targetId: 'peer' }, { key: 'upload-token', allowed: () => !revoked });
+  let revoked = false;
+  try {
+    const denied = expect(media.sendFile(target, { localPath })).rejects.toThrow('no longer authorized');
+    try {
+      await vi.waitFor(() => expect(acquiring).toHaveBeenCalled());
+      revoked = true;
+    } finally {
+      token.resolve('fixture-token');
+    }
+    await denied;
+    expect(request).not.toHaveBeenCalled();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 8000);
+
+it.each(['authorized', 'after-prepare', 'before-retry'] as const)('checks real SDK COS PUTs (%s)', async when => {
+  const { media, request, target, revoke } = setup();
+  const dir = await mkdtemp(join(tmpdir(), 'qqbot-chunks-'));
+  const localPath = join(dir, 'large.txt');
+  await writeFile(localPath, '');
+  await truncate(localPath, LARGE_FILE_THRESHOLD);
+  request.mockImplementation(async (_token, _method, path) => {
+    if (path.endsWith('/upload_prepare')) {
+      if (when === 'after-prepare') revoke();
+      return { upload_id: 'u', block_size: LARGE_FILE_THRESHOLD, parts: [{ index: 1, presigned_url: 'https://cos.invalid/part' }] };
+    }
+    if (path.endsWith('/files')) return { file_info: 'media', file_uuid: 'file', ttl: 0 };
+    return { id: 'message' };
+  });
+  const put = vi.spyOn(https, 'request').mockImplementation((_url, _options, callback) => {
+    const req = new EventEmitter();
+    return Object.assign(req, {
+      end: () => queueMicrotask(() => {
+        if (when !== 'authorized') {
+          revoke();
+          req.emit('error', new Error('fixture failure before retry'));
+          return;
+        }
+        const response = Object.assign(new EventEmitter(), { headers: {}, statusCode: 200 });
+        if (typeof callback === 'function') callback(response as never);
+        response.emit('end');
+      }),
+    }) as never;
+  });
+  syncBuiltinESMExports();
+  try {
+    if (when === 'authorized') {
+      await expect(media.sendFile(target, { localPath })).resolves.toMatchObject({ message: { id: 'message' } });
+      expect(request.mock.calls.map(([, , path]) => path.split('/').at(-1))).toEqual([
+        'upload_prepare', 'upload_part_finish', 'files', 'messages',
+      ]);
+    } else {
+      await expect(media.sendFile(target, { localPath })).rejects.toThrow('no longer authorized');
+      expect(request).toHaveBeenCalledOnce();
+    }
+    expect(put).toHaveBeenCalledTimes(when === 'after-prepare' ? 0 : 1);
+  } finally {
+    put.mockRestore();
+    syncBuiltinESMExports();
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 8000);
 
 const keyboard: InlineKeyboard = { content: { rows: [] } };
 
