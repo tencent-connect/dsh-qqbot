@@ -104,6 +104,22 @@ describe('durable delivery identities', () => {
     expect(() => ledger.begin('new-operation')).toThrow('disappeared');
   });
 
+  it('adopts an existing ledger without rewriting its receipts and blocks loss across a restart', async () => {
+    const file = join(directory(), 'ledger.jsonl');
+    const original = '{"kind":"delivery","key":"old-operation","state":"accepted"}\n';
+    writeFileSync(file, original);
+    expect(new DeliveryLedger(file).state('old-operation')).toBe('accepted');
+    expect(readFileSync(file, 'utf8')).toBe(original);
+    rmSync(file);
+    expect(() => new DeliveryLedger(file)).toThrow('disappeared');
+    writeFileSync(file, '');
+    expect(() => new DeliveryLedger(file)).toThrow('was emptied');
+    writeFileSync(file, original);
+    const send = vi.fn();
+    expect(await new DeliveryLedger(file).run('old-operation', send)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('stale instances refresh before writing and cannot remove newer reservations', () => {
     const file = join(directory(), 'ledger.json');
     const old = new DeliveryLedger(file), fresh = new DeliveryLedger(file);

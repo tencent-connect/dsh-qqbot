@@ -10,7 +10,7 @@ description: Verify dsh-qqbot changes with Vitest, QQ protocol fixtures, a TLA+ 
 ## 选择验证范围
 
 - 逻辑修复：运行受影响的 Vitest 测试。
-- 手动发送、防重、撤权或账本：运行 `pnpm verify:formal` 与 `pnpm test src/transport/manual-send.test.ts`。改变发送边界或恢复规则时同步修改[模型与负对照](../../../tests/formal/qq-delivery/README.md)。账本丢失诊断的已知反例不能算通过。
+- 手动发送、防重、撤权或账本：运行 `pnpm verify:formal` 和相关 Vitest 回归。重建后用 `pnpm verify:formal --ledger-loss` 检查新进程下缺失、清空和恢复三种路径。改变发送边界或恢复规则时同步修改[模型与负对照](../../../tests/formal/qq-delivery/README.md)。
 - 夹具或启动器：运行 `node scripts/verify-qqbot.mjs`，验证本地 QQ HTTP/WS 契约、配置约束与进程清理。
 - 命令、配置或宿主接口变化：运行指南中的隔离 Host 测试；先检查模型目录中的实际 provider/model，默认名称存在不代表 provider 已注册。
 - 生成路径：显式启用 `--allow-model-requests`。只有 primary 模型可生成，secondary 仅用于切换。报告实际 request/header 的模型及推理等级。运行中取消等不在矩阵内，按改动另验。

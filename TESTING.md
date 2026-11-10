@@ -1,6 +1,6 @@
 # QQ 机器人测试
 
-端到端夹具在 `tests/e2e/`，形式化模型在 [tests/formal/qq-delivery](tests/formal/qq-delivery/README.md)。Agent 指引在 [qqbot-verify](.agents/skills/qqbot-verify/SKILL.md)；`.codex/skills` 和 `.claude/skills` 都以相对符号链接指向 `.agents/skills`，只维护一份内容。
+端到端夹具在 `tests/e2e/`，形式化模型和待建模场景见[模型索引](tests/formal/README.md)。Agent 指引在 [qqbot-verify](.agents/skills/qqbot-verify/SKILL.md)，`.codex/skills` 和 `.claude/skills` 都以相对符号链接指向 `.agents/skills`。
 
 ## 日常检查
 
@@ -21,18 +21,18 @@ pnpm build
 
 ```bash
 TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal
-pnpm test src/transport/manual-send.test.ts
+pnpm test src/transport/manual-send.test.ts src/transport/delivery-safety.test.ts
 ```
 
-第一条可用于 CI：检查账本完好时的模型，并要求“去掉发送前复查”的负对照报出指定反例。第二条验证 TypeScript 实现中的撤权、重启防重和发送失败。两条都不依赖 DSH 或真实 QQ。当前仓库未接入此 CI 步骤。
+第一条检查账本完好与停机期间丢失时的模型，分别关掉发送前复查和账本保护作为负对照。第二条验证 TypeScript 实现中的撤权、账本迁移、重启防重和发送失败。两条都不依赖 DSH 或真实 QQ。当前仓库未接入此 CI 步骤。
 
-另有一条已知问题的诊断命令。它验证移走账本后的模型反例，并通过 `lib/` 中的生产发送器和真实 SDK 向本地 HTTP 服务重放。干净 checkout 可使用入库的构建产物；修改发送源码后须先重建，再用诊断检查新实现。
+添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
 
 ```bash
 TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal --ledger-loss
 ```
 
-重现重复 POST 时返回 1；环境不满足或结果不符合预期时返回 2。诊断不作为通过门禁。若修复账本恢复，先更新模型和代码回归，再调整此诊断。运行范围见[模型说明](tests/formal/qq-delivery/README.md)。
+回放和模型都通过时返回 0，环境或结果有问题时返回 2。运行范围与账本恢复说明见[手动发送模型](tests/formal/qq-delivery/README.md)。
 
 ## 本地协议夹具
 

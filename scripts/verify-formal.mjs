@@ -37,8 +37,8 @@ function main(args) {
     console.log(usage);
     return;
   }
-  const diagnostic = args.length === 1 && args[0] === '--ledger-loss';
-  if (args.length && !diagnostic) throw new Error(usage);
+  const replayLedgerLoss = args.length === 1 && args[0] === '--ledger-loss';
+  if (args.length && !replayLedgerLoss) throw new Error(usage);
   if (!process.env.TLA2TOOLS) throw new Error(usage);
   const jar = resolve(process.env.TLA2TOOLS);
   if (createHash('sha256').update(readFileSync(jar)).digest('hex') !== jarSha256) {
@@ -47,20 +47,17 @@ function main(args) {
 
   const dir = mkdtempSync(join(tmpdir(), 'qqbot-tlc-'));
   try {
-    if (diagnostic) {
-      runTlc(jar, 'ledger-loss.cfg', join(dir, 'ledger-loss'), 'OnePostPerOperation');
+    runTlc(jar, 'normal.cfg', join(dir, 'normal'));
+    runTlc(jar, 'no-post-check.cfg', join(dir, 'no-post-check'), 'OnlyAuthorizedPost');
+    runTlc(jar, 'ledger-loss.cfg', join(dir, 'ledger-loss'), 'OnePostPerOperation');
+    if (replayLedgerLoss) {
       const replay = spawnSync(process.execPath, [join(modelDir, 'replay-ledger-loss.mjs')], {
         stdio: 'inherit', timeout: 30_000,
       });
       if (replay.error) throw replay.error;
       if (replay.status !== 0) {
-        throw new Error('Ledger-loss replay did not reproduce the documented result. Build first; if behavior changed, update the model.');
+        throw new Error('Ledger-loss replay failed. Rebuild the plugin and inspect the replay output.');
       }
-      console.error('Known limitation reproduced: losing the ledger permits a duplicate QQ POST.');
-      process.exitCode = 1;
-    } else {
-      runTlc(jar, 'normal.cfg', join(dir, 'normal'));
-      runTlc(jar, 'no-post-check.cfg', join(dir, 'no-post-check'), 'OnlyAuthorizedPost');
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

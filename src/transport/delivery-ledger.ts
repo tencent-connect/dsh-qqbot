@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, statSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ReplyTarget } from '../types.ts';
 
@@ -36,6 +36,7 @@ type Receipt = InputReceipt | DeliveryReceipt;
 export class DeliveryLedger {
   private receipts = new Map<string, Receipt>();
   private signature: string | undefined;
+  private initialized = false;
 
   constructor(private readonly file?: string) { this.refresh(); }
 
@@ -98,8 +99,9 @@ export class DeliveryLedger {
 
   private refresh(): void {
     if (!this.file) return;
+    const knownLedger = this.initialized || existsSync(`${this.file}.initialized`);
     if (!existsSync(this.file)) {
-      if (this.signature) throw new Error('QQ delivery ledger disappeared; refusing to recreate submission identities');
+      if (this.signature || knownLedger) throw new Error('QQ delivery ledger disappeared; refusing to recreate submission identities');
       return;
     }
     const signature = this.fileSignature();
@@ -112,14 +114,18 @@ export class DeliveryLedger {
       if (!isReceipt(raw)) throw new Error('QQ delivery ledger is invalid; refusing to replay or overwrite it');
       records.set(raw.key, raw);
     }
+    if (records.size > 0) this.markInitialized(this.file);
+    else if (knownLedger) throw new Error('QQ delivery ledger was emptied; refusing to recreate submission identities');
     this.receipts = records;
     this.signature = signature;
   }
 
   private put(receipt: Receipt): void {
     if (this.file) {
-      mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
-      const fd = openSync(this.file, 'a', 0o600);
+      const firstCreatedDir = mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+      // Existing files must never be recreated by an append after refresh.
+      const flags = this.signature ? constants.O_WRONLY | constants.O_APPEND : 'ax';
+      const fd = openSync(this.file, flags, 0o600);
       try {
         fchmodSync(fd, 0o600);
         const line = Buffer.from(JSON.stringify(receipt) + '\n');
@@ -127,9 +133,27 @@ export class DeliveryLedger {
         while (offset < line.length) offset += writeSync(fd, line, offset);
         fsyncSync(fd);
       } finally { closeSync(fd); }
+      this.markInitialized(this.file, firstCreatedDir);
       this.signature = this.fileSignature();
     }
     this.receipts.set(receipt.key, receipt);
+  }
+
+  private markInitialized(file: string, firstCreatedDir?: string): void {
+    if (this.initialized) return;
+    // The marker survives loss of the journal. Sync both directory entries
+    // before allowing the first external effect on a newly opened ledger.
+    const marker = openSync(`${file}.initialized`, 'a', 0o600);
+    try { fsyncSync(marker); } finally { closeSync(marker); }
+    if (process.platform !== 'win32') {
+      const top = firstCreatedDir ? dirname(firstCreatedDir) : dirname(file);
+      for (let parent = dirname(file); ; parent = dirname(parent)) {
+        const fd = openSync(parent, 'r');
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+        if (parent === top) break;
+      }
+    }
+    this.initialized = true;
   }
 
   private fileSignature(): string {
