@@ -23,9 +23,10 @@ pnpm build
 TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal
 pnpm test src/transport/manual-send.test.ts src/transport/delivery-safety.test.ts
 pnpm test src/runtime/account-service.test.ts src/runtime/pairing-service.test.ts src/runtime/pairing-state.test.ts
+pnpm test src/session/session-manager.test.ts src/gateway/bootstrap.test.ts
 ```
 
-第一条运行手动发送和配对撤权的模型及负对照。后两条在实际插件代码中回放对应场景，包括账本丢失、配对状态重载和撤销记录回滚。全部使用本地夹具，无需 DSH 或 QQ 连接。当前仓库未接入此 CI 步骤。
+第一条运行手动发送、配对撤权和 Session 切换的模型及负对照。后续命令在插件代码中回放账本丢失、撤销记录回滚、入站恢复遇到 `/new` 或重载以及换绑失败。全部使用本地夹具，无需 DSH 或 QQ 连接。当前仓库未接入此 CI 步骤。
 
 添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
 

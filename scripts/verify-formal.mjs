@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 const formalDir = fileURLToPath(new URL('../tests/formal/', import.meta.url));
 const deliveryDir = join(formalDir, 'qq-delivery');
 const pairingDir = join(formalDir, 'qq-pairing');
+const sessionDir = join(formalDir, 'qq-session-switch');
 const jarSha256 = '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88';
 const usage = 'Usage: TLA2TOOLS=/path/to/tla2tools.jar pnpm verify:formal [--ledger-loss]\n'
   + 'Requires the TLC 1.7.4 release JAR and Java on PATH (or set JAVA). See TESTING.md.';
@@ -52,6 +53,7 @@ function main(args) {
   try {
     const delivery = { cwd: deliveryDir, module: 'QqManualSend' };
     const pairing = { cwd: pairingDir, module: 'QqPairing' };
+    const session = { cwd: sessionDir, module: 'QqSessionSwitch' };
     runTlc(jar, { ...delivery, config: 'normal.cfg', metadir: join(dir, 'delivery-normal') });
     runTlc(jar, {
       ...delivery, config: 'no-post-check.cfg', metadir: join(dir, 'no-post-check'),
@@ -65,6 +67,15 @@ function main(args) {
     runTlc(jar, {
       ...pairing, config: 'forget-fence.cfg', metadir: join(dir, 'forget-fence'),
       expectedInvariant: 'NoOldCodeReadmission',
+    });
+    runTlc(jar, { ...session, config: 'normal.cfg', metadir: join(dir, 'session-normal') });
+    runTlc(jar, {
+      ...session, config: 'no-binding-check.cfg', metadir: join(dir, 'no-binding-check'),
+      expectedInvariant: 'NoStaleBindingCommit',
+    });
+    runTlc(jar, {
+      ...session, config: 'no-runtime-check.cfg', metadir: join(dir, 'no-runtime-check'),
+      expectedInvariant: 'NoRetiredRuntimeCommit',
     });
     if (replayLedgerLoss) {
       const replay = spawnSync(process.execPath, [join(deliveryDir, 'replay-ledger-loss.mjs')], {
