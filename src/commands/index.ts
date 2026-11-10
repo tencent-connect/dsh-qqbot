@@ -12,9 +12,12 @@ import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { newCommand, compactCommand } from './session.ts';
 import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
+import { sessionsCommand } from './sessions.ts';
+import { permissionCommand } from './permission.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
 import { pingCommand, versionCommand, stopCommand, meCommand } from './misc.ts';
+import { pwdCommand } from './pwd.ts';
 
 /**
  * 构建标准命令列表
@@ -26,12 +29,15 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     compactCommand(deps),
     modelCommand(deps),
     presetCommand(deps),
+    sessionsCommand(deps),
+    permissionCommand(deps),
     stopCommand(deps),
     // QQBot 特有
     pingCommand(),
     versionCommand(deps),
     meCommand(deps),
     statusCommand(deps),
+    pwdCommand(deps),
   ];
 
   // help 需要访问完整列表（含自身），通过闭包惰性引用

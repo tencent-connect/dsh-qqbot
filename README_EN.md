@@ -173,10 +173,13 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
+| `/sessions` | Browse sessions grouped by workspace (rows show session titles); switch by index or start a new session in a workspace; sessions owned by another QQ user/group are locked |
+| `/permission` | View or switch session permission (read-only / workspace-write / danger-full-access) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
 | `/bot-status` | View current session status |
+| `/pwd` | Show the current location (workspace - session, same format as the reply header) |
 | `/bot-help` | View all commands |
 
 ## Core Modules

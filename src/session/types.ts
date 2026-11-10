@@ -3,6 +3,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
+import type { DigestMessage } from '../shared/session-title.ts';
 
 /** AgentSetup hook 类型 */
 export type AgentSetup = (agentCtx: Context) => Promise<void> | void;
@@ -131,10 +132,75 @@ export interface SessionRecord {
   agentPreset?: string;
 }
 
+/** /sessions 分组列表的单个会话条目（信息来自会话 header，读取失败字段缺省） */
+export interface SessionGroupEntry {
+  sessionId: string;
+  /** 创建时间（Unix epoch ms；header 不可得时缺省） */
+  createdAt?: number;
+  /** 会话创建时的 agent preset */
+  agentPreset?: string;
+  /** 是否为当前会话 */
+  isCurrent: boolean;
+  /** 是否已绑定到其他 QQ peer（完整列表可见，但禁止切入） */
+  occupiedByOther: boolean;
+  /** 显示标题（session/title 投影 > 首条消息摘要；缺省回退 id 短码） */
+  title?: string;
+}
+
+/** /sessions 的一个工作区分组 */
+export interface SessionGroup {
+  /** 工作区规范化路径 */
+  path: string;
+  /** 显示标题 */
+  title: string;
+  /** 是否为当前工作区（per-peer 生效 cwd） */
+  isCurrentWorkspace: boolean;
+  /** 组内会话（上限截断前） */
+  sessions: SessionGroupEntry[];
+  /** 被上限截断未展示的会话数 */
+  truncated: number;
+  /** 是否为「无工作区服务」时的平铺回退组（不对应真实工作区，无新建入口） */
+  isFallback?: boolean;
+}
+
+/** /sessions <id> 切换结果 */
+export interface SwitchSessionOutcome {
+  ok: boolean;
+  reason?: 'unknown-session' | 'not-on-disk' | 'occupied' | 'busy';
+  /** 目标即当前会话（幂等成功） */
+  alreadyCurrent?: boolean;
+  /** 目标会话显示标题（确认文案用；缺省由命令层回退 id 短码） */
+  title?: string;
+  /** 目标会话所属工作区的显示名（确认文案用） */
+  workspaceTitle?: string;
+  /** 切换后最近对话摘要（无历史则缺省） */
+  recentMessages?: DigestMessage[];
+  /** 摘要之前的历史消息数（「更早 N 条」提示） */
+  earlierMessages?: number;
+}
+
+/** /sessions new <工作区> 结果 */
+export interface StartNewOutcome {
+  ok: boolean;
+  reason?: 'unknown-workspace' | 'busy';
+  path?: string;
+}
+
+/** /permission 切换结果 */
+export interface SetPermissionOutcome {
+  ok: boolean;
+  /** apply-failed：宿主策略模块不可用或会话写入失败 */
+  reason?: 'apply-failed';
+  /** 是否已作用于活跃会话（false = 仅保存为新会话默认） */
+  appliedLive?: boolean;
+}
+
 /** 会话状态信息（/status 用） */
 export interface SessionStatus {
   active: boolean;
   sessionId?: string;
+  /** 会话显示标题（活跃会话内存折叠；无标题回退 id） */
+  title?: string;
   provider?: string;
   model?: string;
   preset?: string;

@@ -61,9 +61,10 @@
     "compatibility": {
       "dshReleases": {
         "0.1.0-rc.8": "compatible",
-        "0.2.0-rc.2": "compatible"
+        "0.2.0-rc.2": "compatible",
+        "0.2.2-rc.1": "compatible"
       },
-      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛。客户端依赖 settings.section / sidebarRightTabs / sidebar.right.pane.tab 席位契约与 dsh.client 模块系统，宿主大版本升级后请重新验收席位行为。"
+      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛。0.2.2-rc.1 为 web profile（dsh-base + dsh-web-app）已验证：插件装载、/sessions 按工作区分组列出会话、语音消息入站、会话标题与权限切换所需的新宿主 API（session/title 投影、workspaceRegistry.list、sessionPersistence.open/list、sandbox/mode 与 approval/policy 事件）。会话导航与权限切换的端到端验收以该版本为准，宿主大版本升级后请重新验收；客户端仍依赖 settings.section / sidebarRightTabs / sidebar.right.pane.tab 席位契约与 dsh.client 模块系统。"
     }
   },
   "dependencies": {
@@ -77,6 +78,7 @@
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.6",
     "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6",
     "@deepseek-ai/schemastery": ">=3.18.1",
@@ -100,12 +102,18 @@
     },
     "@deepseek-ai/dsh-user-approval": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-sandbox-policy": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-sandbox": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-sandbox-policy": "0.1.0-rc.6",
     "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6",

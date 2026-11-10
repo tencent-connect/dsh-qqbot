@@ -5,6 +5,7 @@
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { renderCmdInput } from './cmd-input.ts';
 
 export function presetCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {
@@ -31,7 +32,7 @@ export function presetCommand({ manager, config }: CommandDeps): CategorizedComm
         lines.push('', '**可用 preset（点击切换）:**');
         for (const p of presets) {
           const display = p.name ? `${p.name} (${p.id})` : p.id;
-          lines.push(`<qqbot-cmd-input text="/preset ${p.id}" show="/preset ${display}"/>`);
+          lines.push(renderCmdInput(`/preset ${p.id}`, `/preset ${display}`));
         }
         lines.push('', '手动指定: `/preset <id>`，重置默认: `/preset reset`');
 

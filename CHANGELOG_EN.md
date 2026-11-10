@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **New `/pwd` command**: one command confirms which workspace and session you are in, rendered like the reply header (`**Workspace - Session**`); it still works after the session was evicted for idleness.
+- **Switching no longer cancels a running reply**: while the current session is still generating, `/sessions` (and starting a new session) is refused with a hint to `/stop`, so a half-finished answer is not thrown away — matching `/compact` behavior.
+- **`/sessions` also works without the workspace service**: on deployments that do not compose it, the list falls back to a flat list of stored sessions (sub-agent sessions excluded) instead of workspace groups.
+- **One-tap list actions in DMs**: in private chats the `/sessions` rows, new-session buttons, and `/permission` presets now use enter-command tags (`qqbot-cmd-enter`) — tapping runs the command immediately instead of inserting it for a manual send; group chats keep the insert-into-input interaction because the platform does not support the enter tag there.
+- **Switching shows recent conversation**: a `/sessions` switch confirmation now includes the target session's last 5 messages (with an "N earlier" hint), so you preview the context before continuing instead of switching blind.
+- **Replies carry a session title header**: every reply starts with a bold `**Workspace - Session**` line, keeping you oriented across long conversations and workspaces; it is omitted until a title exists, survives streaming retries, and `/bot-status` shows the title too.
+- **New `/sessions` command**: lists sessions grouped by workspace (mirroring the desktop sidebar's workspace→session tree); click an index to switch sessions or start a new one in a chosen workspace — context and the on-disk working directory follow the switch. Sessions already bound to another QQ user or group are marked and cannot be switched into. Rows show the session title (the host `session/title` projection, falling back to the first user message or the session id) so names match the desktop.
+- **New `/permission` command**: view or switch the current session's permission (read-only / workspace-write / danger-full-access); takes effect immediately, survives restarts, and carries over to new sessions started via `/new`; dangerous combinations such as `danger-full-access` come with a prominent warning.
 - **Pairing codes for allowlists**: generate a 10-minute code in account settings and have users send it to the bot in the matching chat to join the DM/group/command roster; one code admits multiple people, with manual OpenID bulk-adding and copy/export as well. After an identity is removed, codes issued before the removal can no longer re-add it.
 - **Independent slash-command access**: new `access.commandMode` (open / allowlist / disabled) checks commands by sender identity, managed separately from the chat admission allowlists.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
@@ -23,6 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Voice messages no longer show the transcript twice**: a QQ voice message used to enter the session as both an `- ASR: …` metadata line and a `[Voice message] …` body line (visible in the desktop UI and to the model); the transcript now appears exactly once in the message body, and voices without a transcript still fall back to a link line.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
 
 ## [0.5.5] - 2026-10-30

@@ -18,20 +18,28 @@ export interface DeliverablesDelivererLike {
   deliver: (target: ReplyTarget, files: PresentedFileRef[]) => Promise<void>;
 }
 
+/** 按 QQ peer 解析当前工作区的最小接口（SessionManager 满足） */
+export interface PeerWorkspaceResolver {
+  workspacePathForPeer(scope: 'c2c' | 'group', peerId: string): string;
+}
+
 export class DeliverablesDeliverer implements DeliverablesDelivererLike {
   private readonly sender: QQBotSender;
   private readonly mediaBot: MediaSenderLike;
+  private readonly manager: PeerWorkspaceResolver;
   private readonly config: ImQQBotConfig;
   private readonly logger: Logger;
 
   public constructor(
     sender: QQBotSender,
     mediaBot: MediaSenderLike,
+    manager: PeerWorkspaceResolver,
     config: ImQQBotConfig,
     logger: Logger,
   ) {
     this.sender = sender;
     this.mediaBot = mediaBot;
+    this.manager = manager;
     this.config = config;
     this.logger = logger;
   }
@@ -39,7 +47,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
   /** 轮末投递一批声明文件到本回合目标：逐个发送，未送达的聚合为一条文字提示 */
   public async deliver(target: ReplyTarget, files: PresentedFileRef[]): Promise<void> {
     const limit = Math.max(1, this.config.sendFile?.maxFiles ?? 4);
-    const cwd = resolveAgentCwd(this.config.cwd);
+    const cwd = resolveAgentCwd(this.manager.workspacePathForPeer(target.scope, target.targetId));
     const missed: string[] = [];
     let sent = 0;
 

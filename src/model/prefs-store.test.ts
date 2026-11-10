@@ -118,6 +118,79 @@ describe('PrefsStore 并发安全（E3）', () => {
   });
 });
 
+describe('PrefsStore 新段：workspaces / permissions', () => {
+  it('CRUD 往返：set 后读取、落盘、重启（新实例）后仍在', () => {
+    const a = store();
+    a.setWorkspace('k', '/tmp/ws-a');
+    a.setPermission('k', { sandbox: 'workspace-write', approval: 'ask' });
+
+    expect(a.getWorkspace('k')).toBe('/tmp/ws-a');
+    expect(a.getPermission('k')).toEqual({ sandbox: 'workspace-write', approval: 'ask' });
+
+    const disk = JSON.parse(readFileSync(path, 'utf8'));
+    expect(disk.workspaces.k).toBe('/tmp/ws-a');
+    expect(disk.permissions.k).toEqual({ sandbox: 'workspace-write', approval: 'ask' });
+
+    // 重启：新实例从磁盘恢复
+    const b = store();
+    expect(b.getWorkspace('k')).toBe('/tmp/ws-a');
+    expect(b.getPermission('k')).toEqual({ sandbox: 'workspace-write', approval: 'ask' });
+  });
+
+  it('写前合并：其他写者的新段条目不丢（多实例共存）', () => {
+    const a = store();
+    a.setWorkspace('botA:peer1', '/tmp/ws-a');
+
+    const b = store();
+    b.setWorkspace('botB:peer2', '/tmp/ws-b');
+    b.setPermission('botB:peer2', { sandbox: 'read-only', approval: 'ask' });
+
+    const disk = JSON.parse(readFileSync(path, 'utf8'));
+    expect(disk.workspaces).toEqual({ 'botA:peer1': '/tmp/ws-a', 'botB:peer2': '/tmp/ws-b' });
+    expect(disk.permissions['botB:peer2']).toEqual({ sandbox: 'read-only', approval: 'ask' });
+  });
+
+  it('删除墓碑：clear 后并发写盘的旧值不复活', () => {
+    const a = store();
+    a.setPermission('k', { sandbox: 'workspace-write', approval: 'ask' });
+    a.setWorkspace('k', '/tmp/ws-mine');
+
+    // 外部写者把旧值落盘
+    const external = JSON.parse(readFileSync(path, 'utf8'));
+    external.permissions.k = { sandbox: 'danger-full-access', approval: 'never' };
+    external.workspaces.k = '/tmp/ws-ext';
+    writeFileSync(path, JSON.stringify(external), 'utf8');
+
+    a.clearPermission('k');
+    a.clearWorkspace('k');
+
+    const disk = JSON.parse(readFileSync(path, 'utf8'));
+    expect('k' in disk.permissions).toBe(false);
+    expect('k' in disk.workspaces).toBe(false);
+
+    // 墓碑解除：重新 set 后正常落盘
+    a.setWorkspace('k', '/tmp/ws-new');
+    expect(JSON.parse(readFileSync(path, 'utf8')).workspaces.k).toBe('/tmp/ws-new');
+  });
+
+  it('load 跳过非法条目（空路径 / 缺字段的权限对象）', () => {
+    writeFileSync(path, JSON.stringify({
+      workspaces: { ok: '/tmp/ws', empty: '', notString: 1 },
+      permissions: {
+        ok: { sandbox: 'read-only', approval: 'ask' },
+        missingApproval: { sandbox: 'read-only' },
+      },
+    }), 'utf8');
+
+    const a = store();
+    expect(a.getWorkspace('ok')).toBe('/tmp/ws');
+    expect(a.getWorkspace('empty')).toBeUndefined();
+    expect(a.getWorkspace('notString')).toBeUndefined();
+    expect(a.getPermission('ok')).toEqual({ sandbox: 'read-only', approval: 'ask' });
+    expect(a.getPermission('missingApproval')).toBeUndefined();
+  });
+});
+
 describe('PrefsStore.findSessionKey 反向索引', () => {
   it('随 set/clear 同步维护：换新会话后旧 id 不再命中', () => {
     const s = store();
@@ -136,5 +209,14 @@ describe('PrefsStore.findSessionKey 反向索引', () => {
     store().setSessionId('k', 'session-1');
 
     expect(store().findSessionKey('session-1')).toBe('k');
+  });
+
+  it('findSessionKeys 返回同一会话的全部绑定（跨 peer 占用保护）', () => {
+    const s = store();
+    s.setSessionId('peer-a', 'session-shared');
+    s.setSessionId('peer-b', 'session-shared');
+
+    expect(s.findSessionKeys('session-shared').sort()).toEqual(['peer-a', 'peer-b']);
+    expect(store().findSessionKeys('session-shared').sort()).toEqual(['peer-a', 'peer-b']);
   });
 });

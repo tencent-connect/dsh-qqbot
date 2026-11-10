@@ -31,6 +31,10 @@ function createConfig(cwd: string): ImQQBotConfig {
   } as unknown as ImQQBotConfig;
 }
 
+function createManager(cwd: string) {
+  return { workspacePathForPeer: vi.fn().mockReturnValue(cwd) };
+}
+
 const TARGET: ReplyTarget = { scope: 'c2c', targetId: 'u' };
 
 describe('DeliverablesDeliverer', () => {
@@ -43,7 +47,7 @@ describe('DeliverablesDeliverer', () => {
 
     const mediaBot = createMediaBot();
     const sender = createSender();
-    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
+    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createManager(dir), createConfig(dir), logger);
 
     await deliverer.deliver(TARGET, [{ path: png }, { path: md, description: '文档' }]);
 
@@ -59,7 +63,7 @@ describe('DeliverablesDeliverer', () => {
 
     const mediaBot = createMediaBot();
     const sender = createSender();
-    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
+    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createManager(dir), createConfig(dir), logger);
 
     await deliverer.deliver(TARGET, [{ path: ok }, { path: join(dir, 'gone.txt') }]);
 
@@ -77,13 +81,58 @@ describe('DeliverablesDeliverer', () => {
 
     const mediaBot = createMediaBot();
     const sender = createSender();
-    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createConfig(dir), logger);
+    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createManager(dir), createConfig(dir), logger);
 
     await deliverer.deliver(TARGET, [{ path: outside }]);
 
     expect(mediaBot.sendFile).not.toHaveBeenCalled();
     const text = (sender.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
     expect(text).toContain('路径不在允许范围');
+  });
+
+  it('切换到工作区 B 后按 peer 当前目录解析并校验路径', async () => {
+    const workspaceA = await mkdtemp(join(tmpdir(), 'dsh-qqbot-dlv-a-'));
+    const workspaceB = await mkdtemp(join(tmpdir(), 'dsh-qqbot-dlv-b-'));
+    const outsideDir = await mkdtemp(join(tmpdir(), 'dsh-qqbot-dlv-out-'));
+    const defaultFile = join(workspaceA, 'default.txt');
+    const absoluteB = join(workspaceB, 'absolute.txt');
+    const relativeB = join(workspaceB, 'relative.txt');
+    const outside = join(outsideDir, 'outside.txt');
+    await Promise.all([
+      writeFile(defaultFile, 'a'),
+      writeFile(absoluteB, 'b'),
+      writeFile(relativeB, 'r'),
+      writeFile(outside, 'x'),
+    ]);
+
+    let currentWorkspace = workspaceA;
+    const manager = createManager(workspaceA);
+    manager.workspacePathForPeer.mockImplementation(() => currentWorkspace);
+    const mediaBot = createMediaBot();
+    const sender = createSender();
+    const deliverer = new DeliverablesDeliverer(
+      sender, mediaBot, manager, createConfig(workspaceA), logger,
+    );
+    currentWorkspace = workspaceB;
+
+    await deliverer.deliver(TARGET, [
+      { path: absoluteB },
+      { path: defaultFile },
+      { path: 'relative.txt' },
+      { path: outside },
+    ]);
+
+    expect(manager.workspacePathForPeer).toHaveBeenCalledWith('c2c', 'u');
+    expect(mediaBot.sendFile).toHaveBeenCalledTimes(2);
+    expect(mediaBot.sendFile).toHaveBeenNthCalledWith(
+      1, TARGET, { localPath: absoluteB }, { fileName: 'absolute.txt' },
+    );
+    expect(mediaBot.sendFile).toHaveBeenNthCalledWith(
+      2, TARGET, { localPath: relativeB }, { fileName: 'relative.txt' },
+    );
+    const text = (sender.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(text).toContain('default.txt（路径不在允许范围）');
+    expect(text).toContain('outside.txt（路径不在允许范围）');
   });
 
   it('maxFiles 截断单轮投递数量，超限文件进未送达提示', async () => {
@@ -98,7 +147,7 @@ describe('DeliverablesDeliverer', () => {
     const sender = createSender();
     const config = createConfig(dir);
     (config as { sendFile: { maxFiles: number } }).sendFile.maxFiles = 2;
-    const deliverer = new DeliverablesDeliverer(sender, mediaBot, config, logger);
+    const deliverer = new DeliverablesDeliverer(sender, mediaBot, createManager(dir), config, logger);
 
     await deliverer.deliver(TARGET, files);
 
