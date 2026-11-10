@@ -29,6 +29,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
     mediaBot: MediaSenderLike,
     config: ImQQBotConfig,
     logger: Logger,
+    private readonly mediaRoot?: string,
   ) {
     this.sender = sender;
     this.mediaBot = mediaBot;
@@ -51,7 +52,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
         missed.push(`${display}（超出单轮投递上限，未发送）`);
         continue;
       }
-      if (!isPathAllowed(absPath, this.config.sendFile, cwd)) {
+      if (!isPathAllowed(absPath, this.config.sendFile, cwd, this.mediaRoot)) {
         missed.push(`${display}（路径不在允许范围）`);
         continue;
       }

@@ -18,8 +18,16 @@ export interface InputReceipt {
   turn?: number;
 }
 
-type DeliveryState = 'sending' | 'accepted' | 'unknown' | 'not-sent';
-type Receipt = InputReceipt | { kind: 'delivery'; key: string; state: DeliveryState };
+export type DeliveryState = 'sending' | 'accepted' | 'unknown' | 'not-sent';
+interface DeliveryReceipt {
+  kind: 'delivery';
+  key: string;
+  state: DeliveryState;
+  fingerprint?: string;
+  httpStatus?: number;
+  platformCode?: number;
+}
+type Receipt = InputReceipt | DeliveryReceipt;
 
 /** Only identities and submission states are retained here; this is not a chat log.
  * Synchronous refresh/write fences stale instances within one Host. Sharing the
@@ -54,22 +62,26 @@ export class DeliveryLedger {
     return input;
   }
 
-  begin(key: string): boolean {
+  begin(key: string, fingerprint?: string): boolean {
     this.refresh();
     if (this.receipts.has(key)) return false;
-    this.put({ kind: 'delivery', key, state: 'sending' });
+    this.put({ kind: 'delivery', key, state: 'sending', fingerprint });
     return true;
   }
 
   state(key: string): DeliveryState | undefined {
-    this.refresh();
-    const receipt = this.receipts.get(key);
-    return receipt?.kind === 'delivery' ? receipt.state : undefined;
+    return this.delivery(key)?.state;
   }
 
-  settle(key: string, state: Exclude<DeliveryState, 'sending'>): void {
+  delivery(key: string): Readonly<DeliveryReceipt> | undefined {
     this.refresh();
-    this.put({ kind: 'delivery', key, state });
+    const receipt = this.receipts.get(key);
+    return receipt?.kind === 'delivery' ? receipt : undefined;
+  }
+
+  settle(key: string, state: Exclude<DeliveryState, 'sending'>, detail?: Pick<DeliveryReceipt, 'httpStatus' | 'platformCode'>): void {
+    const previous = this.delivery(key);
+    this.put({ ...previous, kind: 'delivery', key, state, ...detail });
   }
 
   async run(key: string, action: () => Promise<unknown>): Promise<boolean> {

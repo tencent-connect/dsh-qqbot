@@ -13,6 +13,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { DshAgent, DshAgentHandle, DshAgentRegistry } from './types.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 
 const env = vi.hoisted(() => ({ home: '' }));
 
@@ -161,6 +162,54 @@ function createdIds(registry: { create: { mock: { calls: Array<[{ sessionId: str
 beforeEach(() => {
   env.home = mkdtempSync(join(tmpdir(), 'im-qqbot-session-'));
   mkdirSync(join(env.home, 'workspace'), { recursive: true });
+});
+
+it('applies staged model, effort, preset, workspace and native permission on new Session only', async () => {
+  const workspace = join(env.home, 'project');
+  mkdirSync(workspace);
+  const settings: WorkbenchAgentSettings = {
+    model: { provider: 'test-provider', model: 'new-model' }, reasoningEffort: 'medium',
+    preset: 'selected', cwd: workspace, permission: 'read-only', groupPrompt: '', directPrompt: '',
+    streaming: true, showToolResults: false,
+  };
+  const config = ConfigSchema({ appId: APP_ID, appSecret: 'secret', cwd: join(env.home, 'workspace'), sessionIdleTimeout: 0 } as ImQQBotConfig);
+  const setPermission = vi.fn();
+  const selectModel = vi.fn();
+  const mount = vi.fn();
+  const native = fakeHandle(LEGACY_ID);
+  const ctx = { get: (name: string) => ({
+    sessionPersistence: { stat: async (id: string) => id === LEGACY_ID ? { header: { cwd: config.cwd, agentPreset: 'legacy' } } : undefined },
+    agentPresets: { resolve: async (id: string) => ({ id }), mount },
+    permissionPresets: { catalog: () => ({ options: [{ value: 'read-only' }] }), set: setPermission },
+  })[name as 'sessionPersistence'], on: vi.fn() } as unknown as Context;
+  const registry: DshAgentRegistry = {
+    get: () => undefined,
+    resume: async ({ resumeSessionId, setup }) => {
+      if (resumeSessionId !== LEGACY_ID) throw notFound(resumeSessionId);
+      await setup?.(native.agent.ctx, native.agent);
+      return native;
+    },
+    create: vi.fn(async ({ sessionId, setup }) => {
+      const handle = fakeHandle(sessionId);
+      const agent = { ...handle.agent, model: { select: selectModel } };
+      await setup?.(agent.ctx, agent);
+      return { ...handle, agent };
+    }),
+  };
+  const manager = new SessionManager(ctx, registry, config, createLogger(), undefined, {
+    read: () => settings, update: () => false, defaults: () => settings,
+  });
+  managers.push(manager);
+  expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(LEGACY_ID);
+  expect(mount).toHaveBeenLastCalledWith(expect.anything(), 'legacy');
+  expect(setPermission).not.toHaveBeenCalled();
+  expect(selectModel).not.toHaveBeenCalled();
+  await manager.remove('c2c', PEER);
+  const session = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+  expect(session.sessionId).not.toBe(LEGACY_ID);
+  expect(registry.create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd: workspace, agentPreset: 'selected' } }));
+  expect(selectModel).toHaveBeenCalledWith({ provider: 'test-provider', model: 'new-model', reasoningEffort: 'medium' });
+  expect(setPermission).toHaveBeenCalledWith(session.agent.session, 'read-only');
 });
 
 afterEach(async () => {
@@ -580,5 +629,91 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     // 失败不入表：同 agent 再次触发安装时重试（此处模拟再次 remove→复用）
     expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
     expect(created[0].sections.size).toBe(0);
+  });
+});
+
+describe('web workbench session switching', () => {
+  const settings: WorkbenchAgentSettings = {
+    model: { provider: 'p', model: 'm' }, reasoningEffort: '', preset: '', cwd: '', permission: '',
+    groupPrompt: '', directPrompt: '', streaming: false, showToolResults: false,
+  };
+
+  it('waits for the new native session, keeps history, and sends waiting input to the new binding', async () => {
+    const gate = deferred<void>();
+    const old = fakeHandle('session-old');
+    const stored = new Set([old.agent.id]);
+    const { registry } = createRegistry(async () => old);
+    registry.create.mockImplementation(async ({ sessionId }) => {
+      await gate.promise;
+      stored.add(sessionId);
+      return fakeHandle(sessionId);
+    });
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async id => stored.has(id) ? { header: {} } : undefined));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const start = manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    const incoming = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(persistedId()).toBe(old.agent.id);
+    await expect(manager.remove('c2c', PEER)).rejects.toThrow('正在切换');
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    gate.resolve();
+    const id = await start;
+    expect((await incoming).sessionId).toBe(id);
+    expect(persistedId()).toBe(id);
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('已变化');
+    expect(registry.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the old binding and releases the candidate when permission changes during creation', async () => {
+    const old = fakeHandle('session-old');
+    const { registry, handles } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    let checks = 0;
+    await expect(manager.createAndBindSession('c2c', PEER, record.sessionId, settings, () => {
+      if (++checks === 2) throw new Error('QQ 会话已暂停');
+    })).rejects.toThrow('已暂停');
+    expect(persistedId()).toBe(record.sessionId);
+    expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(record);
+    expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('stops archived ingress, resumes the same binding after restore, and allows an explicit new Session', async () => {
+    const old = fakeHandle('session-old');
+    const { registry } = createRegistry(async () => old);
+    const workspace = { archivedSessionIds: [old.agent.id] };
+    const ctx = {
+      get: (name: string) => name === 'workspaceRegistry' ? workspace
+        : name === 'sessionPersistence' ? { stat: async () => ({ header: {} }) } : undefined,
+      on: vi.fn(),
+    } as unknown as Context;
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, ctx);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+    workspace.archivedSessionIds = [];
+    const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(original.sessionId).toBe(old.agent.id);
+    workspace.archivedSessionIds = [old.agent.id];
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    const next = await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(next);
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+  });
+
+  it('declines a new session when the current native agent is running', async () => {
+    const old = fakeHandle('session-old');
+    Object.defineProperty(old.agent, 'status', { value: 'running' });
+    const { registry } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(old.agent.id);
   });
 });

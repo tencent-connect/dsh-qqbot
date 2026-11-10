@@ -48,6 +48,7 @@ export interface HostAdapter {
 /** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
 export interface SessionHeaderLike {
   agentPreset?: string;
+  cwd?: string;
 }
 
 /** 工作区实体最小契约（对齐 dsh-workspace Workspace） */

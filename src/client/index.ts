@@ -13,10 +13,13 @@
  * 声明访问（声明缺失时插件保持 inactive，不阻塞浏览器启动）。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { createElement, type ReactNode } from 'react';
+import { createElement, useCallback, useSyncExternalStore, type ReactNode } from 'react';
 import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
+import { QQWorkbench } from './workbench.ts';
+import { QqAnswerAction } from './workbench-answer.ts';
+import type { AgentFormSource } from './workbench-agent-form.ts';
 
 export const name = 'im-qqbot-client';
 export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
@@ -29,6 +32,8 @@ const TAB_ID = 'im-qqbot/bind';
 const PACKAGE_NAME = '@tencent-connect/dsh-qqbot';
 /** 主面板 id（layout.selectPanel 导航目标；keyed main 席位按其分发） */
 const IM_MAIN_PANEL_ID = 'im-qqbot';
+const emptyArchived: readonly string[] = [];
+const noop = (): void => {};
 
 /** ui-sidebar-right 的 Tab 注册表服务（局部投影） */
 interface TabRegistryLike {
@@ -80,19 +85,11 @@ function BindGuideIcon(): ReactNode {
 }
 
 /** 设置页栏目：共享一份绑定状态轮询，驱动绑定面板与配置刷新 */
-function QQBotSettingsSection(): ReactNode {
+function QQBotSettingsSection({ accountOnly = false }: { accountOnly?: boolean } = {}): ReactNode {
   const { state, gone, recheck } = useBindState();
   return createElement('div', null,
     createElement<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, { state, gone, recheck }),
-    createElement<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, { bindPhase: state?.phase }),
-  );
-}
-
-/** 主面板页面：与设置栏目同一内容，包一层滚动留白容器（plugins.detail.actions 的跳转目标） */
-function QQBotPage(): ReactNode {
-  return createElement('div', { className: 'imqb-pluginPage' },
-    createElement('div', { className: 'imqb-pluginPageContent' },
-      createElement(QQBotSettingsSection)),
+    createElement<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, { bindPhase: state?.phase, accountOnly }),
   );
 }
 
@@ -135,6 +132,14 @@ export function apply(ctx: Context): void {
     )));
   }
 
+  if (slots) {
+    const slot = 'conversation.chat.assistant-actions';
+    disposers.push(slots.inject(slot, () => slots.register(
+      { name: slot, id: 'im-qqbot-send-answer', order: 30 },
+      QqAnswerAction,
+    )));
+  }
+
   // 2. 侧栏绑定页（快捷展示位：Start 页入口 + 待绑定自动打开）
   if (tabs !== undefined && slots !== undefined) {
     disposers.push(tabs.register({
@@ -168,6 +173,115 @@ export function apply(ctx: Context): void {
       const pageSlots = (pageCtx as unknown as { slots?: SlotsLike }).slots;
       const layout = (pageCtx as unknown as { layout?: { selectPanel(panelId: string | null): void } }).layout;
       if (pageSlots === undefined || layout === undefined) return undefined;
+      type AgentRemotes = {
+        session: { modelCatalog(): Promise<unknown> };
+        agentPresets: { list(): Promise<unknown> };
+        permissionPresets: { catalog(): Promise<unknown> };
+      };
+      let remote: AgentRemotes | undefined;
+      void ctxInject.call(pageCtx, ['remote', 'remote.session', 'remote.agentPresets', 'remote.permissionPresets'], scope => {
+        remote = (scope as unknown as { remote: AgentRemotes }).remote;
+        return () => { remote = undefined; };
+      });
+      let addWorkspace: AgentFormSource['addWorkspace'];
+      void ctxInject.call(pageCtx, ['workspaces', 'uiWorkspace'], scope => {
+        const { workspaces, uiWorkspace } = scope as unknown as {
+          uiWorkspace: { pickDirectory?(): Promise<string | null> };
+          workspaces: { create?(input: { path: string }): Promise<{ path: string }> };
+        };
+        if (!uiWorkspace.pickDirectory || !workspaces.create) return undefined;
+        const pickDirectory = uiWorkspace.pickDirectory.bind(uiWorkspace);
+        const createWorkspace = workspaces.create.bind(workspaces);
+        addWorkspace = async () => {
+          const path = await pickDirectory();
+          if (!path) return null;
+          return (await createWorkspace({ path })).path;
+        };
+        return () => { addWorkspace = undefined; };
+      });
+      let hostLocale: { bind(namespace: string): (key: string) => string } | undefined;
+      void ctxInject.call(pageCtx, ['locale'], scope => {
+        hostLocale = (scope as unknown as { locale: typeof hostLocale }).locale;
+        return () => { hostLocale = undefined; };
+      });
+      const hostLabel = (namespace: string, key: string): string | undefined => {
+        const label = hostLocale?.bind(namespace)(key);
+        return label && label !== key && label !== `${namespace}.${key}` ? label : undefined;
+      };
+      const presetNameKeys = new Map([
+        ['standard', 'presetStandardName'], ['ptc', 'presetPtcName'],
+        ['minimal', 'presetMinimalName'], ['cordis', 'presetCordisName'],
+      ]);
+      const permissionLabels = new Map([
+        ['read-only', { key: 'preset.readOnly', nativeName: 'Read Only' }],
+        ['workspace-write', { key: 'preset.workspaceWrite', nativeName: 'Workspace Write' }],
+        ['danger-full-access', { key: 'preset.fullAccess', nativeName: 'Full access' }],
+        ['auto', { key: 'auto.label', nativeName: 'Auto review' }],
+      ]);
+      const getRemote = (): AgentRemotes => {
+        if (!remote) throw new Error('DSH 目录服务尚未就绪。');
+        return remote;
+      };
+      const agentSource: AgentFormSource = {
+        modelCatalog: () => getRemote().session.modelCatalog(),
+        listAgentPresets: () => getRemote().agentPresets.list(),
+        permissionCatalog: () => getRemote().permissionPresets.catalog(),
+        localizePreset: id => {
+          const key = presetNameKeys.get(id);
+          return key && hostLabel('settings.agentPreset', key);
+        },
+        localizePermission: (id, name) => {
+          const builtin = permissionLabels.get(id);
+          return builtin && (id === name || name === builtin.nativeName)
+            ? hostLabel('permission.access', builtin.key) : undefined;
+        },
+        get addWorkspace() { return addWorkspace; },
+        workspaces: () => (pageCtx.get('workspaces') as {
+          list?: { getSnapshot(): { items: readonly { path: string; title: string }[] } };
+        } | undefined)?.list?.getSnapshot().items ?? [],
+      };
+      const QQBotPage = (): ReactNode => {
+        const workspace = pageCtx.get('uiWorkspace') as {
+          openSession?(id: string): void;
+          unarchiveSession?(id: string): Promise<void>;
+        } | undefined;
+        const sessions = pageCtx.get('sessions') as {
+          list?: { getSnapshot(): { byId: Record<string, { title?: string }> } };
+        } | undefined;
+        const workspaces = pageCtx.get('workspaces') as {
+          list?: {
+            subscribe?(listener: () => void): () => void;
+            getSnapshot(): {
+              archivedSessionIds: readonly string[];
+              items: readonly { path: string; title: string; sessionIds: readonly string[] }[];
+            };
+          };
+        } | undefined;
+        const open = workspace?.openSession?.bind(workspace);
+        const list = workspaces?.list;
+        const archivedSessionIds = useSyncExternalStore(
+          useCallback(listener => list?.subscribe?.(listener) ?? noop, [list]),
+          () => list?.getSnapshot().archivedSessionIds ?? emptyArchived,
+        );
+        return createElement(QQWorkbench, {
+          primarySettings: createElement(QQBotSettingsSection),
+          primaryAccountSettings: createElement<{ accountOnly?: boolean }>(QQBotSettingsSection, { accountOnly: true }),
+          agentSource, archivedSessionIds,
+          restoreSession: workspace?.unarchiveSession?.bind(workspace),
+          openSession: open ? id => {
+            if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
+              throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');
+            }
+            open(id);
+          } : undefined,
+          sessionTitle: id => sessions?.list?.getSnapshot().byId[id]?.title,
+          workspaceTitle: (id, cwd) => {
+            const items = workspaces?.list?.getSnapshot().items;
+            return items?.find(item => item.sessionIds.includes(id))?.title
+              ?? items?.find(item => item.path === cwd)?.title;
+          },
+        });
+      };
       const stopMain = pageSlots.inject('main', () => pageSlots.register(
         { name: 'main', key: IM_MAIN_PANEL_ID },
         QQBotPage,

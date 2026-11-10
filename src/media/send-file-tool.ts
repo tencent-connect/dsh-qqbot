@@ -54,23 +54,33 @@ function samePeer(current: ReplyTarget | undefined, destination: ReplyTarget): b
   return current?.scope === destination.scope && current.targetId === destination.targetId;
 }
 
+export interface SendFileRuntime {
+  bot: MediaSenderLike;
+  manager: Pick<SessionManager, 'findBySessionId' | 'deliveryAddress'>;
+  config: Pick<ImQQBotConfig, 'appId' | 'cwd' | 'sendFile'>;
+  targets: DeliveryTargetResolver;
+  active: () => boolean;
+  allowTarget: (target: ReplyTarget) => boolean;
+  mediaRoot?: string;
+}
+
+interface SendFileRouting {
+  runtimes: () => readonly SendFileRuntime[];
+  ownerOf: (sessionId: string) => string | undefined;
+  defaultAppId: () => string | undefined;
+}
+
 /** 注册 qqbot_send_file 工具（tools 服务缺失时优雅降级，不阻断插件启动） */
 export function registerSendFileTool(
   ctx: Context,
-  bot: MediaSenderLike,
-  manager: SessionManager,
-  config: ImQQBotConfig,
+  routing: SendFileRouting,
   logger: Logger,
-  targets: DeliveryTargetResolver,
-  active: () => boolean,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
     logger.warn('im-qqbot: tools 服务不可用，qqbot_send_file 工具未注册');
     return;
   }
-
-  const cwd = resolveAgentCwd(config.cwd);
 
   const definition = {
     name: SEND_FILE_TOOL_NAME,
@@ -117,26 +127,40 @@ export function registerSendFileTool(
       const agentId = exec.agent?.id;
       if (!agentId || !exec.callId) throw new Error('qqbot_send_file: 缺少原生调用身份，不能确认发送归属');
 
+      const runtimes = routing.runtimes();
+      const owners = new Set(runtimes.filter(({ manager }) =>
+        manager.findBySessionId(agentId) || manager.deliveryAddress(agentId),
+      ).map(({ config }) => config.appId));
+      const persistedOwner = routing.ownerOf(agentId);
+      if (persistedOwner) owners.add(persistedOwner);
+      if (owners.size > 1) throw new Error('qqbot_send_file: 会话归属不唯一，无法发送到 QQ');
+      const [owner] = owners;
+      const appId = owner ?? routing.defaultAppId();
+      const runtime = runtimes.find(candidate => candidate.config.appId === appId);
+      if (!runtime?.active()) throw new Error('qqbot_send_file: 无法确定启用的 QQ 账号');
+
+      const { bot, config, targets, allowTarget, mediaRoot } = runtime;
       const explicit = target ? parseTarget(target) : undefined;
       if (target && !explicit) {
         throw new Error('qqbot_send_file: target 格式错误，需要 c2c:openid 或 group:openid');
       }
-      const qqSession = manager.deliveryAddress(agentId) !== undefined;
-      const current = qqSession ? targets.targetFor(agentId) : undefined;
-      if (qqSession && !current) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
+      const current = owner === undefined ? undefined : targets.targetFor(agentId);
+      if (owner !== undefined && !current) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
       if (current && explicit && !samePeer(current, explicit)) {
         throw new Error('qqbot_send_file: QQ 会话只能发送文件到当前对话');
       }
       const destination = current ?? explicit;
-      if (!destination) throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
-      const allowed = () => active() && !exec.signal.aborted
-        && (!qqSession || samePeer(targets.targetFor(agentId), destination));
-      if (!allowed()) throw new Error('qqbot_send_file: 当前来源不允许发送到 QQ');
-      const replyTarget = bindDelivery(destination, { key: deliveryKey('file-tool', agentId, exec.callId), allowed, fixed: true });
+      if (!destination) throw new Error('qqbot_send_file: 无法确定发送目标');
+      const allowed = () => runtime.active() && !exec.signal.aborted && allowTarget(destination)
+        && (owner === undefined ? routing.defaultAppId() === appId : samePeer(targets.targetFor(agentId), destination));
+      if (!allowed()) throw new Error('qqbot_send_file: 当前来源或目标不允许发送到 QQ');
+      const replyTarget = bindDelivery(destination, {
+        key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,
+      });
 
-      // 2. 校验文件 + 路径白名单
+      const cwd = resolveAgentCwd(config.cwd);
       const absPath = resolve(file_path);
-      if (!isPathAllowed(absPath, config.sendFile, cwd)) {
+      if (!isPathAllowed(absPath, config.sendFile, cwd, mediaRoot)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);
       }
       if (!existsSync(absPath)) {

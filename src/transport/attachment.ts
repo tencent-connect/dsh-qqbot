@@ -184,6 +184,7 @@ export async function downloadMediaAttachments(
   attachments: RawAttachment[] | undefined,
   media: MediaConfig,
   logger: Logger,
+  mediaRoot = MEDIA_ROOT,
 ): Promise<DownloadedFile[]> {
   if (!media.enabled) return [];
 
@@ -192,14 +193,14 @@ export async function downloadMediaAttachments(
   );
   if (targets.length === 0) return [];
 
-  mkdirSync(MEDIA_ROOT, { recursive: true });
+  mkdirSync(mediaRoot, { recursive: true });
 
   const maxBytes = (media.maxMB ?? DEFAULT_MAX_MB) * 1024 * 1024;
 
   const results: DownloadedFile[] = [];
   for (const att of targets) {
     const contentType = classifyContentType(att.content_type) as 'image' | 'video' | 'file';
-    const destPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
+    const destPath = toPosixPath(join(mediaRoot, uniqueFilename(att.filename)));
 
     if (att.size > maxBytes) {
       logger.debug(`im-qqbot: skip download (${att.size}B too large): ${att.filename}`);

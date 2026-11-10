@@ -72,6 +72,13 @@ export function installPanelStyles(): void {
 .imqb-form--credentials .imqb-field { gap: 6px; line-height: 1.5; }
 .imqb-form--credentials .imqb-field > span { box-sizing: border-box; }
 .imqb-field { display: flex; flex-direction: column; gap: 5px; text-align: left; font-size: 13px; }
+.imqb-answer { display: grid; gap: 12px; min-width: 0; }
+.imqb-answer dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+.imqb-answer :is(dt, small) { color: var(--dsw-alias-label-secondary); }
+.imqb-answer dd { margin: 0; overflow-wrap: anywhere; }
+.imqb-answer dd small { display: block; }
+.imqb-answer-text { max-height: min(42vh, 320px); overflow: auto; padding: 12px; border: 1px solid var(--dsw-alias-border-1); border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.imqb-answer p { margin: 0; }
 .imqb-error { margin: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; color: var(--dsw-alias-state-error-primary); }
 /* 紧凑状态视图（已绑定 / 过渡态）：设置行风格，无居中大卡留白 */
 .imqb-status { display: flex; flex-direction: column; text-align: left; font-size: 13px; color: var(--dsw-alias-label-primary); }

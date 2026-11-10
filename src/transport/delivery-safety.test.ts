@@ -14,7 +14,7 @@ import type { Logger, ReplyTarget } from '../types.ts';
 import { handleInbound } from './inbound.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { Context } from '@deepseek-ai/cordis';
-import { registerSendFileTool } from '../media/send-file-tool.ts';
+import { registerSendFileTool, type SendFileRuntime } from '../media/send-file-tool.ts';
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -23,14 +23,14 @@ const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const target: ReplyTarget = { scope: 'c2c', targetId: 'synthetic-user', msgId: 'platform-1' };
 const content = [{ type: 'text', text: 'synthetic request' }];
 
-function setup(options: { file?: string; group?: boolean; streaming?: boolean; showToolResults?: boolean } = {}) {
+function setup(options: { file?: string; group?: boolean; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
   const ledger = new DeliveryLedger(options.file);
   const inputs = new QqInputRegistry({ ledger });
   const stream = { update: vi.fn().mockResolvedValue(undefined), complete: vi.fn().mockResolvedValue(undefined) };
   const bot: QQBotSender = { sendMarkdown: vi.fn().mockResolvedValue(undefined), openStream: vi.fn(() => stream) };
   const initial = options.group ? { ...target, scope: 'group' as const, targetId: 'synthetic-group' } : target;
   const record = { sessionId: 'session-1', replyTarget: { ...initial }, agent: {} } as SessionRecord;
-  const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined } as SessionManager;
+  const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined, replyOptions: options.replyOptions } as SessionManager;
   const config = { streaming: options.streaming ?? true, showToolResults: options.showToolResults ?? true,
     textChunkLimit: 4500, proactiveDelivery: { externalTurns: 'c2c' },
     sendFile: { maxFiles: 4, restrictPaths: false, extraRoots: [], sendPresentedFiles: true } } as ImQQBotConfig;
@@ -132,25 +132,40 @@ describe('durable delivery identities', () => {
 });
 
 describe('explicit file tool source and replay checks', () => {
-  function tool(current = target) {
+  function runtime(appId: string, sessionId: string, current = target) {
     const cwd = directory(), file = join(cwd, 'test.txt'); writeFileSync(file, 'synthetic delivery');
+    const manager = { findBySessionId: () => undefined, deliveryAddress: (id: string) => id === sessionId ? current : undefined };
+    const raw = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'fixture' } }) };
+    let eligible = true, active = true, admitted = true;
+    const descriptor: SendFileRuntime = {
+      bot: guardMedia(raw, new DeliveryLedger()), manager,
+      config: { appId, cwd, sendFile: { restrictPaths: true, extraRoots: [] } },
+      targets: { targetFor: () => eligible ? current : undefined },
+      active: () => active,
+      allowTarget: () => admitted,
+    };
+    return { file, raw, descriptor, sessionId, block: () => { eligible = false; }, stop: () => { active = false; }, revoke: () => { admitted = false; } };
+  }
+
+  function tool(...accounts: ReturnType<typeof runtime>[]) {
     const registry = { register: vi.fn() };
     const ctx = { get: () => registry } as unknown as Context;
-    const manager = { deliveryAddress: (id: string) => id === 'qq-session' ? current : undefined } as unknown as SessionManager;
-    const raw = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'fixture' } }) };
-    let eligible = true;
-    registerSendFileTool(ctx, guardMedia(raw, new DeliveryLedger()), manager,
-      { cwd, sendFile: { restrictPaths: true, extraRoots: [] } } as ImQQBotConfig, logger,
-      { targetFor: () => eligible ? current : undefined }, () => true);
+    registerSendFileTool(ctx, {
+      runtimes: () => accounts.map(account => account.descriptor).filter(descriptor => descriptor.active()),
+      ownerOf: id => accounts.find(account => account.sessionId === id)?.descriptor.config.appId,
+      defaultAppId: () => accounts.length === 1 ? accounts[0]?.descriptor.config.appId : undefined,
+    }, logger);
     const definition = registry.register.mock.calls[0]?.[0] as { execute(args: unknown, exec: { agent: { id: string }; callId?: string; signal: AbortSignal }): Promise<unknown> };
-    const execute = (callId: string | undefined, agentId = 'qq-session', explicit?: string) => definition.execute({ file_path: file, target: explicit }, { agent: { id: agentId }, callId, signal: new AbortController().signal });
-    return { execute, raw, block: () => { eligible = false; } };
+    return (file: string, callId: string | undefined, agentId: string, explicit?: string) => definition.execute(
+      { file_path: file, target: explicit },
+      { agent: { id: agentId }, callId, signal: new AbortController().signal },
+    );
   }
 
   it('preserves the original reply target when explicitly sending to the current private chat', async () => {
-    const f = tool();
-    await expect(f.execute('native-call', 'qq-session', 'c2c:synthetic-user')).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
-    await expect(f.execute('native-call')).rejects.toThrow('already submitted');
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    await expect(execute(f.file, 'native-call', f.sessionId, 'c2c:synthetic-user')).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
+    await expect(execute(f.file, 'native-call', f.sessionId)).rejects.toThrow('already submitted');
     expect(f.raw.sendFile).toHaveBeenCalledExactlyOnceWith(target, expect.anything(), expect.anything());
   });
 
@@ -160,29 +175,53 @@ describe('explicit file tool source and replay checks', () => {
     { scope: 'c2c', explicit: 'group:same-id' },
   ])('rejects a $scope tool call to $explicit before invoking the SDK', async ({ scope, explicit }) => {
     const current: ReplyTarget = { ...target, scope, targetId: 'same-id' };
-    const f = tool(current);
-    await expect(f.execute('file-call', 'qq-session', explicit)).rejects.toThrow('只能发送文件到当前对话');
+    const f = runtime('app', 'qq-session', current), execute = tool(f);
+    await expect(execute(f.file, 'file-call', f.sessionId, explicit)).rejects.toThrow('只能发送文件到当前对话');
     expect(f.raw.sendFile).not.toHaveBeenCalled();
   });
 
   it('uses the original group target when the model omits the target', async () => {
     const current: ReplyTarget = { ...target, scope: 'group', targetId: 'current-group' };
-    const f = tool(current);
-    await expect(f.execute('file-call', 'qq-session')).resolves.toMatchObject({ target: 'group:current-group' });
+    const f = runtime('app', 'qq-session', current), execute = tool(f);
+    await expect(execute(f.file, 'file-call', f.sessionId)).resolves.toMatchObject({ target: 'group:current-group' });
     expect(f.raw.sendFile).toHaveBeenCalledExactlyOnceWith(current, expect.anything(), expect.anything());
   });
 
   it('an explicit target cannot override an ineligible QQ source or missing call identity', async () => {
-    const f = tool();
-    await expect(f.execute(undefined)).rejects.toThrow('调用身份');
-    f.block(); await expect(f.execute('blocked', 'qq-session', 'c2c:synthetic-user')).rejects.toThrow('当前来源');
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    await expect(execute(f.file, undefined, f.sessionId)).rejects.toThrow('调用身份');
+    f.block();
+    await expect(execute(f.file, 'blocked', f.sessionId, 'group:explicit-target')).rejects.toThrow('当前来源');
     expect(f.raw.sendFile).not.toHaveBeenCalled();
   });
 
   it('preserves separately authorized explicit file calls outside a QQ Session', async () => {
-    const f = tool(); f.block();
-    await expect(f.execute('external-explicit-call', 'native-web-session', 'group:explicit-target')).resolves.toMatchObject({ target: 'group:explicit-target' });
+    const f = runtime('app', 'qq-session'), execute = tool(f);
+    f.block();
+    await expect(execute(f.file, 'external-explicit-call', 'native-web-session', 'group:explicit-target')).resolves.toMatchObject({ target: 'group:explicit-target' });
     expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
+    f.revoke();
+    await expect(execute(f.file, 'revoked-call', 'native-web-session', 'group:explicit-target')).rejects.toThrow('目标不允许');
+    expect(f.raw.sendFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses session ownership with identical target and call IDs, even after one bot stops', async () => {
+    const first = runtime('app-a', 'session-a');
+    const second = runtime('app-b', 'session-b');
+    const execute = tool(first, second);
+    await Promise.all([
+      execute(first.file, 'same-call', first.sessionId),
+      execute(second.file, 'same-call', second.sessionId),
+    ]);
+    expect(first.raw.sendFile).toHaveBeenCalledTimes(1);
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
+
+    first.stop();
+    await expect(execute(second.file, 'stopped', first.sessionId, 'group:explicit-target')).rejects.toThrow('无法确定启用的 QQ 账号');
+    await expect(execute(second.file, 'ambiguous', 'native-web-session', 'group:explicit-target')).rejects.toThrow('无法确定启用的 QQ 账号');
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
+    await expect(execute(second.file, 'still-running', second.sessionId)).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
+    expect(second.raw.sendFile).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -303,6 +342,32 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown).toHaveBeenCalledTimes(showToolResults ? 1 : 0);
   });
 
+  it('takes per-conversation output choices at turn start', async () => {
+    vi.useFakeTimers();
+    let streaming = false;
+    const f = setup({ replyOptions: () => ({ streaming, showToolResults: streaming }) });
+    f.input();
+    streaming = true;
+    f.start();
+    f.chunk('static');
+    f.emit('tool/call', { turn: 1, callId: 'call1', name: 'read', arguments: '{}' });
+    f.emit('tool/result', { turn: 1, callId: 'call1', message: { source: { callId: 'call1' }, content: [{ type: 'text', text: 'hidden preview' }] } });
+    f.answer();
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).not.toHaveBeenCalled();
+    expect(f.bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    f.emit('turn/end', { turn: 1 });
+    f.input('input-2', 2, 'platform-2');
+    f.start(2, 2);
+    f.chunk('streamed', 0, 2);
+    f.answer('streamed', 1, 2);
+    f.emit('tool/call', { turn: 2, callId: 'call2', name: 'read', arguments: '{}' });
+    f.emit('tool/result', { turn: 2, callId: 'call2', message: { source: { callId: 'call2' }, content: [{ type: 'text', text: 'visible preview' }] } });
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).toHaveBeenCalledTimes(1);
+    expect(f.bot.sendMarkdown).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('visible preview'));
+  });
+
   it.each([false, true])('direct native tool text remains visible, including errors with previews disabled (error=%s)', async error => {
     vi.useFakeTimers();
     const f = setup({ showToolResults: !error }); f.input();
@@ -363,6 +428,22 @@ describe('native Inbox submission', () => {
     const receipt = new DeliveryLedger(file).claimInput(String(message.id), 'native-session', message.content, 1);
     expect(receipt?.target).toEqual({ scope: group ? 'group' : 'c2c', targetId: group ? 'synthetic-group' : 'synthetic-member', msgId: 'platform-message' });
     expect(receipt?.senderId).toBe('synthetic-member');
+  });
+
+  it('reports a thrown followup without falsely linking the message as submitted', async () => {
+    const ctx = {
+      message: { kind: 'c2c', senderId: 'peer', messageId: 'platform-message', content: 'request' },
+      state: {}, signal: new AbortController().signal,
+    } as unknown as MiddlewareContext;
+    const manager = {
+      getOrCreate: async () => ({ sessionId: 'native-session', agent: {
+        followup() { throw new Error('inbox unavailable'); },
+      } }),
+    } as unknown as SessionManager;
+    const report = vi.fn();
+    const inputs = new QqInputRegistry({ ledger: new DeliveryLedger() });
+    await expect(handleInbound(ctx, manager, {} as ImQQBotConfig, logger, inputs, () => true, report)).rejects.toThrow('inbox unavailable');
+    expect(report).toHaveBeenCalledExactlyOnceWith({ scope: 'c2c', targetId: 'peer', msgId: 'platform-message' }, 'submit-failed');
   });
 
   it('missing platform identities are not admitted', async () => {

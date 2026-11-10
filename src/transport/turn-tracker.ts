@@ -162,7 +162,7 @@ export class TurnTracker implements DeliveryTargetResolver {
       const allowed = () => !tracked.invalid && !(tracked.inputs.size > 0 && tracked.external)
         && (this.options.allowed?.(target) ?? true);
       if (!allowed()) return undefined;
-      return { target: bindDelivery(target, { key: deliveryKey(sessionId, tracked.state.turn), allowed }), proactive: tracked.state.origin !== 'qq' };
+      return { target: bindDelivery(target, { key: deliveryKey(sessionId, tracked.state.turn), sessionId, allowed }), proactive: tracked.state.origin !== 'qq' };
     }
     if (tracked === undefined || deliveryMode(tracked.state) === 'passive') {
       return { target: base, proactive: false };

@@ -55,8 +55,11 @@ export interface UserQuestionResult {
 
 export interface UserQuestionsServiceLike {
   ask: (request: UserQuestionRequest) => Promise<UserQuestionResult>;
-  __qqQuestionPatched?: boolean;
 }
+
+const QQ_QUESTION_ROUTES = Symbol.for('dsh-im-qqbot.question-routes');
+type QuestionRoutes = { channels: Set<QuestionChannel>; restore: () => void };
+type PatchedUserQuestions = UserQuestionsServiceLike & { [QQ_QUESTION_ROUTES]?: QuestionRoutes };
 
 // ── 依赖接口（结构化，便于单测） ──
 
@@ -115,8 +118,8 @@ interface PendingEntry {
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
   private readonly requestIds = new WeakMap<UserQuestionRequest, string>();
-  private uq?: UserQuestionsServiceLike;
-  private origAsk?: UserQuestionsServiceLike['ask'];
+  private detach?: () => void;
+  private generation = 0;
   private readonly manager: QuestionChannelManagerLike;
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
@@ -141,39 +144,64 @@ export class QuestionChannel {
   }
 
   /**
-   * 包装 userQuestions.ask：QQ 会话走 QQ 通道，其余委托原实现。
-   * 幂等（已 patch 则跳过）；服务缺失或 ask 非函数时优雅禁用。
+   * 多个机器人共享宿主提问服务，每个会话仅由归属机器人的通道处理。
    */
   public install(ctx: { get(name: string): unknown }): void {
-    const uq = ctx.get('userQuestions') as UserQuestionsServiceLike | undefined;
-    if (!uq || uq.__qqQuestionPatched) return;
+    if (this.detach) return;
+    const uq = ctx.get('userQuestions') as PatchedUserQuestions | undefined;
+    if (!uq) return;
     if (typeof uq.ask !== 'function') {
       this.logger.warn('im-qqbot: userQuestions service lacks ask() — QQ question channel disabled');
       return;
     }
 
-    const self = this;
-    this.origAsk = uq.ask.bind(uq);
-    uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
-      const sessionId = request?.agent?.id;
-      const record = sessionId ? self.manager.findBySessionId(sessionId) : undefined;
-      // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 交回宿主默认界面
-      const target = record && sessionId ? self.resolveTarget(sessionId, record) : undefined;
-      if (record && target) return self.askViaQQ(record, target, request);
-      return self.origAsk!(request);
+    const routes = uq[QQ_QUESTION_ROUTES] ?? this.wrapHostQuestions(uq);
+    routes.channels.add(this);
+    this.detach = () => {
+      routes.channels.delete(this);
+      if (routes.channels.size === 0) routes.restore();
     };
-    Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
-    this.uq = uq;
     this.logger.info('im-qqbot: QQ question channel installed');
   }
 
+  private wrapHostQuestions(uq: PatchedUserQuestions): QuestionRoutes {
+    const original = uq.ask;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(uq, 'ask');
+    const channels = new Set<QuestionChannel>();
+    const ask = async function qqRoutedAsk(this: UserQuestionsServiceLike, request: UserQuestionRequest) {
+      const sessionId = request?.agent?.id;
+      if (sessionId) {
+        let owner: { channel: QuestionChannel; record: QuestionSessionRecordLike } | undefined;
+        for (const channel of channels) {
+          const record = channel.manager.findBySessionId(sessionId);
+          if (!record) continue;
+          if (owner) return original.call(this, request);
+          owner = { channel, record };
+        }
+        const target = owner?.channel.resolveTarget(sessionId, owner.record);
+        if (owner && target) return owner.channel.askViaQQ(owner.record, target, request);
+      }
+      return original.call(this, request);
+    };
+    const routes = {
+      channels,
+      restore: () => {
+        if (Object.getOwnPropertyDescriptor(uq, 'ask')?.value === ask) {
+          if (originalDescriptor) Object.defineProperty(uq, 'ask', originalDescriptor);
+          else Reflect.deleteProperty(uq, 'ask');
+        }
+        Reflect.deleteProperty(uq, QQ_QUESTION_ROUTES);
+      },
+    };
+    uq.ask = ask;
+    Object.defineProperty(uq, QQ_QUESTION_ROUTES, { value: routes, configurable: true });
+    return routes;
+  }
+
   public uninstall(): void {
-    if (this.uq && this.origAsk) {
-      this.uq.ask = this.origAsk;
-      delete this.uq.__qqQuestionPatched;
-      this.uq = undefined;
-      this.origAsk = undefined;
-    }
+    this.generation += 1;
+    this.detach?.();
+    this.detach = undefined;
     for (const [, entry] of this.pending) {
       this.clearTimer(entry);
       this.removeAbort(entry);
@@ -249,6 +277,7 @@ export class QuestionChannel {
     request: UserQuestionRequest,
   ): Promise<UserQuestionResult> {
     const key = record.sessionKey;
+    const generation = this.generation;
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败，避免悬挂
     if (request.signal?.aborted) {
       throw new QuestionChannelError('ask_user_question was aborted before delivery', ASK_ABORTED);
@@ -259,6 +288,9 @@ export class QuestionChannel {
     const requestId = this.requestId(request);
     const answerToken = this.questionToken(requestId, 0);
     await this.sendQuestion(record, target, first, answerToken);
+    if (this.generation !== generation || request.signal?.aborted) {
+      throw new QuestionChannelError('ask_user_question was aborted during delivery', ASK_ABORTED);
+    }
 
     const prev = this.pending.get(key);
     if (prev) {

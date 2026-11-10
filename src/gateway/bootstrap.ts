@@ -9,11 +9,12 @@ import type { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
+import type { PeerAgentSettings } from '../session/session-manager.ts';
 import { handleInbound, createOutboundHandler, createTurnTracker } from '../transport/index.ts';
 import { QqInputRegistry, inputOriginTtlMs } from '../transport/qq-input-origin.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
-import { cacheMsgId, cacheEventId } from '../transport/msgid-cache.ts';
+import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel, type UserQuestionRequest, type UserQuestionResult } from '../features/question-channel.ts';
@@ -26,13 +27,19 @@ import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
+import { ManualQqSender, createManualTransport } from '../transport/manual-send.ts';
+import { resolveReplyTarget } from '../transport/reply-target.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
-import { registerAccountRoutes } from '../runtime/account-routes.ts';
-import { describeCommands } from '../commands/index.ts';
+import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
+import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
+import type { DownloadedFile } from '../transport/attachment.ts';
+import { observeTimelineRequests } from '../transport/timeline-observer.ts';
+import { messageSenderName } from '../shared/message-sender-name.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
-import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool } from '../media/send-file-tool.ts';
+import type { PrefsStore } from '../model/prefs-store.ts';
+import type { SendFileRuntime } from '../media/send-file-tool.ts';
 import { DeliverablesDeliverer } from '../transport/deliverables.ts';
 
 /**
@@ -50,23 +57,44 @@ function dispatchInteraction(event: InteractionEvent, manager: SessionManager): 
   return false;
 }
 
-export async function bootstrapGateway(
+export interface GatewayRuntime extends SendFileRuntime {
+  readonly manager: SessionManager;
+  readonly state: WorkbenchRobot['state'];
+  readonly manual: ManualQqSender;
+  deactivate(): void;
+}
+
+export function openDeliveryLedger(appId: string): DeliveryLedger {
+  return new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(appId)}.jsonl`));
+}
+
+export function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
   config: ImQQBotConfig,
   logger: Logger,
-): Promise<void> {
-  const manager = new SessionManager(ctx, agents, config, logger);
+  accountAccess = new AccountAccessService(config, logger),
+  mediaRoot?: string,
+  prefs?: PrefsStore,
+  receiving?: (target: ReplyTarget) => boolean,
+  history?: {
+    timeline: QqTimeline;
+    recording: (target: ReplyTarget) => boolean;
+    initialize?: (target: ReplyTarget) => Promise<void>;
+    agent?: PeerAgentSettings;
+  },
+): GatewayRuntime {
+  const manager = new SessionManager(ctx, agents, config, logger, prefs, history?.agent);
 
-  const accountAccess = new AccountAccessService(config, logger);
   manager.accountAccess = accountAccess;
-  registerAccountRoutes(ctx, accountAccess, () => describeCommands({manager, config, logger}));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
-  const ledger = new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(config.appId)}.jsonl`));
+  const ledger = openDeliveryLedger(config.appId);
   let active = true;
+  let state: WorkbenchRobot['state'] = 'connecting';
+  const isActive = () => active;
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs), ledger });
   const allowTarget = (target: ReplyTarget) => {
-    if (!active) return false;
+    if (!active || receiving?.(target) === false) return false;
     try {
       return accountAccess.allowsConversation(target.scope, target.targetId);
     } catch {
@@ -78,11 +106,12 @@ export async function bootstrapGateway(
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
+  const baseUrl = process.env.QQBOT_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com';
   const bot = new QQBot({
     appId: config.appId,
     appSecret: config.appSecret,
     transport: 'websocket',
-    baseUrl: process.env.QQBOT_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com',
+    baseUrl,
     tokenBaseUrl: process.env.QQBOT_TOKEN_BASE_URL?.replace(/\/+$/, '') || 'https://api.bot.qq.com',
     userAgent,
     logger,
@@ -90,17 +119,59 @@ export async function bootstrapGateway(
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  const replyIds = new ReplyIdCache();
+  const canRecord = (target: ReplyTarget): boolean => {
+    try { return !!history && allowTarget(target) && history.recording(target); }
+    catch { return false; }
+  };
+  const reportInbound = history && ((target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => {
+    if (canRecord(target)) history.timeline.reportInbound(config.appId, target, outcome, sessionId);
+  });
+  const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord);
+  setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (async messageContext => {
+    const { message, replyTarget } = messageContext;
+    const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
+    if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope) return;
+    await history.initialize?.(replyTarget);
+    if (!canRecord(replyTarget)) return;
+    const body = message.content.replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
+    const command = /^\/([a-z][a-z0-9_-]*)\b/i.exec(body);
+    const pairing = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(body);
+    // Only display the quote actually carried by the QQ event. Never consult
+    // the SDK's cross-message cache for text to persist in this peer.
+    const quoted = message.refMsgIdx && !command && !pairing ? message.msgElements?.[0] : undefined;
+    const quotedText = quoted?.content?.trim().slice(0, 400);
+    const quotedAttachments = quoted?.attachments?.length || undefined;
+    const quote = message.refMsgIdx && !command && !pairing ? {
+      text: quotedText && /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{6}$/.test(quotedText) ? '配对码已隐藏'
+        : quotedText && /^\/[a-z]/i.test(quotedText) ? quotedText.split(/\s+/, 1)[0]!
+          : quotedText || (quotedAttachments ? '' : '引用消息不可用'),
+      attachments: quotedAttachments,
+    } : undefined;
+    history.timeline.record(config.appId, replyTarget, {
+      id: receivedEntryId(message.messageId), at: Date.parse(message.timestamp) || Date.now(),
+      direction: 'inbound', status: 'received', platformId: message.messageId,
+      text: pairing ? '配对码已隐藏' : command ? command[0] : timelineText(body),
+      senderId: message.senderId, senderName: messageSenderName(message),
+      attachments: message.attachments?.length || undefined, quote,
+    }, true);
+  }), reportInbound);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
+    if (mCtx.signal.aborted || !allowTarget(mCtx.replyTarget)) return;
+    if (history && canRecord(mCtx.replyTarget)) {
+      const { downloadedFiles } = mCtx.state as { downloadedFiles?: DownloadedFile[] };
+      history.timeline.recordImages(config.appId, mCtx.replyTarget,
+        downloadedFiles?.filter(file => file.contentType === 'image').map(file => file.localPath) ?? []);
+    }
     const msg = mCtx.message;
     // 记录最近 msgId，供无上下文的出站发送（文件发送显式 target、主动推送等）获取被动回复目标
-    cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
+    replyIds.cacheMsgId(mCtx.replyTarget.scope, mCtx.replyTarget.targetId, mCtx.replyTarget.msgId);
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget);
+    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget, reportInbound);
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──
@@ -116,17 +187,17 @@ export async function bootstrapGateway(
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
   const sender: QQBotSender = guardSender({
-    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyLimiter, target, content, opts),
-    openStream: (target) => openDeliveryStream(bot, target, logger),
+    sendMarkdown: (target, content, opts) => sendDeliveryMarkdown(bot, replyIds, replyLimiter, target, content, opts, observe),
+    openStream: (target) => openDeliveryStream(bot, replyIds, target, logger, observe),
   }, ledger);
 
   // ── 附件发送适配器（qqbot_send_file 工具与交付物投递共用） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
-  const mediaSender = guardMedia(createDeliveryMedia(bot, replyLimiter), ledger);
+  const mediaSender = guardMedia(createDeliveryMedia(bot, replyIds, replyLimiter, observe), ledger);
 
   // 交付物投递：present 声明的文件在轮末发送到当前会话（outbound 路由触发）
-  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);
+  const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger, mediaRoot);
 
   const outbound = createOutboundHandler(
     manager, sender, config, logger, toolsRegistry, deliverablesDeliverer, turnTracker,
@@ -134,8 +205,11 @@ export async function bootstrapGateway(
   // session/event 按会话作用域派发。根作用域监听不带 global 收不到
   // 桌面恢复出来的 agent，主动回合的 user/message 会直接丢。
   // 全局监听下非 QQ 会话在 TurnTracker.begin 即被过滤，不进入回合状态表。
+  const routeSessionEvent: typeof outbound.routeSessionEvent = (...args) => {
+    if (active) outbound.routeSessionEvent(...args);
+  };
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
-    .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void, { global: true });
+    .on('session/event', routeSessionEvent as (...args: unknown[]) => void, { global: true });
 
   // ── 出站流式：agent/assistant-stream → 流式帧路由 ──
   // 实时流式走瞬态 agent/assistant-stream（chunk 不进 session log）。
@@ -143,6 +217,7 @@ export async function bootstrapGateway(
   // approval/request），帧到达后自行按 agent.id 路由，非 QQ 会话在 router 内忽略。
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
     .on('agent/assistant-stream', (payload: unknown) => {
+      if (!active) return;
       const parsed = parseStreamFrame(payload);
       if (parsed !== undefined) outbound.routeStreamFrame(parsed.agentId, parsed.delta);
     }, { global: true });
@@ -166,14 +241,16 @@ export async function bootstrapGateway(
 
   // ── 按钮点击回调（interaction）：统一分发到问答/审批通道 ──
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
-    // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
-    const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
-    const targetId = scope === 'group' ? (event.group_openid ?? event.user_openid) : event.user_openid;
-    // 记录互动事件 id，作为后续被动回复候选（event_id）
-    cacheEventId(scope, targetId, event.id);
+    if (!active || !event.id) return;
+    const scope: ChatScope = event.scene === 'group' || event.group_openid ? 'group' : 'c2c';
+    const targetId = scope === 'group' ? event.group_openid : event.user_openid;
+    let matched = false;
+    if (targetId && allowTarget({ scope, targetId })) {
+      replyIds.cacheEventId(scope, targetId, event.id);
+      matched = dispatchInteraction(event, manager);
+    }
 
-    const matched = dispatchInteraction(event, manager);
-    await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
+    if (active) await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
   });
 
   bot.on('error', (err: unknown) => {
@@ -185,6 +262,8 @@ export async function bootstrapGateway(
   // TypeError（profiles 增量安装可能残留旧版 SDK）——降级为跳过监听而非崩溃
   try {
     bot.on('disconnected', (event: GatewayDisconnect) => {
+      if (!active) return;
+      state = event.willReconnect ? 'reconnecting' : 'failed';
       const detail = `code=${event.code}${event.reason ? ` reason=${event.reason}` : ''}`;
       if (event.willReconnect) {
         logger.warn(`Bot disconnected (${detail}), reconnecting...`);
@@ -197,35 +276,48 @@ export async function bootstrapGateway(
   }
 
   bot.on('ready', () => {
+    if (!active) return;
+    state = 'connected';
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
+  bot.on('resumed', () => { if (active) state = 'connected'; });
 
   // ── 富媒体过期清理 ──
   if (config.media.enabled) {
-    startMediaCleanup(ctx, config.media.ttlHours, logger);
+    startMediaCleanup(ctx, config.media.ttlHours, logger, mediaRoot);
   }
-
-  // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
-  ensureVisionInputModal(config.vision, logger);
-  registerDescribeImageTool(ctx, config.vision, logger);
-
-  // ── 附件发送工具注册（qqbot_send_file，发送器见上方 mediaSender） ──
-  registerSendFileTool(ctx, mediaSender, manager, config, logger, turnTracker, () => active);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
       logger.info(`Starting bot (appId=${config.appId})`);
       bot.start().catch((err: unknown) => {
+        if (!active) return;
+        state = 'failed';
         logger.error(`Bot start failed: ${err instanceof Error ? err.message : String(err)}`);
       });
 
       return async () => {
         active = false;
-        outbound.dispose();
         logger.info('Shutting down');
-        await manager.disposeAll();
-        bot.stop();
+        const cleanups = [
+          () => bot.stop(),
+          () => outbound.dispose(),
+          () => questionChannel.uninstall(),
+          () => manager.disposeAll(),
+        ];
+        const results = await Promise.allSettled(cleanups.map(cleanup => Promise.resolve().then(cleanup)));
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
       };
     }, 'im-qqbot.lifecycle');
+
+  const sendManual = createManualTransport(bot, baseUrl, userAgent, target => resolveReplyTarget(target, replyIds, replyLimiter, false));
+  const manual = new ManualQqSender(config.appId, ledger, sendManual, history?.timeline);
+  return {
+    manual,
+    bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,
+    get state() { return state; },
+    deactivate() { active = false; },
+  };
 }
