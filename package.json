@@ -24,6 +24,7 @@
     "prepublishOnly": "npm run build",
     "lint": "eslint src/",
     "test": "vitest run",
+    "verify:formal": "node scripts/verify-formal.mjs",
     "typecheck:client": "tsc -p tsconfig.client.json",
     "clean": "rm -rf dist lib",
     "ci:prepare-test-pkg": "node scripts/prepare-test-pkg.js"

@@ -11,3 +11,12 @@ docs/
 node_modules/
 
 .audit/
+
+# Repository-only verification tools and Agent instructions
+tests/
+scripts/verify-qqbot.mjs
+scripts/verify-formal.mjs
+TESTING.md
+.agents/
+.codex/
+.claude/

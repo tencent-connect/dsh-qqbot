@@ -261,6 +261,8 @@ export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+See the [testing guide](./TESTING.md) for the local QQ fixture, isolated Host checks, and coverage limits. Agents can use [qqbot-verify](./.agents/skills/qqbot-verify/SKILL.md).
+
 ## License
 
 [MIT](./LICENSE)

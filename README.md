@@ -282,6 +282,8 @@ export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+测试入口、隔离 Host 用法与覆盖边界见 [测试指南](./TESTING.md)；Agent 可使用 [qqbot-verify](./.agents/skills/qqbot-verify/SKILL.md)。
+
 ## License
 
 [MIT](./LICENSE)
