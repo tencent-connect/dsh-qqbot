@@ -22,7 +22,8 @@ function finalizedAnswer(events: readonly SessionEvent[], messageId: string): st
   const index = events.findIndex(event => event.type === 'assistant/message' && event.surfaceOp === 'append'
     && event.data.message.id === messageId);
   const selected = events[index];
-  if (selected?.type !== 'assistant/message' || selected.data.interrupted) return undefined;
+  if (selected?.type !== 'assistant/message') return undefined;
+  if ('interrupted' in selected.data && selected.data.interrupted === true) return undefined;
   const { turn } = selected.data;
   for (let i = index + 1; i < events.length; i++) {
     const event = events[i]!;
