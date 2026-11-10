@@ -17,6 +17,7 @@ import { permissionCommand } from './permission.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
 import { pingCommand, versionCommand, stopCommand, meCommand } from './misc.ts';
+import { pwdCommand } from './pwd.ts';
 
 /**
  * 构建标准命令列表
@@ -36,6 +37,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     versionCommand(deps),
     meCommand(deps),
     statusCommand(deps),
+    pwdCommand(deps),
   ];
 
   // help 需要访问完整列表（含自身），通过闭包惰性引用

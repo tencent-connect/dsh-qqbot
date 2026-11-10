@@ -769,3 +769,40 @@ describe('回复标题头（工作区 - 会话）', () => {
   });
 });
 
+
+describe('currentLocationHeader（/pwd 当前位置）', () => {
+  it('活跃会话：从内存事件折叠标题 + 工作区名', async () => {
+    prefs().setSessionId(KEY, 'session-live');
+    prefs().setWorkspace(KEY, WS_A);
+    const liveAgent = fakeAgent('session-live');
+    (liveAgent as { session: unknown }).session = {
+      id: 'session-live',
+      header: { cwd: WS_A },
+      snapshotEvents: () => [{ type: 'session/title', data: { title: '登录页优化' } }],
+    };
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A 项目', sessionIds: ['session-live'] }],
+      { 'session-live': { cwd: WS_A } },
+    ), [], { live: liveAgent });
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    await expect(manager.currentLocationHeader('c2c', PEER)).resolves.toBe('**A 项目 - 登录页优化**');
+  });
+
+  it('会话已被闲置回收：无活跃会话时从持久层还原（标题 + header.cwd）', async () => {
+    prefs().setSessionId(KEY, 'session-stored');
+    const { manager } = createManager(workspaceCtx(
+      [{ path: WS_A, title: 'A 项目', sessionIds: ['session-stored'] }],
+      { 'session-stored': { cwd: WS_A } },
+      { 'session-stored': [{ type: 'session/title', data: { title: '归档会话' } }] },
+    ));
+
+    await expect(manager.currentLocationHeader('c2c', PEER)).resolves.toBe('**A 项目 - 归档会话**');
+  });
+
+  it('从未有过会话：undefined（命令层给出提示）', async () => {
+    const { manager } = createManager(workspaceCtx([]));
+
+    await expect(manager.currentLocationHeader('c2c', PEER)).resolves.toBeUndefined();
+  });
+});

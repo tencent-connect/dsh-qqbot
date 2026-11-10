@@ -179,6 +179,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
 | `/bot-status` | View current session status |
+| `/pwd` | Show the current location (workspace - session, same format as the reply header) |
 | `/bot-help` | View all commands |
 
 ## Core Modules
