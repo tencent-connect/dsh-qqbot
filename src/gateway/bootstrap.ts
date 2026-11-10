@@ -27,7 +27,7 @@ import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import { ManualQqSender, createManualTextTransport } from '../transport/manual-send.ts';
+import { ManualQqSender, createManualTransport } from '../transport/manual-send.ts';
 import { resolveReplyTarget } from '../transport/reply-target.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
@@ -312,9 +312,8 @@ export function bootstrapGateway(
       };
     }, 'im-qqbot.lifecycle');
 
-  const sendText = createManualTextTransport(bot, baseUrl, userAgent);
-  const manual = new ManualQqSender(config.appId, ledger, (target, text, beforeRequest) =>
-    sendText(resolveReplyTarget(target, replyIds, replyLimiter, false), text, beforeRequest), history?.timeline);
+  const sendManual = createManualTransport(bot, baseUrl, userAgent, target => resolveReplyTarget(target, replyIds, replyLimiter, false));
+  const manual = new ManualQqSender(config.appId, ledger, sendManual, history?.timeline);
   return {
     manual,
     bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,

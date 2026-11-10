@@ -11,11 +11,12 @@ import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
 import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
-import { MAX_TIMELINE_IMAGES, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { MAX_TIMELINE_IMAGES, QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { workbenchImage } from './workbench-image.ts';
+import type { ManualAttachment } from '../transport/manual-send.ts';
 
 interface PeerSettings {
   alias: string;
@@ -377,6 +378,7 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
     let target: { scope: ChatScope; targetId: string };
     let operation: string;
     let message: string | undefined;
+    let attachment: ManualAttachment | undefined;
     try {
       const fields = ['appId', 'scope', 'openId', 'operation'];
       let row: Record<string, unknown>;
@@ -385,10 +387,31 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
         if (fields.some(field => query.getAll(field).length !== 1)) throw new Error();
         row = Object.fromEntries(query);
       } else {
-        const raw = await request.text();
-        if (Buffer.byteLength(raw) > 16 * 1024) throw new Error();
-        row = robotObject(JSON.parse(raw), [...fields, 'text']);
-        if (typeof row.text !== 'string' || row.text.length > QQ_MANUAL_MESSAGE_LIMIT || !row.text.trim() || row.text.includes('\0')) throw new Error();
+        const contentType = request.headers.get('content-type') ?? '';
+        if (/^multipart\/form-data\s*;/i.test(contentType)) {
+          const limit = QQ_MANUAL_ATTACHMENT_LIMIT + 16 * 1024;
+          if (Number(request.headers.get('content-length')) > limit) throw new WorkbenchRequestError(400, '附件最多 4 MiB。');
+          const raw = await request.arrayBuffer();
+          if (raw.byteLength > limit) throw new WorkbenchRequestError(400, '附件最多 4 MiB。');
+          const form = await new Response(raw, { headers: { 'Content-Type': contentType } }).formData();
+          const formFields = [...fields, 'text', 'attachment'];
+          if ([...form.keys()].some(key => !formFields.includes(key)) || formFields.some(key => form.getAll(key).length !== 1)) throw new Error();
+          const file = form.get('attachment');
+          if (!(file instanceof File) || file.size === 0 || file.size > QQ_MANUAL_ATTACHMENT_LIMIT) {
+            throw new WorkbenchRequestError(400, '请选择一个非空附件，最多 4 MiB。');
+          }
+          const name = file.name.trim();
+          if (!name || name === '.' || name === '..' || Buffer.byteLength(name) > 255 || /[\\/:\x00-\x1f\x7f]/.test(name)) {
+            throw new WorkbenchRequestError(400, '附件名称无效。');
+          }
+          attachment = { name, bytes: Buffer.from(await file.arrayBuffer()) };
+          row = Object.fromEntries([...fields, 'text'].map(key => [key, form.get(key)]));
+        } else {
+          const raw = await request.text();
+          if (Buffer.byteLength(raw) > 16 * 1024) throw new Error();
+          row = robotObject(JSON.parse(raw), [...fields, 'text']);
+        }
+        if (typeof row.text !== 'string' || row.text.length > QQ_MANUAL_MESSAGE_LIMIT || row.text.includes('\0') || (!attachment && !row.text.trim())) throw new Error();
         message = row.text;
       }
       appId = robotAppId(row.appId);
@@ -396,7 +419,8 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
         || typeof row.operation !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.operation)) throw new Error();
       target = { scope: row.scope, targetId: row.openId };
       operation = row.operation;
-    } catch {
+    } catch (error) {
+      if (error instanceof WorkbenchRequestError) throw error;
       return workbenchJson({ error: '发送参数无效，请检查对话和消息长度。' }, 400);
     }
     if (message === undefined) {
@@ -404,6 +428,6 @@ export function registerWorkbenchSend(ctx: Context, robots: Pick<RobotRuntimes, 
       return result ? workbenchJson(result) : workbenchJson({ error: '未找到此发送操作。' }, 404);
     }
     assertWritable();
-    return workbenchJson(await robots.manualSend(appId, target, operation, message, assertWritable));
+    return workbenchJson(await robots.manualSend(appId, target, operation, message, assertWritable, undefined, attachment));
   });
 }

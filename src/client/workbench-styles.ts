@@ -159,6 +159,8 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
   line-height: 20px;
 }
 .imqw-composer-input button[type='submit'] { flex: none; min-height: 32px; }
+.imqw-composer-attachment { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+.imqw-composer-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imqw-composer-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 14px; font-size: 11px; }
 .imqw-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .imqw-muted {

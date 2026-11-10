@@ -21,7 +21,7 @@ import type { WorkbenchConversation, WorkbenchNewSession } from '../shared/workb
 import { SessionSwitchConflict } from '../session/session-manager.ts';
 import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
-import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
+import { ManualQqSender, ManualSendConflict, type ManualAttachment } from '../transport/manual-send.ts';
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
 
@@ -222,7 +222,8 @@ export class RobotRuntimes {
     return runtime ? runtime.manual.status(target, operation) : ManualQqSender.status(openDeliveryLedger(appId), appId, target, operation);
   }
 
-  async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void, sourceSessionId?: string) {
+  async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void,
+    sourceSessionId?: string, attachment?: ManualAttachment) {
     const account = this.conversationAccount(appId);
     if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
     const key = peerKey(appId, target.scope, target.targetId);
@@ -238,7 +239,7 @@ export class RobotRuntimes {
         assertWritable();
         return !this.closed && this.slots.get(appId)?.runtime === runtime && runtime.state === 'connected'
           && runtime.allowTarget?.(target) === true;
-      }, () => this.conversationSettings.get(key).recording, sourceSessionId);
+      }, () => this.conversationSettings.get(key).recording, sourceSessionId, attachment);
     } catch (error) {
       if (error instanceof ManualSendConflict) throw new WorkbenchRequestError(409, error.message);
       throw error;

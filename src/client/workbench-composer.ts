@@ -1,10 +1,11 @@
 import { createElement as h, useEffect, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
-import { QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
+import { QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 
-const drafts = new Map<string, string>();
+interface ComposerDraft { text: string; attachment?: File }
+const drafts = new Map<string, ComposerDraft>();
 const activeOperations = new Map<string, string>();
 
 function rememberedOperation(key: string): string | undefined {
@@ -26,7 +27,7 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
 }): ReactNode {
   const target = { appId, scope: peer.scope, openId: peer.openId };
   const key = 'qqbot-send:' + JSON.stringify([appId, peer.scope, peer.openId]);
-  const [draft, setDraft] = useState(() => drafts.get(key) ?? '');
+  const [draft, setDraft] = useState<ComposerDraft>(() => drafts.get(key) ?? { text: '' });
   const [operation, setOperation] = useState(() => rememberedOperation(key));
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -34,21 +35,26 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
   const inFlight = useRef(false);
   const mounted = useRef(false);
   const input = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
-  const edit = (value: string): void => {
-    if (value) {
+  const edit = (value: ComposerDraft): void => {
+    if (value.text || value.attachment) {
       drafts.delete(key);
       drafts.set(key, value);
       if (drafts.size > 100) drafts.delete(drafts.keys().next().value!);
     } else drafts.delete(key);
     setDraft(value);
   };
-  const finish = (result: WorkbenchSendResult): void => {
+  const finish = (id: string, result: WorkbenchSendResult): void => {
+    const current = rememberedOperation(key);
+    if (current && current !== id) return;
     const done = result.status === 'accepted' || result.status === 'rejected';
-    if (done) rememberOperation(key);
-    if (result.status === 'accepted') drafts.delete(key);
+    if (done && current === id) {
+      rememberOperation(key);
+      if (result.status === 'accepted') drafts.delete(key);
+    }
     if (!mounted.current) return;
-    if (result.status === 'accepted') setDraft('');
+    if (result.status === 'accepted') setDraft({ text: '' });
     if (done) setOperation(undefined);
     setUncertain(result.status === 'unknown');
     const codes = [result.httpStatus && `HTTP ${result.httpStatus}`, result.platformCode && `QQ ${result.platformCode}`].filter(Boolean).join(' · ');
@@ -57,23 +63,35 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
         : result.status === 'sending' ? '正在等待 QQ 回执…' : '发送结果未知，请先在 QQ 核对。');
     onUpdate();
   };
-  const run = async (id: string, submit?: string): Promise<void> => {
+  const run = async (id: string, submit?: ComposerDraft): Promise<void> => {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setStatus(submit !== undefined ? '发送中…' : '正在查询发送结果…');
     try {
       const query = new URLSearchParams({ ...target, operation: id });
+      let request: RequestInit = { cache: 'no-store' };
+      if (submit?.attachment) {
+        const form = new FormData();
+        query.forEach((value, key) => form.set(key, value));
+        form.set('text', submit.text);
+        form.set('attachment', submit.attachment);
+        request = { method: 'POST', body: form };
+      } else if (submit) {
+        request = {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...target, operation: id, text: submit.text }),
+        };
+      }
       const result = await fetchJson<WorkbenchSendResult>(
         submit === undefined ? `${WORKBENCH_SEND_PATH}?${query}` : WORKBENCH_SEND_PATH,
-        submit === undefined ? { cache: 'no-store' } : {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...target, operation: id, text: submit }),
-        },
+        request,
         24_000,
       );
-      finish(result);
+      finish(id, result);
     } catch (cause) {
-      const declined = submit !== undefined && cause instanceof HttpError && [400, 401, 403, 404, 409].includes(cause.status);
+      if (rememberedOperation(key) !== id) return;
+      const declined = submit !== undefined && cause instanceof HttpError && [400, 401, 403, 404, 409, 413].includes(cause.status);
       if (declined) rememberOperation(key);
       if (mounted.current) {
         if (declined) setOperation(undefined);
@@ -94,7 +112,7 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
   }, [key]);
 
   const send = (): void => {
-    if (inFlight.current || disabledReason || !draft.trim() || operation || rememberedOperation(key)) return;
+    if (inFlight.current || disabledReason || (!draft.text.trim() && !draft.attachment) || operation || rememberedOperation(key)) return;
     const id = crypto.randomUUID();
     rememberOperation(key, id);
     setOperation(id);
@@ -107,15 +125,38 @@ export function QqComposer({ appId, peer, robotName, disabledReason, onUpdate }:
     send();
   };
 
+  const editLocked = !!disabledReason || busy || !!operation;
   return h('form', { className: 'imqw-composer', onSubmit: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); send(); } },
+    h('input', {
+      ref: fileInput, type: 'file', hidden: true, 'aria-label': '选择 QQ 附件', disabled: editLocked,
+      onChange: (event: ChangeEvent<HTMLInputElement>) => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = '';
+        if (!file || editLocked) return;
+        if (!file.size || file.size > QQ_MANUAL_ATTACHMENT_LIMIT) {
+          setStatus('请选择一个非空附件，最多 4 MiB。');
+          return;
+        }
+        edit({ ...draft, attachment: file });
+        setStatus('');
+      },
+    }),
+    draft.attachment ? h('div', { className: 'imqw-composer-attachment' },
+      h('span', { title: draft.attachment.name }, draft.attachment.name),
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: editLocked, onClick: () => {
+        edit({ text: draft.text }); setStatus('');
+      } }, '移除附件'),
+    ) : null,
     h('div', { className: 'imqw-composer-input' },
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: editLocked,
+        onClick: () => fileInput.current?.click(), title: '每次可发送一个附件，最多 4 MiB' }, '附件'),
       h('textarea', {
         ref: input, 'aria-label': '发送到 QQ 的消息', rows: 1, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
-        value: draft, readOnly: !!operation, disabled: !!disabledReason,
+        value: draft.text, readOnly: !!operation, disabled: !!disabledReason,
         placeholder: disabledReason || `以 ${robotName} 的身份发送到 QQ`,
-        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit(event.currentTarget.value); setStatus(''); }, onKeyDown,
+        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit({ ...draft, text: event.currentTarget.value }); setStatus(''); }, onKeyDown,
       }),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: !!disabledReason || busy || !!operation || !draft.trim() }, '发送'),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: editLocked || (!draft.text.trim() && !draft.attachment) }, '发送'),
     ),
     h('div', { className: 'imqw-composer-footer' },
       h('span', { className: 'imqw-muted', role: 'status' }, status || (disabledReason ? '' : '直接发到 QQ · Shift + Enter 换行')),

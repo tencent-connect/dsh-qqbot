@@ -212,7 +212,7 @@ function MessageRow({ row, appId, scope, openId, robotName, openSession, refresh
             const query = new URLSearchParams({ appId, scope, openId, entryId: row.id, image: String(index) });
             return h(MessageImage, { key: index, url: `${WORKBENCH_TIMELINE_PATH}?${query}`, number: index + 1 });
           })) : null,
-        remaining > 0 ? h('div', { className: 'imqw-muted' }, `附件 · ${remaining} 项`) : null),
+        remaining > 0 ? h('div', { className: 'imqw-muted' }, row.attachmentName ? `附件 · ${row.attachmentName}` : `附件 · ${remaining} 项`) : null),
       h('div', { className: 'imqw-timeline-meta imqw-message-details' },
         outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status]) : null,
         row.source ? h('span', null, sourceLabel[row.source]) : null,
