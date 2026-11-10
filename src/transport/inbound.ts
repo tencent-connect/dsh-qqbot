@@ -23,6 +23,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 // ── 类型定义 ──
 
@@ -94,7 +95,7 @@ export async function handleInbound(
   logger: Logger,
   inputs: QqInputRegistry,
   allowTarget: (target: ReplyTarget) => boolean,
-  linked?: (target: ReplyTarget, sessionId: string) => void,
+  report?: (target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => void,
 ): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
@@ -122,7 +123,10 @@ export async function handleInbound(
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   const agentBody = assembleAgentBody(msg, mwState, scope, logger);
 
-  if (!agentBody) return;
+  if (!agentBody) {
+    report?.(replyTarget, 'empty');
+    return;
+  }
 
   logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
 
@@ -133,6 +137,7 @@ export async function handleInbound(
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     if (!canSubmit()) return;
+    report?.(replyTarget, 'submit-failed');
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
       await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');
@@ -162,9 +167,14 @@ export async function handleInbound(
     logger.info('im-qqbot: duplicate QQ input ignored');
     return;
   }
-  linked?.(replyTarget, record.sessionId);
   inputs.register(String(message.id));
-  record.agent.followup(message);
+  try {
+    record.agent.followup(message);
+  } catch (error) {
+    report?.(replyTarget, 'submit-failed');
+    throw error;
+  }
+  report?.(replyTarget, 'submitted', record.sessionId);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
   // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）

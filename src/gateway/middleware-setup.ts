@@ -28,6 +28,7 @@ import { questionAnswer } from '../middleware/question-answer.ts';
 import type { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
@@ -39,6 +40,7 @@ export function setupMiddlewares(
   mediaRoot?: string,
   receiving?: (target: ReplyTarget) => boolean,
   onAdmitted?: (ctx: MiddlewareContext) => void | Promise<void>,
+  onSkipped?: (target: ReplyTarget, outcome: TimelineInboundOutcome) => void,
 ): void {
   const blocked = (ctx: MiddlewareContext): boolean => {
     if (!isActive()) {
@@ -106,6 +108,15 @@ export function setupMiddlewares(
     if (blocked(ctx)) return;
     await onAdmitted(ctx);
     await next();
+    if (!onSkipped) return;
+    const reason = ctx.stopReason;
+    if (reason === 'mention-gate:no_mention' || reason === 'mention-gate:other_mention') {
+      onSkipped(ctx.replyTarget, 'mention-required');
+    } else if (reason?.startsWith('rate-limit:')) {
+      onSkipped(ctx.replyTarget, 'rate-limited');
+    } else if (reason === 'concurrency:queue-full') {
+      onSkipped(ctx.replyTarget, 'queue-full');
+    }
   });
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文

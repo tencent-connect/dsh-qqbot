@@ -2,7 +2,7 @@ import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, rea
 import { join } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
-import { TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
+import { TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
 import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 interface Peer { scope: ChatScope; openId: string }
@@ -59,10 +59,20 @@ export class QqTimeline {
     this.update(appId, target, entry.id, previous => once && previous ? undefined : entry);
   }
 
-  link(appId: string, target: ReplyTarget, sessionId: string): void {
+  reportInbound(appId: string, target: ReplyTarget, inboundOutcome: TimelineInboundOutcome, sessionId?: string): void {
     if (!target.msgId) return;
-    this.update(appId, target, receivedEntryId(target.msgId), previous =>
-      previous && !previous.sessionId ? { ...previous, sessionId } : undefined);
+    this.update(appId, target, receivedEntryId(target.msgId), previous => {
+      if (!previous || previous.direction !== 'inbound' || previous.inboundOutcome === 'submitted') return undefined;
+      if (previous.inboundOutcome && inboundOutcome !== 'submitted' && inboundOutcome !== 'submit-failed') return undefined;
+      if (previous.inboundOutcome === inboundOutcome) return undefined;
+      return { ...previous, inboundOutcome, sessionId: previous.sessionId ?? sessionId };
+    });
+  }
+
+  entry(appId: string, target: ReplyTarget, id: string): TimelineEntry | undefined {
+    const directory = this.peerDir(appId, target);
+    const row = this.load(join(directory, 'rows.jsonl')).rows.get(id);
+    return row && this.observedStatus(directory, row);
   }
 
   async observe<T>(appId: string, target: ReplyTarget, entry: TimelineEntry,
@@ -89,11 +99,15 @@ export class QqTimeline {
     if (end < 0) return undefined;
     const start = Math.max(0, end - TIMELINE_PAGE_SIZE);
     return {
-      entries: rows.slice(start, end).map(row => row.status === 'sending' && !this.pending.has(join(directory, row.id))
-        ? { ...row, status: 'unknown' } : row),
+      entries: rows.slice(start, end).map(row => this.observedStatus(directory, row)),
       before: start > 0 ? rows[start]?.id : undefined,
       incomplete: this.incomplete.has(directory),
     };
+  }
+
+  private observedStatus(directory: string, row: TimelineEntry): TimelineEntry {
+    return row.status === 'sending' && !this.pending.has(join(directory, row.id))
+      ? { ...row, status: 'unknown' } : row;
   }
 
   private accountDir(appId: string): string {

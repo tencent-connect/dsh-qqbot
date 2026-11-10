@@ -5,6 +5,8 @@ export const TIMELINE_PAGE_SIZE = 40;
 
 export type TimelineStatus = 'received' | 'sending' | 'partial' | 'accepted' | 'rejected' | 'unknown';
 
+export type TimelineInboundOutcome = 'mention-required' | 'rate-limited' | 'queue-full' | 'empty' | 'submitted' | 'submit-failed';
+
 export interface TimelineEntry {
   id: string;
   at: number;
@@ -18,7 +20,8 @@ export interface TimelineEntry {
   platformId?: string;
   httpStatus?: number;
   platformCode?: number;
-  source?: 'manual' | 'answer';
+  source?: 'manual' | 'answer' | 'automatic' | 'agent';
+  inboundOutcome?: TimelineInboundOutcome;
   quote?: { text: string };
 }
 

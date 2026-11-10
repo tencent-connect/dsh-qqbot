@@ -166,6 +166,12 @@ it('discovers admitted recorded peers without a Session and reads only the expli
     expect(peers.conversations).toContainEqual(expect.objectContaining({ scope: 'group', sessions: [] }));
     const group = await (await f.history('appId=A&scope=group&openId=same')).json();
     expect(group.entries.map((row: { text: string }) => row.text)).toEqual(['one']);
+    const id = receivedEntryId('platform-message');
+    const lookup = '&entryId=' + id;
+    expect(await (await f.history('appId=A&scope=c2c&openId=same' + lookup)).json()).toMatchObject({ text: 'two' });
+    expect(await (await f.history('appId=B&scope=group&openId=same' + lookup)).json()).toMatchObject({ text: 'three' });
+    expect((await f.history('appId=B&scope=c2c&openId=same' + lookup)).status).toBe(404);
+    expect((await f.history('appId=A&scope=group&openId=same&before=' + id + lookup)).status).toBe(400);
     expect((await f.history('appId=C&scope=group&openId=same')).status).toBe(404);
     expect((await f.history('appId=A&scope=other&openId=same')).status).toBe(400);
     expect((await f.post({ appId: 'A', scope: 'group', openId: 'same', revision: 0, recording: false })).status).toBe(200);

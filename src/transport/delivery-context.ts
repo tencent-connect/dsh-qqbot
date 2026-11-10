@@ -33,9 +33,12 @@ export function replyDelivery(target: ReplyTarget, step: unknown): ReplyTarget {
   return bindDelivery(target, { ...context, key, streamKey: deliveryKey(key, 'stream'), staticKey: deliveryKey(key, 'static'), fixed: true });
 }
 
-export function deliveryTrace(target: ReplyTarget): { sessionId?: string; streamKey: string } | undefined {
+export function deliveryTrace(target: ReplyTarget): { sessionId?: string; streamKey: string; reply: boolean } | undefined {
   const context = contexts.get(target);
-  return context && { sessionId: context.sessionId, streamKey: context.streamKey ?? deliveryKey(context.key, 'stream') };
+  return context && {
+    sessionId: context.sessionId, streamKey: context.streamKey ?? deliveryKey(context.key, 'stream'),
+    reply: context.staticKey !== undefined,
+  };
 }
 
 function authorize(context: DeliveryContext): void {

@@ -31,6 +31,7 @@ import { ManualQqSender, createManualTextTransport } from '../transport/manual-s
 import { resolveReplyTarget } from '../transport/reply-target.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
 import { observeTimelineRequests } from '../transport/timeline-observer.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
@@ -122,6 +123,9 @@ export function bootstrapGateway(
     try { return !!history && allowTarget(target) && history.recording(target); }
     catch { return false; }
   };
+  const reportInbound = history && ((target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => {
+    if (canRecord(target)) history.timeline.reportInbound(config.appId, target, outcome, sessionId);
+  });
   const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord);
   setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (async messageContext => {
     const { message, replyTarget } = messageContext;
@@ -147,7 +151,7 @@ export function bootstrapGateway(
       senderId: message.senderId, senderName: messageSenderName(message),
       attachments: message.attachments?.length || undefined, quote,
     }, true);
-  }));
+  }), reportInbound);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -158,9 +162,7 @@ export function bootstrapGateway(
     if (config.debug) {
       logger.debug(`← message (post-middleware): ${JSON.stringify(msg, null, 2).slice(0, 500)}`);
     }
-    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget, history && ((target, id) => {
-      if (canRecord(target)) history.timeline.link(config.appId, target, id);
-    }));
+    await handleInbound(mCtx, manager, config, logger, qqInputs, allowTarget, reportInbound);
   });
 
   // ── 出站：dsh session/event → QQ 消息 ──

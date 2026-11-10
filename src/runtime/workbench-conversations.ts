@@ -250,17 +250,24 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     const scope = query.get('scope');
     const openId = query.get('openId');
     const before = query.get('before') ?? undefined;
+    const entryId = query.get('entryId') ?? undefined;
     try {
-      if (['appId', 'scope', 'openId', 'before'].some(key => query.getAll(key).length > 1)) throw new Error();
+      if (['appId', 'scope', 'openId', 'before', 'entryId'].some(key => query.getAll(key).length > 1)) throw new Error();
       appId = robotAppId(query.get('appId'));
       if ((scope !== 'group' && scope !== 'c2c') || !validOpenId(openId)
-        || (before !== undefined && !/^[a-f0-9-]{36,64}$/.test(before))) throw new Error();
+        || (before !== undefined && !/^[a-f0-9-]{36,64}$/.test(before))
+        || (entryId !== undefined && (before !== undefined || !/^[a-f0-9-]{36,64}$/.test(entryId)))) throw new Error();
     } catch {
       return workbenchJson({ error: 'QQ 流水查询参数无效。' }, 400);
     }
     if (!robots.conversationAccount(appId)) return workbenchJson({ error: '找不到这个 QQ 机器人。' }, 404);
     try {
-      const page = robots.timeline.page(appId, { scope, targetId: openId }, before);
+      const target: { scope: ChatScope; targetId: string } = { scope, targetId: openId };
+      if (entryId !== undefined) {
+        const entry = robots.timeline.entry(appId, target, entryId);
+        return entry ? workbenchJson(entry) : workbenchJson({ error: '这条记录已不可用。' }, 404);
+      }
+      const page = robots.timeline.page(appId, target, before);
       return page ? workbenchJson(page) : workbenchJson({ error: '该页记录已不可用，请刷新。' }, 404);
     } catch {
       return workbenchJson({ error: 'QQ 流水读取失败，记录可能不完整。' }, 503);

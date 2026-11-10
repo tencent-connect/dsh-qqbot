@@ -412,6 +412,22 @@ describe('native Inbox submission', () => {
     expect(receipt?.senderId).toBe('synthetic-member');
   });
 
+  it('reports a thrown followup without falsely linking the message as submitted', async () => {
+    const ctx = {
+      message: { kind: 'c2c', senderId: 'peer', messageId: 'platform-message', content: 'request' },
+      state: {}, signal: new AbortController().signal,
+    } as unknown as MiddlewareContext;
+    const manager = {
+      getOrCreate: async () => ({ sessionId: 'native-session', agent: {
+        followup() { throw new Error('inbox unavailable'); },
+      } }),
+    } as unknown as SessionManager;
+    const report = vi.fn();
+    const inputs = new QqInputRegistry({ ledger: new DeliveryLedger() });
+    await expect(handleInbound(ctx, manager, {} as ImQQBotConfig, logger, inputs, () => true, report)).rejects.toThrow('inbox unavailable');
+    expect(report).toHaveBeenCalledExactlyOnceWith({ scope: 'c2c', targetId: 'peer', msgId: 'platform-message' }, 'submit-failed');
+  });
+
   it('missing platform identities are not admitted', async () => {
     const manager = { getOrCreate: vi.fn() } as unknown as SessionManager;
     const ctx = { message: { kind: 'group', senderId: 'user', messageId: '', content: 'bad input' } } as unknown as MiddlewareContext;

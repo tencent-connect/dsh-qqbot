@@ -42,12 +42,14 @@ export function observeTimelineRequests(
     const entry: TimelineEntry = {
       id, at: Date.now(), direction: 'outbound', text: typeof text === 'string' ? timelineText(text) : '',
       status: 'sending', attachments, sessionId: trace?.sessionId,
+      source: trace && (trace.reply ? 'automatic' : 'agent'),
     };
     return timeline.observe(appId, target, entry, () => request<T>(...args), (result, error) => {
       if (error !== undefined) {
         const httpStatus = error instanceof ApiError ? error.httpStatus : undefined;
         return {
-          status: httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 ? 'rejected' : 'unknown',
+          status: httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500
+            && httpStatus !== 408 && httpStatus !== 499 ? 'rejected' : 'unknown',
           httpStatus: httpStatus || undefined,
           platformCode: error instanceof ApiError ? error.bizCode : undefined,
         };

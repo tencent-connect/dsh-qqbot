@@ -25,12 +25,17 @@ it('paginates stable same-time identities across updates, replay and restart', (
   expect(first.entries[0]?.text).toBe('9');
   expect(first.entries.find(row => row.id === receivedEntryId('16'))?.text).toBe('16');
   record(49);
-  log.link('A', { ...target, msgId: '8' }, 'original-session');
+  const incoming = { ...target, msgId: '8' };
+  log.reportInbound('A', incoming, 'mention-required');
+  log.reportInbound('A', incoming, 'submitted', 'original-session');
+  log.reportInbound('A', incoming, 'submit-failed');
   const restored = new QqTimeline(dir, logger);
   const older = restored.page('A', target, first.before)!;
   expect(older.entries.map(row => row.text)).toEqual(Array.from({ length: 9 }, (_, index) => String(index)));
-  expect(older.entries.at(-1)?.sessionId).toBe('original-session');
-  expect(restored.page('B', target)?.entries[0]?.text).toBe('other bot');
+  expect(older.entries.at(-1)).toMatchObject({ sessionId: 'original-session', inboundOutcome: 'submitted' });
+  expect(restored.page('B', target)?.entries[0]).toMatchObject({ text: 'other bot', status: 'received' });
+  expect(restored.entry('B', target, receivedEntryId('8'))).toBeUndefined();
+  expect(restored.entry('A', target, receivedEntryId('8'))?.inboundOutcome).toBe('submitted');
   expect(restored.page('A', { ...target, scope: 'c2c' })?.entries).toEqual([]);
 });
 
@@ -42,7 +47,7 @@ it('does not report a pending request as successful after restart', async () => 
     id, at: 1, direction: 'outbound', text: 'answer', status: 'sending',
   }, () => new Promise<string>(resolve => { accept = resolve; }), result => ({ status: 'accepted', platformId: result }));
   expect(log.page('A', target)?.entries[0]?.status).toBe('sending');
-  expect(new QqTimeline(dir, logger).page('A', target)?.entries[0]?.status).toBe('unknown');
+  expect(new QqTimeline(dir, logger).entry('A', target, id)?.status).toBe('unknown');
   accept('qq-receipt');
   await pending;
   expect(new QqTimeline(dir, logger).page('A', target)?.entries).toMatchObject([{ id, status: 'accepted', platformId: 'qq-receipt' }]);
