@@ -134,12 +134,10 @@ export class SessionManager {
       (key, record) => {
         this.logger.info(`evicting idle session: key=${key}`);
         this.sessions.delete(key);
+        this.cancelPendingInteractions(key);
         this.releasePrompt(record.agent);
         record.agent.cancel({ kind: 'user' });
         void record.handle.dispose().catch(() => {});
-        // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
-        this.questionChannel?.cancelPending(key);
-        this.approvalChannel?.cancelPending(key);
       },
     );
 
@@ -326,6 +324,7 @@ export class SessionManager {
     if (boundary === undefined) {
       this.logger.warn(`fork unavailable (no completed turn), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.cancelPendingInteractions(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
@@ -338,6 +337,7 @@ export class SessionManager {
     if (seed === undefined) {
       this.logger.warn(`fork seed unavailable (old host), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.cancelPendingInteractions(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
@@ -379,6 +379,7 @@ export class SessionManager {
 
     const oldHandle = record.handle;
     const oldAgent = record.agent;
+    this.cancelPendingInteractions(key);
     record.sessionId = childId;
     this.attachPrompt(created.agent, record.scope, key);
     record.agent = created.agent;
@@ -572,8 +573,7 @@ export class SessionManager {
         replyTarget: { scope, targetId: peerId }, scope, peerId,
         lastActivity: Date.now(), agentPreset,
       });
-      this.questionChannel?.cancelPending(key);
-      this.approvalChannel?.cancelPending(key);
+      this.cancelPendingInteractions(key);
       this.attachPrompt(handle.agent, scope, key);
       if (old) {
         this.releasePrompt(old.agent);
@@ -869,6 +869,7 @@ export class SessionManager {
 
     if (!record) return;
     this.sessions.delete(key);
+    this.cancelPendingInteractions(key);
     this.releasePrompt(record.agent);
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
@@ -938,7 +939,14 @@ export class SessionManager {
   }
 
   deactivate(): void {
+    if (!this.active) return;
     this.active = false;
+    for (const key of this.sessions.keys()) this.cancelPendingInteractions(key);
+  }
+
+  private cancelPendingInteractions(key: string): void {
+    this.questionChannel?.cancelPending(key);
+    this.approvalChannel?.cancelPending(key);
   }
 
   private assertActive(): void {

@@ -4,12 +4,10 @@
  * 按 request.agent.id 路由公开的提问事件，旧宿主兼容 userQuestions.ask。
  * 非 QQ 会话委托宿主默认答复通道。
  *
- * 每会话一个显式状态机，三态语义：
- *   - 待答（pending 中）：等待当前题的回答
- *   - 逐题推进：多问题时一次问一题，答完一题再问下一题
- *   - 完成 / 中断（abort / 超时 / 会话回收）：reject(ASK_ABORTED)
+ * 每个会话最多保留一个请求。发送时可取消，收到成功回执后才接受作答。
+ * 多题逐题发送，取消、超时或会话回收使当前题失效。
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { parseAnswer } from './answer-parser.ts';
@@ -119,7 +117,6 @@ export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
   private readonly requestIds = new WeakMap<UserQuestionRequest, string>();
   private detach?: () => void;
-  private generation = 0;
   private readonly manager: QuestionChannelManagerLike;
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
@@ -199,15 +196,12 @@ export class QuestionChannel {
   }
 
   public uninstall(): void {
-    this.generation += 1;
-    this.detach?.();
-    this.detach = undefined;
-    for (const [, entry] of this.pending) {
-      this.clearTimer(entry);
-      this.removeAbort(entry);
-      entry.reject(new QuestionChannelError('QQ question channel was unloaded before the user answered', ASK_ABORTED));
+    for (const entry of this.pending.values()) {
+      this.rejectPending(entry, new QuestionChannelError('QQ question channel was unloaded before the user answered', ASK_ABORTED));
     }
-    this.pending.clear();
+    const detach = this.detach;
+    this.detach = undefined;
+    detach?.();
   }
 
   /** Answer the Host's scoped question event only for a live, owned QQ turn. */
@@ -222,11 +216,9 @@ export class QuestionChannel {
   /** 会话回收时清理其待答问题，避免 pending 悬挂导致 Promise 与闭包泄漏 */
   public cancelPending(sessionKey: string): void {
     const entry = this.pending.get(sessionKey);
-    if (!entry) return;
-    this.pending.delete(sessionKey);
-    this.clearTimer(entry);
-    this.removeAbort(entry);
-    entry.reject(new QuestionChannelError('ask_user_question was cancelled before the user answered', ASK_ABORTED));
+    if (entry) {
+      this.rejectPending(entry, new QuestionChannelError('ask_user_question was cancelled before the user answered', ASK_ABORTED));
+    }
   }
 
   /** 入站文本作答：该会话若有待答问题且本条消息有文本，解析为答案并推进 */
@@ -241,7 +233,7 @@ export class QuestionChannel {
     const current = entry.request.questions[entry.index];
     if (!current) return false;
     const answer = parseAnswer(current, text);
-    this.advance(entry, key, answer);
+    this.advance(entry, answer);
     return true;
   }
 
@@ -253,7 +245,7 @@ export class QuestionChannel {
     const record = this.manager.getSessionRecord(scope, peerId);
     if (!record) return false;
     const entry = this.pending.get(record.sessionKey);
-    if (!entry) return false;
+    if (!entry?.answerToken) return false;
 
     const data = event.data?.resolved?.button_data;
     if (!data) return false;
@@ -264,9 +256,9 @@ export class QuestionChannel {
     if (button.q !== entry.answerToken) return false;
     const idx = button.i;
     const opts = current.options ?? [];
-    if (idx < 0 || idx >= opts.length) return false;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= opts.length) return false;
 
-    this.advance(entry, record.sessionKey, { id: current.id, selected: [opts[idx]!.label] });
+    this.advance(entry, { id: current.id, selected: [opts[idx]!.label] });
     return true;
   }
 
@@ -277,78 +269,67 @@ export class QuestionChannel {
     request: UserQuestionRequest,
   ): Promise<UserQuestionResult> {
     const key = record.sessionKey;
-    const generation = this.generation;
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败，避免悬挂
     if (request.signal?.aborted) {
       throw new QuestionChannelError('ask_user_question was aborted before delivery', ASK_ABORTED);
     }
-    const first = request.questions[0];
-    if (!first) throw new Error('ask_user_question with empty questions');
+    if (!request.questions[0]) throw new Error('ask_user_question with empty questions');
 
     const requestId = this.requestId(request);
-    const answerToken = this.questionToken(requestId, 0);
-    await this.sendQuestion(record, target, first, answerToken);
-    if (this.generation !== generation || request.signal?.aborted) {
-      throw new QuestionChannelError('ask_user_question was aborted during delivery', ASK_ABORTED);
-    }
-
     const prev = this.pending.get(key);
+    if (prev?.requestId === requestId) throw new Error('QQ question is already pending');
     if (prev) {
-      this.pending.delete(key);
-      this.clearTimer(prev);
-      this.removeAbort(prev);
-      prev.reject(new QuestionChannelError('superseded by a new question', ASK_ABORTED));
+      this.rejectPending(prev, new QuestionChannelError('superseded by a new question', ASK_ABORTED));
     }
 
     return new Promise<UserQuestionResult>((resolve, reject) => {
-      const entry: PendingEntry = { record, target, request, requestId, answerToken, resolve, reject, index: 0, collected: [] };
-      if (request.signal) {
-        const onAbort = (): void => {
-          if (this.pending.get(key) !== entry) return;
-          this.pending.delete(key);
-          this.clearTimer(entry);
-          reject(new QuestionChannelError('ask_user_question was aborted before the user answered', ASK_ABORTED));
-        };
-        entry.onAbort = onAbort;
-        request.signal.addEventListener('abort', onAbort, { once: true });
-      }
-      entry.timer = setTimeout(() => this.onTimeout(key), this.config.askTimeoutMs);
+      const entry: PendingEntry = { record, target, request, requestId, resolve, reject, index: 0, collected: [] };
       this.pending.set(key, entry);
-      this.logger.info(`im-qqbot: question sent to QQ, waiting for answer key=${key}`);
+      if (request.signal) {
+        entry.onAbort = () => this.rejectPending(entry, new QuestionChannelError('ask_user_question was aborted before the user answered', ASK_ABORTED));
+        request.signal.addEventListener('abort', entry.onAbort, { once: true });
+      }
+      void this.publish(entry, target);
     });
   }
 
+  private async publish(entry: PendingEntry, target: ReplyTarget): Promise<void> {
+    const key = entry.record.sessionKey;
+    const answerToken = randomBytes(12).toString('hex');
+    // Preserve the delivery key across retries and give each visible card its own token.
+    const deliveryId = deliveryKey(entry.requestId, entry.index).slice(0, 24);
+    try {
+      await this.sendQuestion(entry.record, deliveryPart(target, 'question', deliveryId), entry.request.questions[entry.index]!, answerToken);
+      if (this.pending.get(key) !== entry) return;
+      entry.answerToken = answerToken;
+      if (entry.timer === undefined) this.resetTimer(entry);
+      this.logger.info(`im-qqbot: question sent to QQ, waiting for answer key=${key}`);
+    } catch (error) {
+      this.rejectPending(entry, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   /** 推进状态机：收集答案 → 有下一题则发送，否则 resolve 全部答案 */
-  private advance(entry: PendingEntry, key: string, answer: UserQuestionAnswer): void {
+  private advance(entry: PendingEntry, answer: UserQuestionAnswer): void {
     entry.collected.push(answer);
     entry.index += 1;
 
     if (entry.index < entry.request.questions.length) {
-      const next = entry.request.questions[entry.index]!;
       entry.answerToken = undefined;
-      const answerToken = this.questionToken(entry.requestId, entry.index);
-      this.resetTimer(entry, key);
+      this.resetTimer(entry);
       // 用户刚在 QQ 作答：后续题被动回复其作答（replyTarget 携带最新 msgId 候选）
       const sessionId = entry.request.agent?.id;
       const source = this.targets && sessionId ? this.targets.targetFor(sessionId) : entry.record.replyTarget;
       const target = source && continueDelivery(source, entry.record.replyTarget);
-      void (target ? this.sendQuestion(entry.record, target, next, answerToken) : Promise.reject(new Error('QQ question source is no longer authorized'))).then(() => {
-        if (this.pending.get(key) === entry) entry.answerToken = answerToken;
-      }, (err) => {
-        if (this.pending.get(key) !== entry) return;
-        this.pending.delete(key);
-        this.clearTimer(entry);
-        this.removeAbort(entry);
-        entry.reject(err instanceof Error ? err : new Error(String(err)));
-      });
+      if (target) void this.publish(entry, target);
+      else this.rejectPending(entry, new Error('QQ question source is no longer authorized'));
       return;
     }
 
-    this.pending.delete(key);
-    this.clearTimer(entry);
-    this.removeAbort(entry);
-    this.logger.info(`im-qqbot: question answered via QQ key=${key}`);
-    entry.resolve({ answers: entry.collected });
+    if (this.take(entry)) {
+      this.logger.info(`im-qqbot: question answered via QQ key=${entry.record.sessionKey}`);
+      entry.resolve({ answers: entry.collected });
+    }
   }
 
   private requestId(request: UserQuestionRequest): string {
@@ -357,10 +338,6 @@ export class QuestionChannel {
     const id = this.requestIds.get(request) ?? 'request:' + randomUUID();
     this.requestIds.set(request, id);
     return id;
-  }
-
-  private questionToken(requestId: string, index: number): string {
-    return deliveryKey(requestId, index).slice(0, 24);
   }
 
   /** 发送单个问题：优先带按钮，按钮发送失败降级纯文本 */
@@ -375,7 +352,7 @@ export class QuestionChannel {
     const plain = formatQuestion(question, hint, false);
     try {
       const submitted = await this.sender.sendMarkdown(
-        deliveryPart(target, 'question', answerToken),
+        target,
         keyboard ? formatQuestion(question, hint, true) : plain,
         keyboard ? { keyboard, fallbackText: plain } : undefined,
       );
@@ -387,14 +364,10 @@ export class QuestionChannel {
     }
   }
 
-  private onTimeout(key: string): void {
-    const entry = this.pending.get(key);
-    if (!entry) return;
-    this.pending.delete(key);
-    this.removeAbort(entry);
-    entry.timer = undefined;
-    void this.sender.sendMarkdown(entry.target, '⚠️ 提问已超时，未收到回答。').catch(() => {});
+  private onTimeout(entry: PendingEntry): void {
+    if (!this.take(entry)) return;
     entry.reject(new QuestionChannelError('ask_user_question timed out before the user answered', ASK_ABORTED));
+    void this.sender.sendMarkdown(entry.target, '⚠️ 提问已超时，未收到回答。').catch(() => {});
   }
 
   /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */
@@ -402,19 +375,21 @@ export class QuestionChannel {
     return this.targets ? this.targets.targetFor(sessionId) : record.replyTarget;
   }
 
-  private resetTimer(entry: PendingEntry, key: string): void {
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = setTimeout(() => this.onTimeout(key), this.config.askTimeoutMs);
+  private resetTimer(entry: PendingEntry): void {
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => this.onTimeout(entry), this.config.askTimeoutMs);
   }
 
-  private clearTimer(entry: PendingEntry): void {
-    if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = undefined;
+  private rejectPending(entry: PendingEntry, error: Error): void {
+    if (this.take(entry)) entry.reject(error);
   }
 
-  private removeAbort(entry: PendingEntry): void {
-    if (entry.onAbort && entry.request.signal) {
-      entry.request.signal.removeEventListener('abort', entry.onAbort);
-    }
+  private take(entry: PendingEntry): boolean {
+    const key = entry.record.sessionKey;
+    if (this.pending.get(key) !== entry) return false;
+    this.pending.delete(key);
+    clearTimeout(entry.timer);
+    if (entry.onAbort) entry.request.signal?.removeEventListener('abort', entry.onAbort);
+    return true;
   }
 }

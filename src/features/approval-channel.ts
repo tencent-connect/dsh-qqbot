@@ -9,7 +9,7 @@
  */
 import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData } from './button-utils.ts';
 import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
@@ -80,11 +80,11 @@ export interface ApprovalChannelContext {
 // ── 每会话 pending 状态 ──
 
 interface PendingApproval {
-  record: ApprovalSessionRecordLike;
   request: ApprovalRequest;
   resolve: (outcome: ApprovalOutcome) => void;
   /** 本审批的唯一标识，编码进按钮 data，点击时必须匹配（防旧卡片混淆） */
   nonce: string;
+  ready: boolean;
   onAbort?: () => void;
 }
 
@@ -173,10 +173,7 @@ export class ApprovalChannel {
   /** 会话回收时清理其 pending 审批，避免 Promise 悬挂 */
   public cancelPending(sessionKey: string): void {
     const entry = this.pending.get(sessionKey);
-    if (!entry) return;
-    this.pending.delete(sessionKey);
-    this.removeAbort(entry);
-    entry.resolve('cancelled');
+    if (entry) this.finish(sessionKey, entry, 'cancelled');
   }
 
   /** 按钮点击决策：解码 button_data，校验点击者授权，settle pending 审批 */
@@ -187,12 +184,12 @@ export class ApprovalChannel {
     const record = this.manager.getSessionRecord(scope, peerId);
     if (!record) return false;
     const entry = this.pending.get(record.sessionKey);
-    if (!entry) return false;
+    if (!entry?.ready) return false;
 
     const data = event.data?.resolved?.button_data;
     if (!data) return false;
     const button = decodeButtonData(data);
-    if (!button || button.t !== 'approval') return false;
+    if (!button || button.t !== 'approval' || (button.d !== 'allow' && button.d !== 'deny')) return false;
 
     // nonce 必须匹配 pending：旧卡片/其它会话的卡片点击不 settle（#94-3）
     if (button.n !== entry.nonce) {
@@ -208,9 +205,7 @@ export class ApprovalChannel {
       return false;
     }
 
-    this.pending.delete(record.sessionKey);
-    this.removeAbort(entry);
-    entry.resolve(button.d === 'allow' ? 'allowed-once' : 'rejected');
+    this.finish(record.sessionKey, entry, button.d === 'allow' ? 'allowed-once' : 'rejected');
     return true;
   }
 
@@ -224,44 +219,49 @@ export class ApprovalChannel {
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败
     if (request.signal?.aborted) return 'cancelled';
 
-    const command = commandOf(request);
-    const nonce = randomUUID().slice(0, 8);
+    this.cancelPending(key);
+    return new Promise<ApprovalOutcome>(resolve => {
+      const entry: PendingApproval = { request, resolve, nonce: randomBytes(12).toString('hex'), ready: false };
+      this.pending.set(key, entry);
+      if (request.signal) {
+        entry.onAbort = () => this.finish(key, entry, 'cancelled');
+        request.signal.addEventListener('abort', entry.onAbort, { once: true });
+      }
+      void this.publish(key, entry, target);
+    });
+  }
+
+  private async publish(key: string, entry: PendingApproval, target: ReplyTarget): Promise<void> {
     try {
-      await this.sender.sendMarkdown(
+      const submitted = await this.sender.sendMarkdown(
         target,
-        buildApprovalText(request, command),
-        { keyboard: buildApprovalKeyboard(nonce) },
+        buildApprovalText(entry.request, commandOf(entry.request)),
+        { keyboard: buildApprovalKeyboard(entry.nonce) },
       );
+      if (this.pending.get(key) !== entry) return;
+      if (submitted === false) {
+        this.finish(key, entry, 'unavailable');
+        return;
+      }
+      entry.ready = true;
+      this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
     } catch (err) {
+      if (this.pending.get(key) !== entry) return;
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(`im-qqbot: approval send failed key=${key}: ${msg}`);
-      return 'unavailable'; // 无法呈现审批，fail-closed
+      this.finish(key, entry, 'unavailable');
     }
+  }
 
-    return new Promise<ApprovalOutcome>((resolve) => {
-      const entry: PendingApproval = { record, request, resolve, nonce };
-      if (request.signal) {
-        const onAbort = (): void => {
-          if (this.pending.get(key) !== entry) return;
-          this.pending.delete(key);
-          resolve('cancelled');
-        };
-        entry.onAbort = onAbort;
-        request.signal.addEventListener('abort', onAbort, { once: true });
-      }
-      this.pending.set(key, entry);
-      this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
-    });
+  private finish(key: string, entry: PendingApproval, outcome: ApprovalOutcome): void {
+    if (this.pending.get(key) !== entry) return;
+    this.pending.delete(key);
+    if (entry.onAbort) entry.request.signal?.removeEventListener('abort', entry.onAbort);
+    entry.resolve(outcome);
   }
 
   /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */
   private resolveTarget(sessionId: string, record: ApprovalSessionRecordLike): ReplyTarget | undefined {
     return this.targets ? this.targets.targetFor(sessionId) : record.replyTarget;
-  }
-
-  private removeAbort(entry: PendingApproval): void {
-    if (entry.onAbort && entry.request.signal) {
-      entry.request.signal.removeEventListener('abort', entry.onAbort);
-    }
   }
 }

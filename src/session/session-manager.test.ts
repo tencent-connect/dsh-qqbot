@@ -14,6 +14,8 @@ import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { DshAgent, DshAgentHandle, DshAgentRegistry } from './types.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import { ApprovalChannel, type ApprovalRequest } from '../features/approval-channel.ts';
+import { QuestionChannel } from '../features/question-channel.ts';
 
 const env = vi.hoisted(() => ({ home: '' }));
 
@@ -686,6 +688,48 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
 
 describe('web workbench session switching', () => {
   const settings = WORKBENCH_SETTINGS;
+
+  it.each(['QQ /new', 'Web switch', 'gateway retirement'])('settles both in-flight cards immediately on %s', async change => {
+    const old = fakeHandle('session-old');
+    const { registry } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const receipt = deferred<void>();
+    const sender = { sendMarkdown: vi.fn(() => receipt.promise) };
+    const logger = createLogger();
+    manager.questionChannel = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, logger);
+    manager.approvalChannel = new ApprovalChannel(manager, sender, { access: { c2cMode: 'open', c2cAllow: [] } }, logger);
+
+    const question = manager.questionChannel.routeRequest(
+      { agent: { id: old.agent.id }, questions: [{ id: 'q', question: 'Continue?' }] },
+      async () => { throw new Error('question unexpectedly delegated'); },
+    ).catch((error: unknown) => error);
+    let ask: ((request: ApprovalRequest) => unknown) | undefined;
+    manager.approvalChannel.install({
+      on(_event, handler) {
+        ask = request => handler(request, () => { throw new Error('approval unexpectedly delegated'); });
+        return () => true;
+      },
+    });
+    const approval = ask?.({ agent: { id: old.agent.id }, toolName: 'bash' });
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(2);
+
+    try {
+      if (change === 'QQ /new') await manager.remove('c2c', PEER);
+      else if (change === 'Web switch') await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+      else manager.deactivate();
+      const status = await Promise.race([
+        Promise.all([approval, question]),
+        new Promise<never>((_, reject) => setImmediate(() => reject(new Error('card request still pending')))),
+      ]);
+      expect(status).toEqual(['cancelled', expect.objectContaining({ code: 'ASK_ABORTED' })]);
+    } finally {
+      receipt.resolve();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      manager.questionChannel.uninstall();
+    }
+  });
 
   it('waits for the new native session, keeps history, and sends waiting input to the new binding', async () => {
     const gate = deferred<void>();
