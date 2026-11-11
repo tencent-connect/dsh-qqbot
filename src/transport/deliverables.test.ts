@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DeliverablesDeliverer } from './deliverables.ts';
@@ -34,6 +34,26 @@ function createConfig(cwd: string): ImQQBotConfig {
 const TARGET: ReplyTarget = { scope: 'c2c', targetId: 'u' };
 
 describe('DeliverablesDeliverer', () => {
+  it('resolves relative deliverables against the native Session workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qqbot-deliverable-workspace-'));
+    try {
+      const defaults = join(root, 'robot');
+      const cwd = join(root, 'selected');
+      await Promise.all([mkdir(defaults), mkdir(cwd)]);
+      await Promise.all([writeFile(join(defaults, 'old.txt'), 'robot'), writeFile(join(cwd, 'report.txt'), 'session')]);
+      const media = createMediaBot();
+      const sender = createSender();
+      const deliverer = new DeliverablesDeliverer(sender, media, createConfig(defaults), logger);
+
+      await deliverer.deliver(TARGET, [{ path: 'report.txt' }, { path: join(defaults, 'old.txt') }], cwd);
+
+      expect(media.sendFile).toHaveBeenCalledExactlyOnceWith(TARGET, { localPath: join(cwd, 'report.txt') }, expect.anything());
+      expect(sender.sendMarkdown).toHaveBeenCalledWith(TARGET, expect.stringContaining('old.txt（路径不在允许范围）'));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('存在的文件按扩展名分发发送', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-qqbot-dlv-'));
     const png = join(dir, 'a.png');

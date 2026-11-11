@@ -10,7 +10,7 @@ npm pack
 npm pack ./plugins/workbench-history
 ```
 
-在同一个 DSH profile 安装核心包和消息记录包，并将两者都加入该 profile 的 `dsh.profile.bundles`。只需要会话列表和设置时，加载核心包即可。扩展与核心应从同一版本构建。
+在同一个 DSH profile 安装核心包和消息记录包，并将两者都加入该 profile 的 `dsh.profile.bundles`。只需要会话列表和设置时，加载核心包即可。消息记录扩展要求 QQBot 核心 0.5.6 或兼容的 0.5.x 版本。用源码验证时，从同一提交构建两包。
 
 ## 注册工作台界面
 

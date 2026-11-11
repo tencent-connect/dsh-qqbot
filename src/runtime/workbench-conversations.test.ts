@@ -49,12 +49,18 @@ it('copies per-robot defaults once and freezes legacy peers in the same commit a
   expect(restored.get(newPrivate).agent).toMatchObject({ directPrompt: 'A2', groupPrompt: 'A' });
 });
 
-async function fixture(withPersistence = true) {
+async function fixture(withPersistence = true, hooks?: {
+  validateAgent: () => Promise<void>;
+  sessionChangePending: () => boolean;
+}) {
   const prefs = new PrefsStore(undefined, { path: join(dir, 'prefs.json') });
   const settingsPath = join(dir, 'settings.json');
   const conversationSettings = new ConversationSettingsStore(settingsPath);
   const access = { c2cMode: 'allowlist' as const, c2cAllow: ['same'], groupMode: 'disabled' as const, groupAllow: [] };
-  const account = { access, liveSessionId: () => undefined, peerName: () => '' };
+  const agent = legacyAgentSettings(ConfigSchema({} as ImQQBotConfig));
+  const account = { access, liveSessionId: () => undefined, peerName: () => '',
+    ...(hooks ? { ...hooks, agentSettings: () => agent } : {}),
+  };
   const mediaRoot = (appId: string) => join(dir, 'media', appId);
   const stat = vi.fn(async (id: string) => !['old-a', 'group-a', 'current-b'].includes(id) ? undefined : ({
     header: { id, cwd: '/test/workspace', agentPreset: 'test-preset', createdAt: 5 },
@@ -144,6 +150,39 @@ it('keeps settings durable and scoped with stale-save rejection and separate adm
     await f.close();
   }
   expect((await f.get('A')).status).toBe(503);
+});
+
+it.each(['bound', 'pending'] as const)('rejects permission changes while another Session is %s', async change => {
+  const validation = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  let pending = false;
+  const f = await fixture(true, {
+    validateAgent: async () => { validation.resolve(); await resume.promise; },
+    sessionChangePending: () => pending,
+  });
+  try {
+    const peer = peerKey('A', 'c2c', 'same');
+    const { conversations: [before] } = await (await f.get('A')).json();
+    const save = f.post({ appId: 'A', scope: 'c2c', openId: 'same', revision: before.revision,
+      agent: { ...before.agent, permission: 'read-only', tools: [] } });
+    const entered = await Promise.race([validation.promise.then(() => true), save.then(() => false)]);
+    expect(entered).toBe(true);
+    if (change === 'bound') f.prefs.setSessionId(peer, 'old-a');
+    else pending = true;
+    resume.resolve();
+    expect((await save).status).toBe(409);
+    expect(f.conversationSettings.get(peer)).toMatchObject({ revision: before.revision });
+    expect(f.conversationSettings.get(peer).agent?.tools).toBeUndefined();
+
+    pending = false;
+    const retry = await f.post({ appId: 'A', scope: 'c2c', openId: 'same', revision: before.revision,
+      agent: { ...before.agent, permission: 'read-only', tools: [] } });
+    expect(retry.status).toBe(200);
+    expect(f.conversationSettings.get(peer).agent?.tools).toEqual([]);
+  } finally {
+    resume.resolve();
+    await f.close();
+  }
 });
 
 it('explains when the Host cannot verify any Session IDs', async () => {

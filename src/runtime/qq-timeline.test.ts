@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ReplyTarget } from '../types.ts';
 import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
+import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 const target: ReplyTarget = { scope: 'group', targetId: 'shared' };
@@ -37,6 +38,21 @@ it('paginates stable same-time identities across updates, replay and restart', (
   expect(restored.entry('B', target, receivedEntryId('8'))).toBeUndefined();
   expect(restored.entry('A', target, receivedEntryId('8'))?.inboundOutcome).toBe('submitted');
   expect(restored.page('A', { ...target, scope: 'c2c' })?.entries).toEqual([]);
+});
+
+it('preserves complete records and resumes appending after a torn UTF-8 tail', () => {
+  const record = (log: QqTimeline, id: string, text: string) =>
+    log.record('A', target, { id, at: 1, direction: 'inbound', text, status: 'received' });
+  record(new QqTimeline(dir, logger), 'before', '原有记录');
+  const file = join(dir, deliveryKey('A'), deliveryKey(target.scope, target.targetId), 'rows.jsonl');
+  appendFileSync(file, Buffer.from('{"text":"未写完').subarray(0, -1));
+
+  const restarted = new QqTimeline(dir, logger);
+  expect(restarted.page('A', target)).toMatchObject({ incomplete: true, entries: [{ text: '原有记录' }] });
+  record(restarted, 'after', '新消息');
+  const page = new QqTimeline(dir, logger).page('A', target);
+  expect(page?.incomplete).toBe(true);
+  expect(page?.entries.map(row => row.text)).toEqual(['原有记录', '新消息']);
 });
 
 it('does not report a pending request as successful after restart', async () => {

@@ -160,6 +160,7 @@ interface ConversationAccount {
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
+  sessionChangePending?(scope: ChatScope, openId: string): boolean;
 }
 type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & Partial<Pick<RobotRuntimes, 'toolPolicies' | 'newSession'>> & {
   conversationAccount(appId: string): ConversationAccount | undefined;
@@ -361,13 +362,26 @@ export function registerWorkbenchConversations(
     const [conversation] = await projectConversations(robots, patch.appId, persistence, patch);
     if (!conversation) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
     const key = peerKey(patch.appId, patch.scope, patch.openId);
-    const binding = robots.prefs.listSessionBindings(patch.appId).find(row => row.key === key);
-    const sessions = [...new Set([...conversation.sessions.map(session => session.id),
-      ...(binding?.history ?? []), ...(binding?.current ? [binding.current] : [])])];
+    const sessionBindings = () => {
+      const account = robots.conversationAccount(patch.appId);
+      const binding = robots.prefs.listSessionBindings(patch.appId).find(row => row.key === key);
+      const live = account?.liveSessionId(patch.scope, patch.openId);
+      const pending = account?.sessionChangePending?.(patch.scope, patch.openId);
+      return { current: binding?.current, history: binding?.history ?? [], live, pending };
+    };
+    const baseline = patch.agent ? sessionBindings() : undefined;
+    const sessions = [...new Set([...conversation.sessions.map(session => session.id), ...(baseline?.history ?? []),
+      ...(baseline?.current ? [baseline.current] : []), ...(baseline?.live ? [baseline.live] : [])])];
     const assertCurrent = () => {
       assertWritable();
       if (robots.conversationSettings.get(key).revision !== patch.revision) {
         throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
+      }
+      if (baseline) {
+        const current = sessionBindings();
+        if (baseline.pending || current.pending || JSON.stringify(current) !== JSON.stringify(baseline)) {
+          throw new WorkbenchRequestError(409, 'Session 正在切换或已更新，请重新加载后再保存。');
+        }
       }
     };
     try {

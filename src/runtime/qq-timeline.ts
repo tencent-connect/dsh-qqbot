@@ -1,5 +1,5 @@
-import { closeSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import { MAX_TIMELINE_IMAGES, TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
@@ -10,6 +10,7 @@ type StoredEntry = TimelineEntry & { imageFiles?: string[] };
 interface Journal {
   signature: string;
   rows: Map<string, StoredEntry>;
+  completeBytes?: number;
 }
 
 function missing(error: unknown): boolean {
@@ -116,7 +117,7 @@ export class QqTimeline {
     return {
       entries: rows.slice(start, end).map(row => this.observedStatus(directory, row)),
       before: start > 0 ? rows[start]?.id : undefined,
-      incomplete: this.incomplete.has(directory),
+      incomplete: this.incomplete.has(directory) || existsSync(join(directory, 'incomplete')),
     };
   }
 
@@ -145,13 +146,18 @@ export class QqTimeline {
         atomicWrite(join(directory, 'peer.json'), [JSON.stringify({ scope: target.scope, openId: target.targetId })]);
       }
       mkdirSync(directory, { recursive: true, mode: 0o700 });
+      if (journal.completeBytes !== undefined && !existsSync(join(directory, 'incomplete'))) {
+        atomicWrite(join(directory, 'incomplete'), ['Interrupted append\n']);
+      }
       const fd = openSync(file, 'a', 0o600);
       try {
+        if (journal.completeBytes !== undefined) ftruncateSync(fd, journal.completeBytes);
         const buffer = Buffer.from(JSON.stringify(entry) + '\n');
         let offset = 0;
         while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
         fsyncSync(fd);
         journal.signature = signature(fstatSync(fd));
+        journal.completeBytes = undefined;
       } finally { closeSync(fd); }
       journal.rows.set(id, entry);
       this.remember(file, journal);
@@ -175,8 +181,11 @@ export class QqTimeline {
       return cached;
     }
     const rows = new Map<string, StoredEntry>();
-    const text = readFileSync(file, 'utf8');
-    if (text && !text.endsWith('\n')) throw new Error('Incomplete QQ timeline');
+    const bytes = readFileSync(file);
+    const end = bytes.lastIndexOf(0x0a) + 1;
+    const completeBytes = end < bytes.length ? end : undefined;
+    if (completeBytes !== undefined) this.noteFailure(dirname(file));
+    const text = bytes.subarray(0, end).toString('utf8');
     for (const line of text.split('\n')) {
       if (!line) continue;
       const row = JSON.parse(line) as StoredEntry;
@@ -185,7 +194,7 @@ export class QqTimeline {
         || !['received', 'sending', 'partial', 'accepted', 'rejected', 'unknown'].includes(row.status)) throw new Error('Invalid QQ timeline');
       rows.set(row.id, row);
     }
-    const journal = { signature: stamp, rows };
+    const journal = { signature: stamp, rows, completeBytes };
     this.remember(file, journal);
     return journal;
   }

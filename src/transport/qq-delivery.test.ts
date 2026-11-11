@@ -14,6 +14,8 @@ import { StreamTargetExpired } from './delivery-errors.ts';
 import { OutboundBuffer } from './outbound-buffer.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from './qq-delivery.ts';
 import { ReplyLimiter } from './reply-limiter.ts';
+import { QqInputRegistry } from './qq-input-origin.ts';
+import { TurnTracker } from './turn-tracker.ts';
 import type { ReplyTarget } from '../types.ts';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -265,6 +267,30 @@ it.each(['text', 'card'] as const)('blocks static %s if access is revoked while 
   }
   await denied;
   expect(request).not.toHaveBeenCalled();
+});
+
+it.each(['off', 'all'] as const)('rechecks %s web push policy after a web steer during SDK token acquisition', async policy => {
+  const { bot, request, sender } = setup();
+  const group: ReplyTarget = { scope: 'group', targetId: 'fixture-group' };
+  const tracker = new TurnTracker({ findBySessionId: () => undefined, deliveryAddress: () => group },
+    new QqInputRegistry({ ledger: new DeliveryLedger() }), { externalTurns: policy }, logger);
+  tracker.begin('session', 1);
+  tracker.note('session', { source: { kind: 'schedule' } });
+  const plan = tracker.planFor('session');
+  expect(plan).toBeDefined();
+  const release = Promise.withResolvers<string>();
+  const token = vi.spyOn(bot.tokenManager, 'getAccessToken').mockReturnValueOnce(release.promise);
+  const sending = sender.sendText!(plan!.target, 'scheduled output', 4500);
+  const outcome = policy === 'off' ? expect(sending).rejects.toThrow('no longer authorized') : expect(sending).resolves.toBeUndefined();
+  try {
+    await vi.waitFor(() => expect(token).toHaveBeenCalledOnce());
+    tracker.note('session', { source: { kind: 'user' } });
+  } finally {
+    release.resolve('fixture-token');
+  }
+  await outcome;
+  if (policy === 'off') expect(request).not.toHaveBeenCalled();
+  else expect(request).toHaveBeenCalledOnce();
 });
 
 it('preserves event_id, keyboard, and outbound reference tracking for an authorized card', async () => {

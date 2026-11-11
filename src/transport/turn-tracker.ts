@@ -158,8 +158,8 @@ export class TurnTracker implements DeliveryTargetResolver {
       if (tracked.state.origin === null && !tracked.state.sawInternal) return undefined;
       const target = tracked.state.origin === 'qq' ? tracked.target
         : { scope: tracked.target.scope, targetId: tracked.target.targetId, forceProactive: true };
-      if (tracked.external && !this.allowsExternal(target)) return undefined;
-      const allowed = () => !tracked.invalid && !(tracked.inputs.size > 0 && tracked.external)
+      const allowed = () => !tracked.invalid
+        && (!tracked.external || (tracked.inputs.size === 0 && this.allowsExternal(target)))
         && (this.options.allowed?.(target) ?? true);
       if (!allowed()) return undefined;
       return { target: bindDelivery(target, { key: deliveryKey(sessionId, tracked.state.turn), sessionId, allowed }), proactive: tracked.state.origin !== 'qq' };
