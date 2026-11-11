@@ -1,4 +1,4 @@
-import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
@@ -11,8 +11,8 @@ import {
 import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
-import type { WorkbenchExtensions } from './workbench-extensions.ts';
-import type { QqWorkbenchView } from '../shared/workbench-extension.ts';
+import { extensionSettingsProps, type WorkbenchExtensions } from './workbench-extensions.ts';
+import type { QqWorkbenchSettingsSection, QqWorkbenchView } from '../shared/workbench-extension.ts';
 import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
@@ -127,6 +127,7 @@ export interface QQWorkbenchProps extends SessionNavigation {
 
 export function QQWorkbench({ extensions, primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
   const views = useSyncExternalStore(extensions.subscribe, extensions.getViews);
+  const settingsSections = useSyncExternalStore(extensions.subscribe, extensions.getSettingsSections);
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
   const [robotSettings, setRobotSettings] = useState(false);
   const [robotPage, setRobotPage] = useState('account');
@@ -176,7 +177,7 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
                 className: 'imqw-conversation-grid', hidden: showRobotSettings,
                 'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
               }, h(RobotConversations, {
-                key: robot.appId, robot, agentSource, views, settingsOpen: nav.peerSettingsOpen,
+                key: robot.appId, robot, agentSource, views, settingsSections: showRobotSettings ? [] : settingsSections, settingsOpen: nav.peerSettingsOpen,
                 settingsVisible: nav.peerSettingsOpen && (!layout.singlePage || nav.smallPage === 'settings'),
                 singlePage: layout.singlePage, ...sessionNavigation,
                 treeDivider: layout.divider('tree'), settingsDivider: layout.divider('settings'),
@@ -214,6 +215,7 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
 
 interface RobotConversationsProps extends SessionNavigation {
   views: readonly QqWorkbenchView[];
+  settingsSections: readonly QqWorkbenchSettingsSection[];
   robot: WorkbenchRobot;
   agentSource?: AgentFormSource;
   settingsOpen: boolean;
@@ -225,7 +227,7 @@ interface RobotConversationsProps extends SessionNavigation {
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, agentSource, views, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, agentSource, views, settingsSections, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
   const [openViewId, setOpenViewId] = useState<string>();
   const activeView = views.find(view => view.id === openViewId);
@@ -506,7 +508,7 @@ function RobotConversations({ robot, agentSource, views, settingsOpen, settingsV
             key: view.id, type: 'button', size: 'sm', variant: 'outline',
             'aria-expanded': activeView === view,
             onClick: () => setOpenViewId(activeView === view ? undefined : view.id),
-          }, `${activeView === view ? '收起' : '查看'}${view.title}`)) : null,
+          }, `${activeView === view ? '收起' : '查看'} ${view.title}`)) : null,
           currentArchived
             ? h(Button, { size: 'sm', variant: 'outline', disabled: !restoreSession || !!busyKey || !!restoring,
               onClick: () => { void restoreCurrent(); } }, restoring === current?.id ? '恢复中…' : '恢复原会话')
@@ -540,7 +542,7 @@ function RobotConversations({ robot, agentSource, views, settingsOpen, settingsV
     ),
     settingsDivider,
     h('aside', { id: settingsId, className: 'imqw-settings', 'aria-label': '会话设置', hidden: !settingsOpen },
-      peer && peerKey ? h(ConversationSettings, {
+      peer && peerKey ? h(Fragment, null, h(ConversationSettings, {
             key: peerKey, robot, peer, agentSource, closeButton, archived: currentArchived,
             workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
             busy: busyKey === peerKey, feedback: feedback?.key === peerKey ? feedback : undefined,
@@ -551,7 +553,10 @@ function RobotConversations({ robot, agentSource, views, settingsOpen, settingsV
               setFeedback(undefined);
             },
             onSave: draft => { void save(peer, draft); },
-          }) : h(Fragment, null,
+          }), settingsVisible ? settingsSections.map(section =>
+            h(ExtensionSettingsGroup, {
+              key: `${peerKey}:${section.id}`, section, appId, scope: peer.scope, openId: peer.openId,
+            })) : null) : h(Fragment, null,
             h('header', { className: 'imqw-column-head' }, h('h2', null, '会话设置'), closeButton),
             h('p', { className: 'imqw-muted' }, '选择群聊或联系人后可以编辑。')),
     ),
@@ -585,6 +590,23 @@ function SettingsGroup({ title, hint, defaultOpen, children }: { title: string; 
     h('summary', null, h(IconChevronDownOutlineRegular, { size: 14 }), h('strong', null, title),
       hint ? h('span', { className: 'imqw-muted' }, hint) : null),
     h('div', { className: 'imqw-settings-group-body' }, children));
+}
+
+function ExtensionSettingsGroup({ section, appId, scope, openId }: {
+  section: QqWorkbenchSettingsSection;
+  appId: string;
+  scope: WorkbenchConversation['scope'];
+  openId: string;
+}): ReactNode {
+  const [opened, setOpened] = useState(false);
+  const [props] = useState(() => extensionSettingsProps(section.id, { appId, scope, openId }));
+  return h('details', {
+    className: 'imqw-settings-group imqw-extension-settings',
+    onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => { if (event.currentTarget.open) setOpened(true); },
+  },
+    h('summary', null, h(IconChevronDownOutlineRegular, { size: 14 }), h('strong', null, section.title)),
+    opened ? h('div', { className: 'imqw-settings-group-body' }, h(section.component, props)) : null,
+  );
 }
 
 const groupPermissionGuide = [

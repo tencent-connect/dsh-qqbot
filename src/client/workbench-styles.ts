@@ -238,6 +238,7 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
   gap: 12px;
 }
 .imqw-settings .imqw-form { min-height: 100%; gap: 0; }
+.imqw-settings:has(> .imqw-extension-settings) .imqw-form { min-height: 0; }
 .imqw-settings-group, .imqw-defaults-section { border-top: 1px solid var(--dsw-alias-border-l2); }
 .imqw-settings-group > summary {
   display: flex;

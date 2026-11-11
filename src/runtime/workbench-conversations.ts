@@ -16,7 +16,7 @@ import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { workbenchImage } from './workbench-image.ts';
-import type { QqbotService, QqConversationRef } from '../shared/workbench-extension.ts';
+import type { QqbotTimelineService, QqConversationRef } from '../shared/workbench-extension.ts';
 import type { ManualAttachment } from '../transport/manual-send.ts';
 
 interface PeerSettings {
@@ -29,7 +29,7 @@ interface PeerSettings {
 const defaults: Readonly<PeerSettings> = Object.freeze({ alias: '', receiving: true, recording: true, revision: 0 });
 export const peerKey = (appId: string, scope: ChatScope, openId: string): string => `qqbot:${appId}:${scope}:${openId}`;
 
-function validOpenId(value: unknown): value is string {
+export function validOpenId(value: unknown): value is string {
   return typeof value === 'string' && /^\S{1,1024}$/.test(value) && !/[\x00-\x1f\x7f]/.test(value);
 }
 function parsePeer(appId: string, key: string): { scope: ChatScope; openId: string } | undefined {
@@ -246,7 +246,7 @@ async function parsePatch(request: Request): Promise<WorkbenchConversationPatch>
   };
 }
 
-export function workbenchTimelineService(robots: Pick<RuntimeReader, 'conversationAccount' | 'timeline'>): QqbotService {
+export function workbenchTimelineService(robots: Pick<RuntimeReader, 'conversationAccount' | 'timeline'>): QqbotTimelineService {
   return {
     timelinePage({ appId, scope, openId }, before) {
       if (!robots.conversationAccount(appId)) return undefined;
