@@ -24,6 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
+- **`/compact` no longer reports "compaction unavailable"**: preset-scoped services are now re-probed on every call, so a plugin that starts before the preset registry no longer degrades permanently.
 
 ## [0.5.5] - 2026-10-30
 
