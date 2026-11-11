@@ -1,0 +1,20 @@
+{
+  "name": "@tencent-connect/dsh-qqbot-workbench-history",
+  "version": "0.5.5",
+  "type": "module",
+  "license": "MIT",
+  "description": "Optional QQ message history panel for the DSH QQBot workbench",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "cordis.patch.yml", "lib/client.js", "lib/client.js.map"],
+  "peerDependencies": {
+    "@tencent-connect/dsh-qqbot": ">=0.5.5"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["@tencent-connect/dsh-qqbot"] }
+  }
+}

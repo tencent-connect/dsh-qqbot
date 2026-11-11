@@ -14,6 +14,10 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./workbench-extension": {
+      "types": "./lib/shared/workbench-extension.d.ts",
+      "default": "./lib/shared/workbench-extension.js"
+    },
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },

@@ -33,27 +33,36 @@ const BASELINE_EXTERNALS = [
 const isBaseline = (specifier: string): boolean =>
   BASELINE_EXTERNALS.some((name) => specifier === name || specifier.startsWith(`${name}/`));
 
-export default defineConfig({
-  name: `${ID}/client`,
-  entry: { client: 'src/client/index.ts' },
-  outDir: 'lib',
-  format: 'cjs',
-  platform: 'browser',
-  target: 'es2022',
-  dts: false,
-  clean: false,
-  sourcemap: true,
-  deps: {
-    // 平台种子表内的说明符保持外部引用（经注入 require 解析）
-    neverBundle: isBaseline,
-    // 其余依赖整体内联（本客户端无第三方依赖，此为兜底保护）
-    alwaysBundle: (specifier: string) => !isBaseline(specifier),
-  },
-  outputOptions: {
-    entryFileNames: 'client.js',
-    banner: (chunk) =>
-      `window.__ModuleLoader__.load({ id: ${JSON.stringify(ID)},${chunk.isEntry ? '' : ` chunk: ${JSON.stringify(chunk.fileName)},`} factory: (require) => {`,
-    intro: 'var module = { exports: {} }; var exports = module.exports;',
-    footer: 'return module.exports; } });',
-  },
-});
+function clientConfig(id: string, entry: string, outDir: string) {
+  return defineConfig({
+    name: `${id}/client`,
+    entry: { client: entry },
+    outDir,
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    dts: false,
+    clean: false,
+    sourcemap: true,
+    deps: {
+      // 平台种子表内的说明符保持外部引用（经注入 require 解析）
+      neverBundle: isBaseline,
+      // 其余依赖整体内联（本客户端无第三方依赖，此为兜底保护）
+      alwaysBundle: (specifier: string) => !isBaseline(specifier),
+    },
+    outputOptions: {
+      entryFileNames: 'client.js',
+      banner: (chunk) =>
+        `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)},${chunk.isEntry ? '' : ` chunk: ${JSON.stringify(chunk.fileName)},`} factory: (require) => {`,
+      intro: 'var module = { exports: {} }; var exports = module.exports;',
+      footer: 'return module.exports; } });',
+    },
+  });
+}
+
+const historyId = (JSON.parse(readFileSync(new URL('./plugins/workbench-history/package.json', import.meta.url), 'utf8')) as { name: string }).name;
+
+export default [
+  clientConfig(ID, 'src/client/index.ts', 'lib'),
+  clientConfig(historyId, 'src/client/history-extension.ts', 'plugins/workbench-history/lib'),
+];

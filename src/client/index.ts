@@ -18,6 +18,7 @@ import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 import { QQWorkbench } from './workbench.ts';
+import { WorkbenchExtensions } from './workbench-extensions.ts';
 import { QqAnswerAction } from './workbench-answer.ts';
 import type { AgentFormSource } from './workbench-agent-form.ts';
 
@@ -116,6 +117,8 @@ function OpenQqBotAction({ subject, packageName, onOpen }: {
 }
 
 export function apply(ctx: Context): void {
+  const extensions = new WorkbenchExtensions();
+  ctx.provide('qqbotWorkbench', extensions);
   // 面板样式全局安装：插件详情按钮等面板外渲染的元素也需要可见
   installPanelStyles();
   const tabs = (ctx as unknown as { sidebarRightTabs?: TabRegistryLike }).sidebarRightTabs;
@@ -264,6 +267,7 @@ export function apply(ctx: Context): void {
           () => list?.getSnapshot().archivedSessionIds ?? emptyArchived,
         );
         return createElement(QQWorkbench, {
+          extensions,
           primarySettings: createElement(QQBotSettingsSection),
           primaryAccountSettings: createElement<{ accountOnly?: boolean }>(QQBotSettingsSection, { accountOnly: true }),
           agentSource, archivedSessionIds,

@@ -1,4 +1,4 @@
-import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode } from 'react';
 import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
@@ -11,7 +11,8 @@ import {
 import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
-import { QqTimelineView } from './workbench-timeline.ts';
+import type { WorkbenchExtensions } from './workbench-extensions.ts';
+import type { QqWorkbenchView } from '../shared/workbench-extension.ts';
 import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
@@ -118,12 +119,14 @@ interface SessionNavigation {
 }
 
 export interface QQWorkbenchProps extends SessionNavigation {
+  extensions: WorkbenchExtensions;
   primarySettings: ReactNode;
   primaryAccountSettings: ReactNode;
   agentSource?: AgentFormSource;
 }
 
-export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+export function QQWorkbench({ extensions, primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+  const views = useSyncExternalStore(extensions.subscribe, extensions.getViews);
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
   const [robotSettings, setRobotSettings] = useState(false);
   const [robotPage, setRobotPage] = useState('account');
@@ -173,7 +176,7 @@ export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSour
                 className: 'imqw-conversation-grid', hidden: showRobotSettings,
                 'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
               }, h(RobotConversations, {
-                key: robot.appId, robot, agentSource, settingsOpen: nav.peerSettingsOpen,
+                key: robot.appId, robot, agentSource, views, settingsOpen: nav.peerSettingsOpen,
                 settingsVisible: nav.peerSettingsOpen && (!layout.singlePage || nav.smallPage === 'settings'),
                 singlePage: layout.singlePage, ...sessionNavigation,
                 treeDivider: layout.divider('tree'), settingsDivider: layout.divider('settings'),
@@ -210,6 +213,7 @@ export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSour
 }
 
 interface RobotConversationsProps extends SessionNavigation {
+  views: readonly QqWorkbenchView[];
   robot: WorkbenchRobot;
   agentSource?: AgentFormSource;
   settingsOpen: boolean;
@@ -221,8 +225,13 @@ interface RobotConversationsProps extends SessionNavigation {
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, agentSource, views, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
+  const [openViewId, setOpenViewId] = useState<string>();
+  const activeView = views.find(view => view.id === openViewId);
+  useEffect(() => {
+    if (!activeView) setOpenViewId(undefined);
+  }, [activeView]);
   const [peers, setPeers] = useState<WorkbenchConversation[] | null>(null);
   const [selection, setSelection] = useState(() => peerSelections.get(appId));
   const [query, setQuery] = useState('');
@@ -493,6 +502,11 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
           h('h2', { title: peer && peerName(peer) }, peer ? peerName(peer) : accountName(robot)),
           h('p', { className: 'imqw-muted' }, peer ? `${peer.scope === 'group' ? '群聊' : '私聊'} · ${label}` : '请从会话列表选择对话')),
         h('div', { className: 'imqw-actions' },
+          peer ? views.map(view => h(Button, {
+            key: view.id, type: 'button', size: 'sm', variant: 'outline',
+            'aria-expanded': activeView === view,
+            onClick: () => setOpenViewId(activeView === view ? undefined : view.id),
+          }, `${activeView === view ? '收起' : '查看'}${view.title}`)) : null,
           currentArchived
             ? h(Button, { size: 'sm', variant: 'outline', disabled: !restoreSession || !!busyKey || !!restoring,
               onClick: () => { void restoreCurrent(); } }, restoring === current?.id ? '恢复中…' : '恢复原会话')
@@ -520,7 +534,7 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
         workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd),
         current.preset,
       ].filter(Boolean).join(' · ')) : null,
-      peer ? h(QqTimelineView, { key: peerKey, appId, peer, robotName: accountName(robot), openSession: openSession && openNative,
+      peer && activeView ? h(activeView.component, { key: `${activeView.id}:${peerKey}`, appId, peer, robotName: accountName(robot), openSession: openSession && openNative,
         disabledReason: !robot.enabled || robot.state !== 'connected' ? '机器人未连接'
           : !peer.admitted ? '此会话未获准接入' : !peer.receiving ? '此会话已暂停' : undefined }) : null,
     ),

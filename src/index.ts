@@ -9,7 +9,7 @@ import { ensureVisionInputModal, registerDescribeImageTool } from './media/visio
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
 import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
-import { registerWorkbenchConversations, registerWorkbenchSend } from './runtime/workbench-conversations.ts';
+import { registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './runtime/workbench-conversations.ts';
 import { registerWorkbenchAnswer } from './runtime/workbench-answer.ts';
 import type { Logger } from './types.ts';
 
@@ -26,11 +26,13 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const profileDir = getProfileDir() ?? undefined;
   const store = profileDir ? new RobotConfigStore(join(profileDir, 'qqbot-robots.json')) : undefined;
   const robots = new RobotRuntimes(ctx, agents, logger, store);
+  const timeline = workbenchTimelineService(robots);
+  ctx.provide('qqbot', timeline);
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
   registerWorkbenchDefaults(ctx, robots);
   registerWorkbenchGroupGuideImages(ctx);
   registerWorkbenchTools(ctx);
-  registerWorkbenchConversations(ctx, robots, logger);
+  registerWorkbenchConversations(ctx, robots, logger, timeline);
   registerWorkbenchSend(ctx, robots);
   registerWorkbenchAnswer(ctx, robots);
 
