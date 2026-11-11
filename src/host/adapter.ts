@@ -4,6 +4,9 @@
  * 宿主新旧版本 API 形态不同（本插件踩过的漂移：events → snapshotEvents、
  * presets.serviceFor 实例方法 → serviceForAgent 模块函数、./fork 子路径导出）。
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
+ *
+ * 探测时机也是漂移点：服务可能在插件 apply 之后才 provide（preset 注册表与
+ * 本插件并行启动），所以除启动契约摘要外，一律在调用时重探。
  */
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -17,7 +20,13 @@ export interface AdapterLogger {
 export interface HostAdapter {
   /** 会话事件读取：新宿主 snapshotEvents()，旧宿主 events getter */
   sessionEvents(session: { snapshotEvents?: () => readonly unknown[]; events?: readonly unknown[] }): readonly unknown[];
-  /** preset 作用域服务解析：旧宿主实例方法 / 新宿主模块函数 */
+  /**
+   * preset 作用域服务解析：宿主实例方法 / 模块函数兜底。
+   *
+   * `agentPresets` 可能在本插件 apply 之后才 provide（插件与 preset 注册表并行启动，
+   * 本插件通常还排在注册表之后），所以每次调用都重新探测服务，不能把结果冻结在
+   * 启动瞬间——否则 `/compact` 这类唯一的调用点会永久降级。
+   */
   serviceFor(agent: { ctx: unknown }, name: string): Promise<unknown | undefined>;
   /** 全局服务读取（未注册返回 undefined，不抛） */
   globalService(name: string): unknown | undefined;
@@ -93,6 +102,23 @@ function workspaceRegistry(ctx: Context): WorkspaceRegistryLike | undefined {
   return typeof registry?.create === 'function' ? registry : undefined;
 }
 
+/** agentPresets 的最小契约（只用到 preset 作用域服务解析） */
+interface PresetsLike {
+  serviceFor(agent: unknown, name: string): unknown;
+}
+
+/**
+ * 取出可用的 agentPresets；形态不匹配返回 undefined。
+ *
+ * 必须在**每次调用时**重新探测：preset 注册表与本插件在启动期并行加载，本插件
+ * 的 apply 时刻注册表往往还没 provide。冻结启动结果会让 preset 作用域服务
+ * 永久不可见（唯一消费者 `/compact` 因此总是报「压缩能力不可用」）。
+ */
+function presetsService(ctx: Context): PresetsLike | undefined {
+  const presets = safeGet(ctx, 'agentPresets') as PresetsLike | undefined;
+  return typeof presets?.serviceFor === 'function' ? presets : undefined;
+}
+
 /** 模块级函数的动态 import 结果缓存（spec 变量路径绕开本地依赖类型检查） */
 const moduleCache = new Map<string, Record<string, unknown> | undefined>();
 
@@ -123,16 +149,11 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
     ? 'workspaceRegistry.create(可用)'
     : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
 
-  let resolveFn: ((agent: { ctx: unknown }, name: string) => unknown | undefined) | undefined;
-  const presets = safeGet(ctx, 'agentPresets') as
-    | { serviceFor?: (agent: unknown, name: string) => unknown }
-    | undefined;
-  if (presets && typeof presets.serviceFor === 'function') {
-    resolveFn = (agent, name) => presets.serviceFor!(agent, name);
-    capabilities.push('serviceFor(presets实例方法)');
-  } else {
-    capabilities.push('serviceFor(serviceForAgent动态)');
-  }
+  // 启动快照只用于契约摘要：实际解析在 serviceFor 内每次重新探测，避免把
+  // 「注册表还没 provide」这个启动瞬间的形态固化成永久降级。
+  capabilities.push(presetsService(ctx)
+    ? 'serviceFor(presets实例方法)'
+    : 'serviceFor(启动未就绪，调用时重探)');
 
   return {
     capabilities,
@@ -144,9 +165,11 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
     },
 
     async serviceFor(agent, name) {
-      if (resolveFn) {
+      // 注册表可能在 apply 之后才 provide：每次调用重新探测，命中即用
+      const presets = presetsService(ctx);
+      if (presets) {
         try {
-          const found = resolveFn(agent, name);
+          const found = presets.serviceFor(agent, name);
           if (found) return found;
         } catch { /* 宿主实现差异，走模块函数 */ }
       }
