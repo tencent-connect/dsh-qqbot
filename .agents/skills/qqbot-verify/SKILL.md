@@ -14,6 +14,7 @@ description: Verify dsh-qqbot changes with Vitest, QQ protocol fixtures, a TLA+ 
 - 配对码或名单撤销：运行 `pnpm verify:formal` 和 `pnpm test src/runtime/account-service.test.ts src/runtime/pairing-service.test.ts src/runtime/pairing-state.test.ts`。核对配对状态重载和只回滚配对文件的结果，见[配对模型](../../../tests/formal/qq-pairing/README.md)。
 - Session 换绑或网关重载：运行 `pnpm verify:formal` 和 `pnpm test src/session/session-manager.test.ts src/gateway/bootstrap.test.ts`。用可控的宿主回调重放 `/new`、重载与保存失败，分别读取内存和落盘的绑定，见[Session 切换模型](../../../tests/formal/qq-session-switch/README.md)。
 - 流式发送与静态回退：运行 `pnpm verify:formal` 和 `pnpm test src/transport/qq-delivery.test.ts src/transport/delivery-safety.test.ts src/transport/timeline-observer.test.ts`。用真实 SDK 和可控 HTTP 回执核对首帧、重试和静态 POST，见[流式回退模型](../../../tests/formal/qq-stream-fallback/README.md)。
+- 审批与提问：运行 `pnpm verify:formal` 和 `pnpm test src/features/approval-channel.test.ts src/features/question-channel.test.ts src/session/session-manager.test.ts`。暂停发卡，取消或替换请求后再恢复回执，检查旧按钮与宿主结果，见[审批与提问模型](../../../tests/formal/qq-interaction-lifecycle/README.md)。
 - 夹具或启动器：运行 `node scripts/verify-qqbot.mjs`，验证本地 QQ HTTP/WS 契约、配置约束与进程清理。
 - 命令、配置或宿主接口变化：运行指南中的隔离 Host 测试；先检查模型目录中的实际 provider/model，默认名称存在不代表 provider 已注册。
 - 生成路径：显式启用 `--allow-model-requests`。只有 primary 模型可生成，secondary 仅用于切换。报告实际 request/header 的模型及推理等级。运行中取消等不在矩阵内，按改动另验。

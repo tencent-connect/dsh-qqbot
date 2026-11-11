@@ -10,6 +10,7 @@ const deliveryDir = join(formalDir, 'qq-delivery');
 const pairingDir = join(formalDir, 'qq-pairing');
 const sessionDir = join(formalDir, 'qq-session-switch');
 const streamDir = join(formalDir, 'qq-stream-fallback');
+const interactionDir = join(formalDir, 'qq-interaction-lifecycle');
 const jarSha256 = '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88';
 const usage = 'Usage: TLA2TOOLS=/path/to/tla2tools.jar pnpm verify:formal [--ledger-loss]\n'
   + 'Requires the TLC 1.7.4 release JAR and Java on PATH (or set JAVA). See TESTING.md.';
@@ -56,6 +57,7 @@ function main(args) {
     const pairing = { cwd: pairingDir, module: 'QqPairing' };
     const session = { cwd: sessionDir, module: 'QqSessionSwitch' };
     const stream = { cwd: streamDir, module: 'QqStreamFallback' };
+    const interaction = { cwd: interactionDir, module: 'QqInteractionLifecycle' };
     runTlc(jar, { ...delivery, config: 'normal.cfg', metadir: join(dir, 'delivery-normal') });
     runTlc(jar, {
       ...delivery, config: 'no-post-check.cfg', metadir: join(dir, 'no-post-check'),
@@ -85,6 +87,14 @@ function main(args) {
         ...stream, config: `${name}.cfg`, metadir: join(dir, name),
         expectedInvariant: 'AtMostOneReply',
       });
+    }
+    runTlc(jar, { ...interaction, config: 'normal.cfg', metadir: join(dir, 'interaction-normal') });
+    for (const [name, expectedInvariant] of [
+      ['unchecked-receipt', 'CurrentIsLive'],
+      ['reused-token', 'OnlyCurrentCardAnswersOnce'],
+      ['unchecked-submission', 'WaitingHasSentCard'],
+    ]) {
+      runTlc(jar, { ...interaction, config: `${name}.cfg`, metadir: join(dir, name), expectedInvariant });
     }
     if (replayLedgerLoss) {
       const replay = spawnSync(process.execPath, [join(deliveryDir, 'replay-ledger-loss.mjs')], {
