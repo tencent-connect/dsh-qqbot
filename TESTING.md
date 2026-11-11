@@ -28,7 +28,7 @@ pnpm test src/transport/qq-delivery.test.ts src/transport/timeline-observer.test
 pnpm test src/features/approval-channel.test.ts src/features/question-channel.test.ts
 ```
 
-第一条运行手动发送、配对撤权、Session 切换、流式回退以及审批与提问的模型及负对照。后续命令用插件代码回放反例。流式回执超时测试使用真实 QQ SDK 和本地 HTTP 服务，审批与提问使用可控的发卡 Promise 重放取消和晚到回执。当前仓库未接入此 CI 步骤。
+第一条运行手动发送、配对撤权、Session 切换、流式回退、审批与提问以及入站归属和出站准入的模型及负对照。后续命令用插件代码回放反例。流式回执超时、撤权和 HTTP 重定向使用真实 QQ SDK 和本地 HTTP 服务，审批与提问使用可控的发卡 Promise 重放取消和晚到回执。当前仓库未接入此 CI 步骤。
 
 添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
 
