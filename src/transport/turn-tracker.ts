@@ -41,6 +41,7 @@ export interface TurnTrackerManagerLike {
 }
 
 export interface TurnTrackerOptions {
+  appId: string;
   externalTurns: ExternalTurnDelivery;
   allowed?: (target: ReplyTarget) => boolean;
 }
@@ -89,9 +90,14 @@ export class TurnTracker implements DeliveryTargetResolver {
     if (turn === undefined) return false;
     const current = this.turns.get(sessionId);
     if (current?.state.turn === turn) return false;
-    if (this.addressOf(sessionId) === undefined) return false;
-    if (current !== undefined) this.release(current);
-    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set(), target: { ...this.addressOf(sessionId)! }, external: false, invalid: false });
+    if (this.verifiesSources && current && current.state.turn > turn) return false;
+    const address = this.addressOf(sessionId);
+    if (!address) return false;
+    if (current) {
+      current.invalid = true;
+      this.release(current);
+    }
+    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set(), target: { ...address }, external: false, invalid: false });
     return true;
   }
 
@@ -100,18 +106,21 @@ export class TurnTracker implements DeliveryTargetResolver {
     const tracked = this.turns.get(sessionId);
     if (tracked === undefined) return;
     const { messageId, source } = readUserMessage(data);
-    const receipt = messageId ? this.inputs.claim(messageId, sessionId, data.content ?? (data.message as { content?: unknown } | undefined)?.content, tracked.state.turn) : undefined;
+    const receipt = messageId ? this.inputs.claim(messageId, sessionId, data.content ?? (data.message as { content?: unknown } | undefined)?.content,
+      tracked.state.turn, tracked.target) : undefined;
     if (!receipt && messageId && this.inputs.ledger?.knowsInput(messageId)) tracked.invalid = true;
     const qqOwned = this.inputs.ledger ? receipt !== undefined : this.inputs.has(messageId);
     if (receipt) {
       if (tracked.inputs.size > 0 && !tracked.inputs.has(receipt.messageId)) tracked.invalid = true;
       tracked.target = { ...receipt.target };
     }
-    if (classifyTurnInput(source, qqOwned) === 'external') tracked.external = true;
+    const origin = classifyTurnInput(source, qqOwned);
+    if (origin === 'external') tracked.external = true;
+    if (receipt && origin !== 'qq') tracked.invalid = true;
     if (qqOwned && messageId !== undefined) tracked.inputs.add(messageId);
 
     const before = deliveryMode(tracked.state);
-    noteTurnInput(tracked.state, classifyTurnInput(source, qqOwned));
+    noteTurnInput(tracked.state, origin);
     if (before === 'proactive' || deliveryMode(tracked.state) !== 'proactive') return;
 
     const plan = this.planFor(sessionId);
@@ -160,9 +169,13 @@ export class TurnTracker implements DeliveryTargetResolver {
         : { scope: tracked.target.scope, targetId: tracked.target.targetId, forceProactive: true };
       if (tracked.external && !this.allowsExternal(target)) return undefined;
       const allowed = () => !tracked.invalid && !(tracked.inputs.size > 0 && tracked.external)
+        && this.matchesBinding(sessionId, target)
         && (this.options.allowed?.(target) ?? true);
       if (!allowed()) return undefined;
-      return { target: bindDelivery(target, { key: deliveryKey(sessionId, tracked.state.turn), sessionId, allowed }), proactive: tracked.state.origin !== 'qq' };
+      return {
+        target: bindDelivery(target, { appId: this.options.appId, key: deliveryKey(sessionId, tracked.state.turn), sessionId, allowed }),
+        proactive: tracked.state.origin !== 'qq',
+      };
     }
     if (tracked === undefined || deliveryMode(tracked.state) === 'passive') {
       return { target: base, proactive: false };
@@ -191,9 +204,15 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 
   private addressOf(sessionId: string): ReplyTarget | undefined {
-    const record = this.manager.findBySessionId(sessionId);
-    if (record !== undefined) return record.replyTarget;
-    return this.manager.deliveryAddress?.(sessionId);
+    return this.manager.deliveryAddress
+      ? this.manager.deliveryAddress(sessionId)
+      : this.manager.findBySessionId(sessionId)?.replyTarget;
+  }
+
+  private matchesBinding(sessionId: string, target: ReplyTarget): boolean {
+    if (!this.manager.deliveryAddress) return true;
+    const current = this.manager.deliveryAddress(sessionId);
+    return current?.scope === target.scope && current.targetId === target.targetId;
   }
 
   private release(tracked: TrackedTurn): void {

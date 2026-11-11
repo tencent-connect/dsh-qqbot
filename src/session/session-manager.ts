@@ -595,6 +595,14 @@ export class SessionManager {
     }
   }
 
+  private assertBindingOwner(key: string, sessionId: string, allowUnbound = false): void {
+    const current = this.modelResolver.getSessionId(key);
+    if ((current !== sessionId && !(allowUnbound && current === undefined))
+      || this.modelResolver.hasForeignCurrentBinding(key, sessionId)) {
+      throw new SessionSwitchConflict('QQ 会话绑定存在冲突，请为该对话新建 Session。');
+    }
+  }
+
   /** 获取或恢复或创建会话（get → resume → create）；同 key 并发合并为一次 */
   async getOrCreate(
     scope: ChatScope,
@@ -611,6 +619,7 @@ export class SessionManager {
     this.assertNotArchived(existing?.sessionId ?? this.currentSessionId(key));
 
     if (existing) {
+      this.assertBindingOwner(key, existing.sessionId);
       existing.replyTarget = replyTarget;
       existing.senderId ??= senderId;
       existing.lastActivity = Date.now();
@@ -622,6 +631,7 @@ export class SessionManager {
     if (pending) {
       const shared = await pending;
       this.assertActive();
+      this.assertBindingOwner(key, shared.sessionId);
       this.assertNotArchived(shared.sessionId);
       shared.replyTarget = replyTarget;
       shared.lastActivity = Date.now();
@@ -633,6 +643,7 @@ export class SessionManager {
     try {
       const record = await task;
       this.assertActive();
+      this.assertBindingOwner(key, record.sessionId);
       this.assertNotArchived(record.sessionId);
       return record;
     } finally {
@@ -673,11 +684,14 @@ export class SessionManager {
     const route = this.configuredRoute(key, settings);
     // prefs 命中 = 已知存量会话；miss 时取 0.5.x 派生 id 仅作存量探测候选，不用于新建
     let sessionId = SessionId(binding ?? legacyDerivedSessionId(key));
+    this.assertBindingOwner(key, sessionId, binding === undefined);
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
     let handle: DshAgentHandle | undefined;
     const header = await this.host.sessionHeader(sessionId);
+    this.assertActive();
+    this.assertBindingOwner(key, sessionId, binding === undefined);
     let agentPreset = header?.agentPreset;
     let cwd = header?.cwd;
 
@@ -688,6 +702,8 @@ export class SessionManager {
     } else {
       const presetId = header ? (header.agentPreset ?? this.config.preset) : this.getEffectivePresetByKey(key);
       const composed = await this.composePreset(presetId);
+      this.assertActive();
+      this.assertBindingOwner(key, sessionId, binding === undefined);
       agentPreset = composed.agentPreset;
       try {
         const resumeRoute = this.modelResolver.getResumeRoute(key);
@@ -707,6 +723,7 @@ export class SessionManager {
         this.assertActive();
         if (this.modelResolver.getSessionId(key) !== binding) return undefined;
         if (binding === undefined) sessionId = SessionId(mintSessionId());
+        this.assertBindingOwner(key, sessionId, binding === undefined);
         const created = await this.createFresh(key, sessionId, settings);
         agentPreset = created.agentPreset;
         cwd = created.cwd;
@@ -718,12 +735,14 @@ export class SessionManager {
 
     // The host and tool-policy setup above can both finish after a reset or reload.
     try {
+      this.assertBindingOwner(key, sessionId, binding === undefined);
       await this.peerSettings?.constrain?.(agent, key);
       this.assertActive();
       if (this.modelResolver.getSessionId(key) !== binding) {
         await handle?.dispose().catch(() => {});
         return undefined;
       }
+      this.assertBindingOwner(key, sessionId, binding === undefined);
       this.assertNotArchived(sessionId);
       this.persistSessionId(key, sessionId);
     } catch (error) {
@@ -818,10 +837,9 @@ export class SessionManager {
   }
 
   findBySessionId(sessionId: string): SessionRecord | undefined {
-    for (const record of this.sessions.values()) {
-      if (record.sessionId === sessionId) return record;
-    }
-    return undefined;
+    const key = this.modelResolver.findUniqueCurrentSessionKey(sessionId);
+    const record = key && this.sessions.get(key);
+    return record && record.sessionId === sessionId ? record : undefined;
   }
 
   /**
@@ -829,14 +847,13 @@ export class SessionManager {
    * 内存里有记录时沿用它的 replyTarget（含 msgId）；否则按 prefs 的 sessionId 反查对端。
    */
   deliveryAddress(sessionId: string): ReplyTarget | undefined {
-    const existing = this.findBySessionId(sessionId);
-    if (existing) return existing.replyTarget;
-
-    const key = this.modelResolver.findSessionKey(sessionId);
-    if (key === undefined || this.sessions.has(key)) return undefined;
+    const key = this.modelResolver.findUniqueCurrentSessionKey(sessionId);
+    if (key === undefined) return undefined;
     const parsed = this.parseSessionKey(key);
     if (parsed === undefined) return undefined;
-    return { scope: parsed.scope, targetId: parsed.peerId };
+    const existing = this.sessions.get(key);
+    if (existing && existing.sessionId !== sessionId) return undefined;
+    return { ...existing?.replyTarget, scope: parsed.scope, targetId: parsed.peerId };
   }
 
   /** `qqbot:${appId}:${scope}:${peerId}` → scope + peer。只认本机器人的 key。 */

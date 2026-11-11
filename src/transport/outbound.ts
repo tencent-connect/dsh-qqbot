@@ -380,7 +380,7 @@ export function createTurnTracker(
   return new TurnTracker(
     manager,
     inputs,
-    { externalTurns: config.proactiveDelivery?.externalTurns ?? 'c2c', allowed },
+    { appId: config.appId, externalTurns: config.proactiveDelivery?.externalTurns ?? 'c2c', allowed },
     logger,
   );
 }

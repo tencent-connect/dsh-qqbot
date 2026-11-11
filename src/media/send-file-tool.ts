@@ -14,7 +14,7 @@ import type { SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from './send-media.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
-import { bindDelivery } from '../transport/delivery-context.ts';
+import { bindDelivery, deliveryTrace } from '../transport/delivery-context.ts';
 import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
@@ -151,11 +151,16 @@ export function registerSendFileTool(
       }
       const destination = current ?? explicit;
       if (!destination) throw new Error('qqbot_send_file: 无法确定发送目标');
+      const originatingTurn = deliveryTrace(destination)?.streamKey;
+      const stillOwnsTurn = () => {
+        const latest = targets.targetFor(agentId);
+        return latest !== undefined && samePeer(latest, destination) && deliveryTrace(latest)?.streamKey === originatingTurn;
+      };
       const allowed = () => runtime.active() && !exec.signal.aborted && allowTarget(destination)
-        && (owner === undefined ? routing.defaultAppId() === appId : samePeer(targets.targetFor(agentId), destination));
+        && (owner === undefined ? routing.defaultAppId() === appId : stillOwnsTurn());
       if (!allowed()) throw new Error('qqbot_send_file: 当前来源或目标不允许发送到 QQ');
       const replyTarget = bindDelivery(destination, {
-        key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,
+        appId: config.appId, key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,
       });
 
       const cwd = resolveAgentCwd(config.cwd);

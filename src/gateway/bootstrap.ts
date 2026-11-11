@@ -26,6 +26,7 @@ import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { DeliveryLedger, deliveryKey } from '../transport/delivery-ledger.ts';
 import { guardSender, guardMedia } from '../transport/delivery-context.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from '../transport/qq-delivery.ts';
+import { guardConversationPosts } from '../transport/qq-wire-admission.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { ManualQqSender, createManualTransport } from '../transport/manual-send.ts';
 import { resolveReplyTarget } from '../transport/reply-target.ts';
@@ -120,6 +121,7 @@ export function bootstrapGateway(
     userAgent,
     logger,
   } as ConstructorParameters<typeof QQBot>[0]);
+  const sendPairingReply = guardConversationPosts(bot, baseUrl, userAgent, allowTarget);
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
@@ -159,7 +161,12 @@ export function bootstrapGateway(
       senderId: message.senderId, senderName: messageSenderName(message),
       attachments: message.attachments?.length || undefined, quote,
     }, true);
-  }), reportInbound);
+  }), reportInbound, (messageContext, text) => {
+    const target = messageContext.replyTarget;
+    const wasAdmitted = allowTarget(target);
+    return sendPairingReply(target, text, () => !messageContext.signal.aborted
+      && isActive() && receiving?.(target) !== false && (!wasAdmitted || allowTarget(target)));
+  });
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {

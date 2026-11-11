@@ -138,6 +138,7 @@ function createManagerWithCtx(
   registry: Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>,
   ctx: Context,
   logger: Logger = createLogger(),
+  prefs?: InstanceType<typeof PrefsStore>,
 ) {
   const config = ConfigSchema({
     appId: APP_ID,
@@ -147,7 +148,7 @@ function createManagerWithCtx(
     cwd: join(env.home, 'workspace'),
     sessionIdleTimeout: 0,
   } as ImQQBotConfig);
-  const manager = new SessionManager(ctx, registry as DshAgentRegistry, config, logger);
+  const manager = new SessionManager(ctx, registry as DshAgentRegistry, config, logger, prefs);
   managers.push(manager);
   return manager;
 }
@@ -224,6 +225,41 @@ afterEach(async () => {
 });
 
 describe('deliveryAddress', () => {
+  it('rejects a persisted Session shared by two robots at the same OpenID', async () => {
+    const stored = 'session-shared-by-mistake';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, stored);
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, stored);
+    const { registry } = createRegistry(async () => fakeHandle(stored));
+    const manager = createManager(registry);
+    expect(manager.deliveryAddress(stored)).toBeUndefined();
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+    expect(registry.get).not.toHaveBeenCalled();
+    expect(registry.resume).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a cached Session after another robot acquires a conflicting binding', async () => {
+    const prefs = new PrefsStore();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, onDiskCtx(LEGACY_ID), createLogger(), prefs);
+    const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, original.sessionId);
+
+    expect(manager.deliveryAddress(original.sessionId)).toBeUndefined();
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+  });
+
+  it('does not probe a legacy Session ID that is already owned by another robot', async () => {
+    const prefs = new PrefsStore();
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, LEGACY_ID);
+    const { registry } = createRegistry(async () => fakeHandle(LEGACY_ID));
+    const manager = createManagerWithCtx(registry, onDiskCtx(LEGACY_ID), createLogger(), prefs);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+    expect(registry.get).not.toHaveBeenCalled();
+    expect(registry.resume).not.toHaveBeenCalled();
+  });
+
   it('内存里没有会话时，只按 prefs 返回 QQ 地址，不唤醒 agent', () => {
     const sessionId = 'session-live';
     new PrefsStore().setSessionId(KEY, sessionId);

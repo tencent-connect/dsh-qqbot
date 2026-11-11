@@ -92,12 +92,20 @@ export class PrefsStore {
   }
 
   findUniqueCurrentSessionKey(sessionId: string): string | undefined {
-    const indexed = this.findSessionKey(sessionId);
-    if (!indexed) return undefined;
+    let owner: string | undefined;
     for (const [key, id] of this.sessionIds) {
-      if (id === sessionId && key !== indexed) return undefined;
+      if (id !== sessionId) continue;
+      if (owner !== undefined) return undefined;
+      owner = key;
     }
-    return indexed;
+    return owner;
+  }
+
+  hasForeignCurrentBinding(sessionKey: string, sessionId: string): boolean {
+    for (const [key, id] of this.sessionIds) {
+      if (id === sessionId && key !== sessionKey) return true;
+    }
+    return false;
   }
 
   findKnownSessionKey(sessionId: string): string | undefined {

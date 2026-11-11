@@ -29,11 +29,13 @@ export function sendDeliveryMarkdown(
   opts?: { keyboard?: InlineKeyboard },
   observe?: TimelineRequest,
 ) {
+  const credentials = bot.getCredentials();
+  assertDeliveryAllowed(target, credentials.appId);
   const reply = resolveReplyTarget(target, replyIds, limiter, true);
-  const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => assertDeliveryAllowed(target));
+  const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => assertDeliveryAllowed(target, credentials.appId));
   const api = new MessageApi(client, bot.tokenManager, { markdownSupport: true });
   api.onMessageSent((ref, meta) => bot.messageApi.notifyMessageSent(ref, meta));
-  return api.sendRaw(reply.scope, reply.targetId, bot.getCredentials(), {
+  return api.sendRaw(reply.scope, reply.targetId, credentials, {
     msg_id: reply.msgId,
     event_id: reply.eventId,
     msg_type: MsgType.MARKDOWN,
@@ -43,6 +45,8 @@ export function sendDeliveryMarkdown(
 }
 
 export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: ReplyTarget, logger: Logger, observe?: TimelineRequest): StreamSessionLike {
+  const creds = bot.getCredentials();
+  assertDeliveryAllowed(target, creds.appId);
   const { scope, targetId, msgId } = target;
   if (scope !== 'c2c' || !msgId || !replyIds.getCachedReplyIds(scope, targetId).some(id => id.kind === 'msg' && id.id === msgId)) {
     throw new StreamTargetExpired();
@@ -54,7 +58,7 @@ export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: R
   const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), () => {
     if (canceled) throw new Error('QQ stream canceled');
     if (failure) throw failure.error;
-    assertDeliveryAllowed(target);
+    assertDeliveryAllowed(target, creds.appId);
   });
   const api = new MessageApi(client, bot.tokenManager, { markdownSupport: true });
   const send = api.sendC2CStreamMessage.bind(api);
@@ -83,7 +87,7 @@ export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: R
       throw error;
     }
   };
-  const session = new StreamSession(api, { openid: targetId, msgId, creds: bot.getCredentials(), logger });
+  const session = new StreamSession(api, { openid: targetId, msgId, creds, logger });
   const throwIfFailed = () => {
     if (failure) throw failure.error;
   };
@@ -137,19 +141,21 @@ function guardUploadParts(prepared: unknown, check: () => void): void {
 export function createDeliveryMedia(bot: QQBot, replyIds: ReplyIdCache, limiter: ReplyLimiter, observe?: TimelineRequest): MediaSenderLike {
   const uploadScope = guardSdkUploads(bot);
   const send = async (target: ReplyTarget, fileType: MediaFileType, source: { localPath?: string }, fileName?: string) => {
+    const credentials = bot.getCredentials();
     let denied: { error: unknown } | undefined;
     const check = () => {
       if (denied) throw denied.error;
-      try { assertDeliveryAllowed(target); }
+      try { assertDeliveryAllowed(target, credentials.appId); }
       catch (error) { denied = { error }; throw error; }
     };
+    check();
     const upload = await uploadScope.run({ target, check }, () =>
       bot.uploadMedia({ target, fileType, ...source, fileName, srvSendMsg: false }));
     check();
     const reply = resolveReplyTarget(target, replyIds, limiter, false);
     const client = new CheckedApiClient(observe?.(target) ?? bot.apiClient.request.bind(bot.apiClient), check);
     const api = new MediaApi(client, bot.tokenManager);
-    const message = await api.sendMediaMessage(reply.scope, reply.targetId, upload.file_info, bot.getCredentials(), { msgId: reply.msgId });
+    const message = await api.sendMediaMessage(reply.scope, reply.targetId, upload.file_info, credentials, { msgId: reply.msgId });
     return { upload, message };
   };
   return {

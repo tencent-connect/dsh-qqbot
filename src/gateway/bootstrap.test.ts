@@ -1,5 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
-import { QQBot, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { MediaFileType, QQBot, runMiddlewareChain, type InteractionEvent, type MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { createServer, type RequestListener } from 'node:http';
+import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,17 +17,19 @@ import { TurnTracker } from '../transport/turn-tracker.ts';
 import type { ReplyTarget } from '../types.ts';
 import { bootstrapGateway } from './bootstrap.ts';
 
-const sandbox = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+const sandbox = vi.hoisted(() => ({ dir: undefined as string | undefined, profile: undefined as string | undefined }));
 vi.mock('../shared/dirs.ts', async original => {
   const actual = await original<typeof import('../shared/dirs.ts')>();
   return { ...actual, get PLUGIN_HOME() { return sandbox.dir ?? actual.PLUGIN_HOME; } };
 });
-vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => undefined }));
+vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => sandbox.profile }));
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   if (sandbox.dir) rmSync(sandbox.dir, { recursive: true, force: true });
   sandbox.dir = undefined;
+  sandbox.profile = undefined;
 });
 
 async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (target: ReplyTarget) => boolean) {
@@ -45,7 +49,7 @@ async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (t
   } as unknown as Context;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const on = vi.spyOn(QQBot.prototype, 'on');
-  vi.spyOn(QQBot.prototype, 'start').mockResolvedValue(undefined);
+  const start = vi.spyOn(QQBot.prototype, 'start').mockResolvedValue(undefined);
   const stop = vi.spyOn(QQBot.prototype, 'stop');
   const ack = vi.spyOn(QQBot.prototype, 'acknowledgeInteraction').mockResolvedValue(undefined);
   const dispatch = vi.spyOn(QuestionChannel.prototype, 'handleInteraction').mockReturnValue(true);
@@ -54,9 +58,10 @@ async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (t
   const runtime = bootstrapGateway(ctx, { get: vi.fn() } as unknown as DshAgentRegistry, options, logger, undefined, undefined, undefined, receiving);
   const callback = on.mock.calls.find(([event]) => event === 'interaction')?.[1] as
     ((ctx: unknown, event: InteractionEvent) => Promise<void>);
+  const message = on.mock.calls.find(([event]) => event === 'message')?.[1] as (ctx: MiddlewareContext) => Promise<void>;
 
   return {
-    stop, ack, dispatch, cache, dispose, ask, questions, runtime,
+    stop, ack, dispatch, cache, dispose, ask, questions, runtime, bot: start.mock.contexts[0]!, message,
     unload: () => effects.get('im-qqbot.lifecycle')!(),
     click: (input: Partial<InteractionEvent>) => callback({}, {
       id: 'button', type: 1, version: 1,
@@ -65,6 +70,133 @@ async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (t
     }),
   };
 }
+
+async function loopback(listener: RequestListener) {
+  const server = createServer(listener);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Expected a loopback TCP address');
+  vi.stubEnv('QQBOT_BASE_URL', `http://127.0.0.1:${address.port}`);
+  return async () => {
+    const closed = new Promise<void>(resolve => server.close(() => resolve()));
+    server.closeAllConnections();
+    await closed;
+  };
+}
+
+it('blocks an inbound error reply when access is revoked while the SDK gets its token', async () => {
+  const request = vi.fn();
+  const close = await loopback((req, res) => {
+    request(req.url);
+    res.end(JSON.stringify({ id: 'unexpected' }));
+  });
+  let allowed = true;
+  const f = await gateway({ c2cMode: 'open' }, () => allowed);
+  try {
+    vi.spyOn(f.runtime.manager, 'getOrCreate').mockRejectedValueOnce(new Error('session fixture failed'));
+    const acquiring = Promise.withResolvers<void>();
+    const token = Promise.withResolvers<string>();
+    vi.spyOn(f.bot.tokenManager, 'getAccessToken').mockImplementationOnce(() => {
+      acquiring.resolve();
+      return token.promise;
+    });
+    const replyTarget = { scope: 'c2c', targetId: 'shared', msgId: 'inbound' } as const;
+    const result = f.message({
+      bot: f.bot, replyTarget, state: {}, signal: new AbortController().signal,
+      message: { kind: 'c2c', senderId: 'shared', messageId: 'inbound', content: 'test' },
+    } as MiddlewareContext);
+    await acquiring.promise;
+    allowed = false;
+    token.resolve('fixture-token');
+    await result;
+    expect(request).not.toHaveBeenCalled();
+  } finally {
+    await f.unload();
+    await close();
+  }
+});
+
+it.each([false, true])('checks the whitelist before submitting a pairing confirmation (revoked=%s)', async revoked => {
+  const request = vi.fn();
+  const close = await loopback((req, res) => {
+    request(req.url);
+    res.end(JSON.stringify({ id: 'confirmation' }));
+  });
+  const f = await gateway({ c2cMode: 'allowlist', c2cAllow: [] });
+  try {
+    sandbox.profile = sandbox.dir;
+    const access = f.runtime.manager.accountAccess!;
+    const { code } = access.issuePairCode('allow-c2c');
+    const acquiring = Promise.withResolvers<void>();
+    const token = Promise.withResolvers<string>();
+    vi.spyOn(f.bot.tokenManager, 'getAccessToken').mockResolvedValue('fixture-token').mockImplementationOnce(() => {
+      acquiring.resolve();
+      return token.promise;
+    });
+    const receivedAt = Date.now();
+    const timestamp = new Date(receivedAt).toISOString();
+    const replyTarget = { scope: 'c2c', targetId: 'shared', msgId: 'inbound' } as const;
+    const controller = new AbortController();
+    let stopReason: string | undefined;
+    const context: MiddlewareContext = {
+      bot: f.bot, replyTarget, receivedAt, state: {}, signal: controller.signal,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      message: {
+        kind: 'c2c', senderId: 'shared', messageId: 'inbound', content: code, timestamp, replyTarget,
+        rawEventType: 'C2C_MESSAGE_CREATE', raw: { id: 'inbound', content: code, timestamp, author: { user_openid: 'shared' } },
+      },
+      stop(reason) { stopReason = reason; },
+      get stopped() { return stopReason !== undefined; },
+      get stopReason() { return stopReason; },
+      abort(reason) { controller.abort(reason); this.stop(reason); },
+      get aborted() { return controller.signal.aborted; },
+    };
+    const result = runMiddlewareChain(f.bot.getMiddlewares(), context);
+    await acquiring.promise;
+    expect(access.allowsConversation('c2c', 'shared')).toBe(true);
+    if (revoked) expect(access.revokePair('shared', 'allow-c2c').ok).toBe(true);
+    token.resolve('fixture-token');
+    await result;
+    expect(context.stopReason).toBe('claim-result');
+    expect(access.allowsConversation('c2c', 'shared')).toBe(!revoked);
+    expect(request.mock.calls).toEqual(revoked ? [] : [['/v2/users/shared/messages']]);
+  } finally {
+    await f.unload();
+    await close();
+  }
+});
+
+it.each(['text', 'upload'] as const)('does not follow an HTTP redirect after the initial %s POST', async kind => {
+  const posts: string[] = [];
+  let allowed = true;
+  const close = await loopback((req, res) => {
+    posts.push(`${req.method} ${req.url}`);
+    if (posts.length === 1) {
+      allowed = false;
+      res.writeHead(307, { Location: '/unexpected' });
+      res.end();
+    } else {
+      res.end(JSON.stringify({ id: 'unexpected', file_info: 'unexpected' }));
+    }
+  });
+  const f = await gateway({ c2cMode: 'open' }, () => allowed);
+  try {
+    vi.spyOn(f.bot.tokenManager, 'getAccessToken').mockResolvedValue('fixture-token');
+    const target = { scope: 'c2c', targetId: 'shared', msgId: 'inbound' } as const;
+    const sent = kind === 'text'
+      ? f.bot.sendMarkdown(target, 'test')
+      : f.bot.uploadMedia({ target, fileType: MediaFileType.FILE, buffer: Buffer.from('test'), srvSendMsg: false });
+    const result = await sent.catch((error: unknown) => error);
+    expect(posts).toEqual([kind === 'text' ? 'POST /v2/users/shared/messages' : 'POST /v2/users/shared/files']);
+    // The media SDK retries, but the fresh admission check blocks the next POST.
+    if (kind === 'upload') expect(result).toMatchObject({ message: expect.stringContaining('no longer authorized') });
+    else expect(result).toMatchObject({ httpStatus: 307 });
+  } finally {
+    await f.unload();
+    await close();
+  }
+}, 8000);
 
 it('dispatches permitted QQ callbacks and stops acknowledging them when that gateway unloads', async () => {
   const f = await gateway({ groupMode: 'open', c2cMode: 'open' });

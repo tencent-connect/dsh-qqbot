@@ -11,6 +11,7 @@
  */
 
 import type { DeliveryLedger, InputReceipt } from './delivery-ledger.ts';
+import type { ReplyTarget } from '../types.ts';
 
 /** 兜底 TTL 下限：至少覆盖一次默认处理超时 */
 const MIN_TTL_MS = 30 * 60 * 1000;
@@ -56,8 +57,8 @@ export class QqInputRegistry {
     this.evictOverflow();
   }
 
-  public claim(messageId: string, sessionId: string, content: unknown, turn: number): InputReceipt | undefined {
-    return this.ledger?.claimInput(messageId, sessionId, content, turn);
+  public claim(messageId: string, sessionId: string, content: unknown, turn: number, peer: ReplyTarget): InputReceipt | undefined {
+    return this.ledger?.claimInput(messageId, sessionId, content, turn, peer);
   }
 
   /** 是否为本插件登记过且未过期的消息。不删除登记。 */

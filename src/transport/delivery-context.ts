@@ -5,12 +5,12 @@ import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { isMessageRejected, MediaAlreadySubmitted, StreamTargetExpired } from './delivery-errors.ts';
 
-interface DeliveryContext { key: string; sessionId?: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
+interface DeliveryContext { appId: string; key: string; sessionId?: string; allowed: () => boolean; fixed?: boolean; streamKey?: string; staticKey?: string }
 const contexts = new WeakMap<ReplyTarget, DeliveryContext>();
 
 /** Keep routing metadata out of the SDK payload and the public ReplyTarget. */
 export function bindDelivery(target: ReplyTarget, context: DeliveryContext): ReplyTarget {
-  const bound = { ...target };
+  const bound = Object.freeze({ ...target });
   contexts.set(bound, context);
   return bound;
 }
@@ -45,9 +45,10 @@ function authorize(context: DeliveryContext): void {
   if (!context.allowed()) throw new Error('QQ delivery canceled: source or access is no longer authorized');
 }
 
-export function assertDeliveryAllowed(target: ReplyTarget): void {
+export function assertDeliveryAllowed(target: ReplyTarget, appId?: string): void {
   const context = contexts.get(target);
   if (!context) throw new Error('QQ automatic delivery has no source identity');
+  if (appId !== undefined && context.appId !== appId) throw new Error('QQ delivery target belongs to another QQ bot');
   authorize(context);
 }
 

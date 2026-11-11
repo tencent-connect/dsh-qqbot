@@ -210,7 +210,7 @@ describe('QuestionChannel.askViaQQ', () => {
   it.each([true, false])('reuses the question operation and falls back only on a definite rejection (%s)', async (rejected) => {
     const ledger = new DeliveryLedger();
     const record = makeRecord('question-session');
-    const target = bindDelivery(record.replyTarget, { key: 'question-turn', allowed: () => true });
+    const target = bindDelivery(record.replyTarget, { appId: 'fixture-app', key: 'question-turn', allowed: () => true });
     const response = rejected
       ? new ApiError('keyboard not permitted', 403, '/v2/users/x/messages', 40034010)
       : new ApiError('response timeout', 0, '/v2/users/x/messages');
@@ -434,7 +434,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const sender = guardSender({ ...createSender(sent), openStream: vi.fn() }, new DeliveryLedger());
     const channel = new QuestionChannel(createManager({ getSessionRecord: () => record }), sender,
       { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const target = bindDelivery(record.replyTarget, { key: 'same-turn', allowed: () => true });
+    const target = bindDelivery(record.replyTarget, { appId: 'fixture-app', key: 'same-turn', allowed: () => true });
     const ask = (label: string) => channel.askViaQQ(record, target, {
       questions: [{ id: 'confirm', question: label, options: [{ label }] }],
       ...(withCallId ? { wait: { callId: label } } : {}),

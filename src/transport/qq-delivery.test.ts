@@ -9,14 +9,15 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ApiError, MediaFileType, QQBot, StreamInputState, type InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import { ApiClient, LARGE_FILE_THRESHOLD } from '@tencent-connect/qqbot-nodejs/protocol';
 import { bindDelivery, deliveryTrace, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
-import { DeliveryLedger } from './delivery-ledger.ts';
+import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
 import { ReplyIdCache } from './msgid-cache.ts';
-import { StreamTargetExpired } from './delivery-errors.ts';
 import { OutboundBuffer } from './outbound-buffer.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from './qq-delivery.ts';
 import { ReplyLimiter } from './reply-limiter.ts';
 import { observeTimelineRequests } from './timeline-observer.ts';
 import { QqTimeline } from '../runtime/qq-timeline.ts';
+import { QqInputRegistry } from './qq-input-origin.ts';
+import { TurnTracker } from './turn-tracker.ts';
 import type { ReplyTarget } from '../types.ts';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -33,7 +34,7 @@ function setup({ appId = 'fixture-app', msgId = 'platform-input', ledgerFile, ti
   replyIds.cacheMsgId(peer.scope, peer.targetId, peer.msgId);
   const limiter = new ReplyLimiter({ limit: 4 });
   let allowed = true;
-  const target = replyDelivery(bindDelivery(peer, { key: appId, allowed: () => allowed }), 1);
+  const target = replyDelivery(bindDelivery(peer, { appId, key: appId, allowed: () => allowed }), 1);
   const ledger = new DeliveryLedger(ledgerFile);
   const observe = timeline && observeTimelineRequests(bot, appId, timeline, () => true);
   const sender = guardSender({
@@ -44,22 +45,21 @@ function setup({ appId = 'fixture-app', msgId = 'platform-input', ledgerFile, ti
   return { bot, request, peer, target, sender, media, replyIds, revoke: () => { allowed = false; } };
 }
 
-it('keeps passive text, stream and media replies inside each bot at the same OpenID', async () => {
+it('keeps passive reply caches separate for bots with the same OpenID', async () => {
   const first = setup({ appId: 'fixture-app-1', msgId: 'first-input' });
   const second = setup({ appId: 'fixture-app-2', msgId: 'second-input' });
   first.replyIds.cacheEventId(first.peer.scope, first.peer.targetId, 'first-interaction');
-  const recent = bindDelivery(
+  const recent = (appId: string) => bindDelivery(
     { scope: first.peer.scope, targetId: first.peer.targetId },
-    { key: 'latest-passive-target', allowed: () => true },
+    { appId, key: 'latest-passive-target', allowed: () => true },
   );
 
-  await first.sender.sendMarkdown(recent, 'first answer');
+  await first.sender.sendMarkdown(recent('fixture-app-1'), 'first answer');
   expect(first.request.mock.lastCall?.[3]).toMatchObject({ event_id: 'INTERACTION_CREATE:first-interaction' });
-  await second.sender.sendMarkdown(recent, 'second answer');
+  await second.sender.sendMarkdown(recent('fixture-app-2'), 'second answer');
   expect(second.request.mock.lastCall?.[3]).toMatchObject({ msg_id: 'second-input' });
   expect(second.request.mock.lastCall?.[3]).not.toHaveProperty('event_id');
 
-  expect(() => second.sender.openStream(first.target)).toThrow(StreamTargetExpired);
   const stream = second.sender.openStream(second.target);
   await stream.update('second stream');
   await stream.complete();
@@ -67,9 +67,93 @@ it('keeps passive text, stream and media replies inside each bot at the same Ope
     .toMatchObject({ msg_id: 'second-input' });
 
   vi.spyOn(second.bot, 'uploadMedia').mockResolvedValue({ file_info: 'uploaded-file', file_uuid: 'file-1', ttl: 60 });
-  await second.media.sendFile(first.target, { localPath: '/fixture/a.txt' });
+  await second.media.sendFile(second.target, { localPath: '/fixture/a.txt' });
   expect(second.request.mock.lastCall?.[3]).toMatchObject({ msg_id: 'second-input' });
   expect(second.request.mock.lastCall?.[3]).not.toHaveProperty('event_id');
+
+  first.revoke();
+  await expect(first.sender.sendText!(first.target, 'blocked', 4500)).rejects.toThrow('no longer authorized');
+  await second.sender.sendMarkdown(recent('fixture-app-2'), 'second bot still works');
+  expect(second.request.mock.lastCall?.[3]).toMatchObject({ markdown: { content: 'second bot still works' } });
+});
+
+it.each(['text', 'stream', 'media'] as const)('rejects foreign %s even when both bots have the same OpenID and QQ message ID', async kind => {
+  const first = setup({ appId: 'fixture-app-1', msgId: 'shared-input' });
+  const second = setup({ appId: 'fixture-app-2', msgId: 'shared-input' });
+  const upload = vi.spyOn(second.bot, 'uploadMedia').mockResolvedValue({ file_info: 'uploaded-file', file_uuid: 'file-1', ttl: 60 });
+  const send = async () => {
+    if (kind === 'text') return second.sender.sendText!(first.target, 'private', 4500);
+    if (kind === 'stream') return second.sender.openStream(first.target).update('private');
+    return second.media.sendFile(first.target, { localPath: '/fixture/a.txt' });
+  };
+  await expect(send()).rejects.toThrow('another QQ bot');
+  expect(second.request).not.toHaveBeenCalled();
+  expect(upload).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['QQ then Web', 'text'],
+  ['Web then QQ', 'upload'],
+] as const)('stops the pending SDK %s turn before it can submit %s', async (order, kind) => {
+  const { bot, request, peer, sender, media } = setup();
+  const ledger = new DeliveryLedger();
+  const body = [{ type: 'text', text: 'QQ question' }];
+  const id = 'qq-session';
+  ledger.registerInput({ key: 'receipt', messageId: 'qq', sessionId: id, senderId: peer.targetId,
+    target: peer, contentHash: deliveryKey(body) });
+  const tracker = new TurnTracker({ findBySessionId: () => undefined, deliveryAddress: () => peer },
+    new QqInputRegistry({ ledger }), { appId: 'fixture-app', externalTurns: 'c2c' }, logger);
+  tracker.begin(id, 1);
+  const note = (source: 'qq' | 'web') => tracker.note(id, {
+    id: source, source: { kind: 'user' }, content: source === 'qq' ? body : [{ type: 'text', text: 'Private steering' }],
+  });
+  const qqFirst = order === 'QQ then Web';
+  note(qqFirst ? 'qq' : 'web');
+  const target = tracker.targetFor(id);
+  expect(target).toBeDefined();
+  if (!target) throw new Error('missing fixture turn target');
+
+  const token = Promise.withResolvers<string>();
+  const acquiring = Promise.withResolvers<void>();
+  vi.spyOn(bot.tokenManager, 'getAccessToken').mockImplementationOnce(() => {
+    acquiring.resolve();
+    return token.promise;
+  });
+  const dir = await mkdtemp(join(tmpdir(), 'qqbot-mixed-upload-'));
+  const localPath = join(dir, 'private.txt');
+  await writeFile(localPath, 'test attachment');
+  try {
+    const pending = kind === 'text' ? sender.sendMarkdown(target, 'reply') : media.sendFile(target, { localPath });
+    const outcome = pending.catch((error: unknown) => error);
+    await acquiring.promise;
+    note(qqFirst ? 'web' : 'qq');
+    token.resolve('fixture-token');
+    expect(await outcome).toMatchObject({ message: expect.stringContaining('no longer authorized') });
+    expect(tracker.targetFor(id)).toBeUndefined();
+    expect(request).not.toHaveBeenCalled();
+  } finally {
+    token.resolve('fixture-token');
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 8000);
+
+it.each(['unfinished turn replaced', 'session binding lost'] as const)('invalidates queued text after %s', async change => {
+  const { bot, request, peer, sender } = setup();
+  let bound: ReplyTarget | undefined = peer;
+  const tracker = new TurnTracker({ findBySessionId: () => undefined, deliveryAddress: () => bound },
+    new QqInputRegistry({ ledger: new DeliveryLedger() }), { appId: 'fixture-app', externalTurns: 'c2c' }, logger);
+  tracker.begin('qq-session', 1);
+  tracker.note('qq-session', { id: 'web', source: { kind: 'user' } });
+  const target = tracker.targetFor('qq-session');
+  if (!target) throw new Error('missing fixture turn target');
+  const token = Promise.withResolvers<string>();
+  vi.spyOn(bot.tokenManager, 'getAccessToken').mockReturnValueOnce(token.promise);
+  const sending = sender.sendMarkdown(target, 'old reply');
+  if (change === 'unfinished turn replaced') tracker.begin('qq-session', 2);
+  else bound = undefined;
+  token.resolve('fixture-token');
+  await expect(sending).rejects.toThrow('no longer authorized');
+  expect(request).not.toHaveBeenCalled();
 });
 
 it('checks access when the SDK flushes a queued frame', async () => {
@@ -321,7 +405,7 @@ it.each(['c2c', 'group'] as const)('blocks %s upload while the SDK waits for a t
   await writeFile(localPath, 'QQ upload fixture');
   const token = Promise.withResolvers<string>();
   const acquiring = vi.spyOn(bot.tokenManager, 'getAccessToken').mockReturnValueOnce(token.promise);
-  const target = bindDelivery({ scope, targetId: 'peer' }, { key: 'upload-token', allowed: () => !revoked });
+  const target = bindDelivery({ scope, targetId: 'peer' }, { appId: 'fixture-app', key: 'upload-token', allowed: () => !revoked });
   let revoked = false;
   try {
     const denied = expect(media.sendFile(target, { localPath })).rejects.toThrow('no longer authorized');
@@ -410,7 +494,7 @@ it('preserves event_id, keyboard, and outbound reference tracking for an authori
   const { bot, request, sender, peer, target, replyIds } = setup();
   const eventId = 'INTERACTION_CREATE:approval';
   replyIds.cacheEventId(peer.scope, peer.targetId, 'approval');
-  const eventTarget = bindDelivery({ scope: peer.scope, targetId: peer.targetId }, { key: 'approved', allowed: () => true });
+  const eventTarget = bindDelivery({ scope: peer.scope, targetId: peer.targetId }, { appId: 'fixture-app', key: 'approved', allowed: () => true });
   const notify = vi.spyOn(bot.messageApi, 'notifyMessageSent');
   request.mockResolvedValueOnce({ id: 'card', ext_info: { ref_idx: 'reference' } });
   await sender.sendMarkdown(eventTarget, 'approval card', { keyboard });

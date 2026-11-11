@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DeliveryLedger, deliveryKey } from './delivery-ledger.ts';
-import { bindDelivery, guardMedia, guardSender } from './delivery-context.ts';
+import { assertDeliveryAllowed, bindDelivery, guardMedia, guardSender } from './delivery-context.ts';
 import { QqInputRegistry } from './qq-input-origin.ts';
 import { createOutboundHandler, createTurnTracker } from './outbound.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
@@ -140,10 +140,12 @@ describe('durable delivery identities', () => {
     const receipt = { key: 'input', messageId: 'm', sessionId: 's', senderId: 'u', target, contentHash: deliveryKey(content) };
     expect(ledger.registerInput(receipt)).toBe(true);
     expect(ledger.registerInput({ ...receipt, messageId: 'another-id' })).toBe(false);
-    expect(ledger.claimInput('m', 'other-session', content, 1)).toBeUndefined();
-    expect(ledger.claimInput('m', 's', [], 1)).toBeUndefined();
-    expect(ledger.claimInput('m', 's', content, 1)?.target).toEqual(target);
-    expect(ledger.claimInput('m', 's', content, 2)).toBeUndefined();
+    expect(ledger.claimInput('m', 'other-session', content, 1, target)).toBeUndefined();
+    expect(ledger.claimInput('m', 's', [], 1, target)).toBeUndefined();
+    expect(ledger.claimInput('m', 's', content, 2, { ...target, scope: 'group' })).toBeUndefined();
+    expect(ledger.claimInput('m', 's', content, 2, { ...target, targetId: 'another-peer' })).toBeUndefined();
+    expect(ledger.claimInput('m', 's', content, 1, target)?.target).toEqual(target);
+    expect(ledger.claimInput('m', 's', content, 2, target)).toBeUndefined();
   });
 });
 
@@ -238,6 +240,26 @@ describe('explicit file tool source and replay checks', () => {
     expect(second.raw.sendFile).toHaveBeenCalledTimes(1);
     await expect(execute(second.file, 'still-running', second.sessionId)).resolves.toMatchObject({ target: 'c2c:synthetic-user' });
     expect(second.raw.sendFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a new turn at the same peer reauthorize a queued file-tool upload', async () => {
+    const f = runtime('app', 'qq-session');
+    const execute = tool(f);
+    const pending = Promise.withResolvers<ReplyTarget>();
+    const resume = Promise.withResolvers<void>();
+    let current = bindDelivery(target, { appId: 'app', key: 'first-turn', allowed: () => true });
+    f.descriptor.targets.targetFor = () => current;
+    f.raw.sendFile.mockImplementationOnce(async (address: ReplyTarget) => {
+      pending.resolve(address);
+      await resume.promise;
+      assertDeliveryAllowed(address, 'app');
+      return { upload: { file_uuid: 'fixture' } };
+    });
+    const result = execute(f.file, 'queued-call', f.sessionId);
+    await pending.promise;
+    current = bindDelivery(target, { appId: 'app', key: 'next-turn', allowed: () => true });
+    resume.resolve();
+    await expect(result).rejects.toThrow('no longer authorized');
   });
 });
 
@@ -410,7 +432,7 @@ describe('verified native output, retaining upstream delivery features', () => {
     const sender = { sendImage: vi.fn(), sendVideo: vi.fn(), sendVoice: vi.fn(), sendFile: vi.fn().mockResolvedValue({ upload: { file_uuid: 'id' } }) };
     const media = guardMedia(sender, ledger);
     let allowed = true;
-    const explicit = bindDelivery({ scope: 'group', targetId: 'explicit-target' }, { key: 'native-call-id', fixed: true, allowed: () => allowed });
+    const explicit = bindDelivery({ scope: 'group', targetId: 'explicit-target' }, { appId: 'fixture-app', key: 'native-call-id', fixed: true, allowed: () => allowed });
     await media.sendFile(explicit, { localPath: '/synthetic.txt' });
     await expect(media.sendFile(explicit, { localPath: '/different.txt' })).rejects.toThrow('already submitted');
     allowed = false;
@@ -422,7 +444,7 @@ describe('verified native output, retaining upstream delivery features', () => {
     const ledger = new DeliveryLedger();
     let allowed = true;
     const bot: QQBotSender = { sendMarkdown: vi.fn(async () => { allowed = false; }), openStream: vi.fn() };
-    const destination = bindDelivery(target, { key: 'chunked', allowed: () => allowed });
+    const destination = bindDelivery(target, { appId: 'fixture-app', key: 'chunked', allowed: () => allowed });
     const buffer = new OutboundBuffer(destination, guardSender(bot, ledger), 12, logger, false);
     buffer.append('first paragraph\n\nsecond paragraph\n\nthird paragraph');
     await buffer.flush();
@@ -441,7 +463,7 @@ describe('native Inbox submission', () => {
     await handleInbound(ctx, manager, config, logger, new QqInputRegistry({ ledger: new DeliveryLedger(file) }), () => true);
     expect(manager.getOrCreate).toHaveBeenCalledTimes(1); expect(followup).toHaveBeenCalledTimes(1);
     const message = followup.mock.calls[0]?.[0];
-    const receipt = new DeliveryLedger(file).claimInput(String(message.id), 'native-session', message.content, 1);
+    const receipt = new DeliveryLedger(file).claimInput(String(message.id), 'native-session', message.content, 1, { scope: group ? 'group' : 'c2c', targetId: group ? 'synthetic-group' : 'synthetic-member' });
     expect(receipt?.target).toEqual({ scope: group ? 'group' : 'c2c', targetId: group ? 'synthetic-group' : 'synthetic-member', msgId: 'platform-message' });
     expect(receipt?.senderId).toBe('synthetic-member');
   });

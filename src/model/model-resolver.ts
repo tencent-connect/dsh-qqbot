@@ -107,8 +107,12 @@ export class ModelResolver {
   }
 
   /** sessionId → sessionKey（prefs 的反向查找） */
-  findSessionKey(sessionId: string): string | undefined {
-    return this.prefs.findSessionKey(sessionId);
+  findUniqueCurrentSessionKey(sessionId: string): string | undefined {
+    return this.prefs.findUniqueCurrentSessionKey(sessionId);
+  }
+
+  hasForeignCurrentBinding(sessionKey: string, sessionId: string): boolean {
+    return this.prefs.hasForeignCurrentBinding(sessionKey, sessionId);
   }
 
   /**

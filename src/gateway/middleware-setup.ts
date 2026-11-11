@@ -41,6 +41,7 @@ export function setupMiddlewares(
   receiving?: (target: ReplyTarget) => boolean,
   onAdmitted?: (ctx: MiddlewareContext) => void | Promise<void>,
   onSkipped?: (target: ReplyTarget, outcome: TimelineInboundOutcome) => void,
+  pairingReply: (ctx: MiddlewareContext, text: string) => Promise<unknown> = (ctx, text) => ctx.bot.sendText(ctx.replyTarget, text),
 ): void {
   const blocked = (ctx: MiddlewareContext): boolean => {
     if (!isActive()) {
@@ -78,17 +79,21 @@ export function setupMiddlewares(
     }
     await mention(ctx, async () => limit(ctx, async () => {
       if (blocked(ctx)) return;
+      let reply: string;
       try {
-        const result = service.beginClaimFromMessage(
+        reply = service.beginClaimFromMessage(
           ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
           ctx.message.senderId, messageSenderName(ctx.message),
-        );
-        await ctx.bot.sendText(ctx.replyTarget, result.message);
+        ).message;
       } catch (err) {
         logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
-        if (isActive()) {
-          try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
-        }
+        reply = '⚠️ 认领处理失败，请稍后重试。';
+      }
+      if (blocked(ctx)) return;
+      try {
+        await pairingReply(ctx, reply);
+      } catch (err) {
+        logger.warn(`im-qqbot: 配对结果发送失败: ${err instanceof Error ? err.message : String(err)}`);
       }
       ctx.stop('claim-result');
     }));

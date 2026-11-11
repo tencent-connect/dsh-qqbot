@@ -54,10 +54,13 @@ export class DeliveryLedger {
     return true;
   }
 
-  claimInput(messageId: string, sessionId: string, content: unknown, turn: number): InputReceipt | undefined {
+  claimInput(messageId: string, sessionId: string, content: unknown, turn: number,
+    peer: Pick<ReplyTarget, 'scope' | 'targetId'>,
+  ): InputReceipt | undefined {
     this.refresh();
     const input = [...this.receipts.values()].find((r): r is InputReceipt => r.kind === 'input' && r.messageId === messageId);
     if (!input || input.sessionId !== sessionId || input.contentHash !== deliveryKey(content)) return undefined;
+    if (input.target.scope !== peer.scope || input.target.targetId !== peer.targetId) return undefined;
     if (input.turn !== undefined && input.turn !== turn) return undefined;
     if (input.turn === undefined) this.put({ ...input, turn });
     return input;

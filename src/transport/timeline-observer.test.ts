@@ -22,7 +22,7 @@ it('records only HTTP message submissions and coalesces real stream frames by se
   await bot.apiClient.request('auth-token', 'POST', '/v2/users/shared/files', { file_info: 'binary-reference' });
   expect(log.page('A', target)?.entries).toEqual([]);
 
-  const raw = observe(replyDelivery(bindDelivery(target, { key: 'logical-stream', sessionId: 'ds-session', allowed: () => true }), 1));
+  const raw = observe(replyDelivery(bindDelivery(target, { appId: 'fixture-app', key: 'logical-stream', sessionId: 'ds-session', allowed: () => true }), 1));
   const path = '/v2/users/shared/stream_messages';
   await raw('auth-token', 'POST', path, { content_raw: 'part', input_state: StreamInputState.GENERATING });
   expect(log.page('A', target)?.entries).toMatchObject([{ status: 'partial', text: 'part' }]);
