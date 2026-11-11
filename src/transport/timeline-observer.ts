@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ApiError, MsgType, StreamInputState, type QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { ApiClient } from '@tencent-connect/qqbot-nodejs/protocol';
 import { deliveryTrace } from './delivery-context.ts';
+import { hasStreamMessageId } from './delivery-errors.ts';
 import { deliveryKey } from './delivery-ledger.ts';
 import { timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
 import type { TimelineEntry } from '../shared/workbench-timeline-protocol.ts';
@@ -54,6 +55,7 @@ export function observeTimelineRequests(
           platformCode: error instanceof ApiError ? error.bizCode : undefined,
         };
       }
+      if (streaming && !body.stream_msg_id && !hasStreamMessageId(result)) return { status: 'unknown' };
       const platformId = object(result).id;
       return {
         status: streaming && body.input_state !== StreamInputState.DONE ? 'partial' : 'accepted',

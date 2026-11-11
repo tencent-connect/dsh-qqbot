@@ -1,25 +1,30 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import { createServer, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ApiError, MediaFileType, QQBot, StreamInputState, type InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
-import { LARGE_FILE_THRESHOLD } from '@tencent-connect/qqbot-nodejs/protocol';
-import { bindDelivery, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
+import { ApiClient, LARGE_FILE_THRESHOLD } from '@tencent-connect/qqbot-nodejs/protocol';
+import { bindDelivery, deliveryTrace, guardMedia, guardSender, replyDelivery } from './delivery-context.ts';
 import { DeliveryLedger } from './delivery-ledger.ts';
 import { ReplyIdCache } from './msgid-cache.ts';
 import { StreamTargetExpired } from './delivery-errors.ts';
 import { OutboundBuffer } from './outbound-buffer.ts';
 import { createDeliveryMedia, openDeliveryStream, sendDeliveryMarkdown } from './qq-delivery.ts';
 import { ReplyLimiter } from './reply-limiter.ts';
+import { observeTimelineRequests } from './timeline-observer.ts';
+import { QqTimeline } from '../runtime/qq-timeline.ts';
 import type { ReplyTarget } from '../types.ts';
 
 const logger = { debug() {}, info() {}, warn() {}, error() {} };
 afterEach(() => vi.useRealTimers());
 
-function setup({ appId = 'fixture-app', msgId = 'platform-input' } = {}) {
+function setup({ appId = 'fixture-app', msgId = 'platform-input', ledgerFile, timeline }: {
+  appId?: string; msgId?: string; ledgerFile?: string; timeline?: QqTimeline;
+} = {}) {
   const bot = new QQBot({ appId, appSecret: 'fixture-secret' });
   vi.spyOn(bot.tokenManager, 'getAccessToken').mockResolvedValue('fixture-token');
   const request = vi.spyOn(bot.apiClient, 'request').mockResolvedValue({ id: 'qq-message' });
@@ -29,10 +34,11 @@ function setup({ appId = 'fixture-app', msgId = 'platform-input' } = {}) {
   const limiter = new ReplyLimiter({ limit: 4 });
   let allowed = true;
   const target = replyDelivery(bindDelivery(peer, { key: appId, allowed: () => allowed }), 1);
-  const ledger = new DeliveryLedger();
+  const ledger = new DeliveryLedger(ledgerFile);
+  const observe = timeline && observeTimelineRequests(bot, appId, timeline, () => true);
   const sender = guardSender({
-    openStream: target => openDeliveryStream(bot, replyIds, target, logger),
-    sendMarkdown: (target, body, opts) => sendDeliveryMarkdown(bot, replyIds, limiter, target, body, opts),
+    openStream: target => openDeliveryStream(bot, replyIds, target, logger, observe),
+    sendMarkdown: (target, body, opts) => sendDeliveryMarkdown(bot, replyIds, limiter, target, body, opts, observe),
   }, ledger);
   const media = guardMedia(createDeliveryMedia(bot, replyIds, limiter), ledger);
   return { bot, request, peer, target, sender, media, replyIds, revoke: () => { allowed = false; } };
@@ -141,6 +147,139 @@ it('does not finalize or re-send a stream after a deferred frame times out', asy
   await expect(stream.complete()).rejects.toThrow('response timeout');
   await sender.sendText?.(target, 'queued frame', 4500);
   expect(request).toHaveBeenCalledTimes(2);
+});
+
+it('stops after an opening response without a usable QQ message ID', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qq-stream-ack-'));
+  try {
+    const timeline = new QqTimeline(root, logger);
+    const ledgerFile = join(root, 'delivery.jsonl');
+    const { request, sender, target } = setup({ ledgerFile, timeline });
+    request.mockResolvedValueOnce({});
+    const buffer = new OutboundBuffer(target, sender, 4500, logger, true);
+    buffer.append('possibly accepted');
+    await buffer.flush();
+    await sender.sendText?.(target, 'possibly accepted', 4500);
+
+    expect(request.mock.calls.map(([, , path]) => path)).toEqual(['/v2/users/shared-openid/stream_messages']);
+    expect(new DeliveryLedger(ledgerFile).state(deliveryTrace(target)!.streamKey)).toBe('unknown');
+    expect(timeline.page('fixture-app', target)?.entries).toMatchObject([{ status: 'unknown' }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each(['accepted', 'expired'])('does not retry a 5xx result with a rate-limit business code (%s)', async retryResult => {
+  vi.useFakeTimers();
+  const { request, sender, target } = setup();
+  const streamPath = '/v2/users/shared-openid/stream_messages';
+  request.mockRejectedValueOnce(new ApiError('upstream failure', 502, streamPath, 50002));
+  if (retryResult === 'expired') {
+    request.mockRejectedValueOnce(new ApiError('expired message', 400, streamPath, 40034005));
+  }
+  const buffer = new OutboundBuffer(target, sender, 4500, logger, true);
+  buffer.append('possibly accepted');
+  const flushed = buffer.flush();
+  await vi.runAllTimersAsync();
+  await flushed;
+  expect(request.mock.calls.map(([, , path]) => path)).toEqual([streamPath]);
+});
+
+it('allows a confirmed HTTP 400 rate-limit rejection to retry the stream', async () => {
+  vi.useFakeTimers();
+  const { request, sender, target } = setup();
+  request.mockRejectedValueOnce(new ApiError('rate limited', 400, '/v2/users/shared-openid/stream_messages', 50002));
+  const buffer = new OutboundBuffer(target, sender, 4500, logger, true);
+  buffer.append('retry after rejection');
+  const flushed = buffer.flush();
+  await vi.runAllTimersAsync();
+  await flushed;
+  expect(request.mock.calls.map(([, , path]) => path)).toEqual(Array(3).fill('/v2/users/shared-openid/stream_messages'));
+  expect(request.mock.lastCall?.[3]).toMatchObject({ input_state: StreamInputState.DONE, stream_msg_id: 'qq-message' });
+});
+
+it('does not switch to static after a later frame is explicitly rejected', async () => {
+  const { request, sender, target } = setup();
+  const streamPath = '/v2/users/shared-openid/stream_messages';
+  request.mockResolvedValueOnce({ id: 'accepted-opening' })
+    .mockRejectedValueOnce(new ApiError('expired message', 400, streamPath, 40034005));
+  const buffer = new OutboundBuffer(target, sender, 4500, logger, true);
+  buffer.append('already visible');
+  await buffer.flush();
+  expect(request.mock.calls.map(([, , path]) => path)).toEqual([streamPath, streamPath]);
+  expect(request.mock.lastCall?.[3]).toMatchObject({ input_state: StreamInputState.DONE, stream_msg_id: 'accepted-opening' });
+});
+
+it('blocks static fallback and replay while an opening receipt is pending and after it arrives too late', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'qq-stream-timeout-'));
+  const posts: string[] = [];
+  const received = Promise.withResolvers<ServerResponse>();
+  const server = createServer((req, res) => {
+    req.on('end', () => {
+      posts.push(`${req.method} ${req.url}`);
+      if (posts.length === 1) {
+        received.resolve(res);
+        return;
+      }
+      res.end(JSON.stringify({ id: 'duplicate' }));
+    });
+    req.resume();
+  });
+  try {
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a loopback TCP address');
+    const client = new ApiClient({ baseUrl: `http://127.0.0.1:${address.port}`, defaultTimeoutMs: 750 });
+    const ledgerFile = join(root, 'delivery.jsonl');
+    const first = setup({ ledgerFile });
+    first.request.mockImplementation(client.request.bind(client));
+    const buffer = new OutboundBuffer(first.target, first.sender, 4500, logger, true);
+    buffer.append('possibly accepted');
+    const flushed = buffer.flush();
+    const response = await Promise.race([
+      received.promise,
+      flushed.then(() => { throw new Error('Opening POST never reached the local server'); }),
+    ]);
+
+    const reopened = setup({ ledgerFile });
+    reopened.request.mockImplementation(client.request.bind(client));
+    const key = deliveryTrace(first.target)!.streamKey;
+    expect(new DeliveryLedger(ledgerFile).state(key)).toBe('sending');
+    await reopened.sender.sendText?.(reopened.target, 'possibly accepted', 4500);
+    expect(() => reopened.sender.openStream(reopened.target)).toThrow('already submitted');
+    await flushed;
+    expect(new DeliveryLedger(ledgerFile).state(key)).toBe('unknown');
+
+    response.end(JSON.stringify({ id: 'late-acceptance' }));
+    await reopened.sender.sendText?.(reopened.target, 'possibly accepted', 4500);
+    expect(posts).toEqual(['POST /v2/users/shared-openid/stream_messages']);
+    expect(() => reopened.sender.openStream(reopened.target)).toThrow('already submitted');
+    expect(new DeliveryLedger(ledgerFile).state(key)).toBe('unknown');
+  } finally {
+    const closed = new Promise<void>(resolve => server.close(() => resolve()));
+    server.closeAllConnections();
+    await closed;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('blocks further frames when an opening receipt arrives after the sender loses access', async () => {
+  const { request, sender, target, revoke } = setup();
+  const posted = Promise.withResolvers<void>();
+  const receipt = Promise.withResolvers<{ id: string }>();
+  request.mockImplementationOnce(() => {
+    posted.resolve();
+    return receipt.promise;
+  });
+  const buffer = new OutboundBuffer(target, sender, 4500, logger, true);
+  buffer.append('in flight');
+  const flushed = buffer.flush();
+  await posted.promise;
+  revoke();
+  receipt.resolve({ id: 'late-opening-id' });
+  await flushed;
+  expect(request.mock.calls.map(([, , path]) => path)).toEqual(['/v2/users/shared-openid/stream_messages']);
 });
 
 it.each([true, false])('rechecks file access after upload with revoked=%s', async (revoked) => {

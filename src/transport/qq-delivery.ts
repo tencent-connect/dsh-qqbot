@@ -8,7 +8,7 @@ import type { ReplyIdCache } from './msgid-cache.ts';
 import type { StreamSessionLike } from './outbound-buffer.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 import { resolveReplyTarget } from './reply-target.ts';
-import { StreamTargetExpired } from './delivery-errors.ts';
+import { hasStreamMessageId, StreamTargetExpired } from './delivery-errors.ts';
 import type { TimelineRequest } from './timeline-observer.ts';
 
 class CheckedApiClient extends ApiClient {
@@ -61,17 +61,22 @@ export function openDeliveryStream(bot: QQBot, replyIds: ReplyIdCache, target: R
   api.sendC2CStreamMessage = async (...args) => {
     try {
       const result = await send(...args);
+      // Without the opening ID the SDK would issue another frame without stream_msg_id.
+      if (!sent && !hasStreamMessageId(result)) throw new Error('QQ stream opening response has no message ID');
       sent = true;
       return result;
     } catch (error) {
-      if (error instanceof ApiError && (error.httpStatus === 429 || error.bizCode === 50002)) {
-        // StreamSession reads the legacy code field when applying its retry budget.
-        throw Object.assign(error, { code: error.bizCode === 50002 ? 50002 : 429 });
-      }
-      if (error instanceof ApiError && error.httpStatus === 400 && error.bizCode === 40034005
-        && error.path.endsWith('/stream_messages')) {
-        replyIds.forgetMsgId(scope, targetId, msgId);
-        if (!sent) error = new StreamTargetExpired();
+      if (error instanceof ApiError && error.path.endsWith('/stream_messages')) {
+        const { httpStatus, bizCode } = error;
+        const rejected = httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 499;
+        if (httpStatus === 429 || (rejected && bizCode === 50002)) {
+          // StreamSession reads the legacy code field when applying its retry budget.
+          throw Object.assign(error, { code: bizCode === 50002 ? 50002 : 429 });
+        }
+        if (httpStatus === 400 && bizCode === 40034005) {
+          replyIds.forgetMsgId(scope, targetId, msgId);
+          if (!sent) error = new StreamTargetExpired();
+        }
       }
       failure = { error };
       session.cancel();
