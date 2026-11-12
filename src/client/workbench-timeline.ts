@@ -154,6 +154,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
         const previous = entries[index - 1];
         const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
         const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openSession, refreshEntry,
+          peerName: scope === 'c2c' ? peer.alias || peer.name : undefined,
           onReply: !disabledReason && canQuoteTimelineEntry(row) ? (sender: string) => composer.current?.replyTo(row, sender) : undefined,
           compact: !newDay && grouped(previous, row) });
         return newDay ? [h('li', { key: 'date-' + row.id, className: 'imqw-message-day' }, dateFormat.format(row.at)), message] : [message];
@@ -164,12 +165,13 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   );
 }
 
-function MessageRow({ row, appId, scope, openId, robotName, openSession, refreshEntry, onReply, compact }: {
+function MessageRow({ row, appId, scope, openId, robotName, peerName, openSession, refreshEntry, onReply, compact }: {
   row: TimelineEntry;
   appId: string;
   scope: WorkbenchConversation['scope'];
   openId: string;
   robotName: string;
+  peerName?: string;
   openSession?: (id: string) => void;
   refreshEntry(id: string): Promise<TimelineEntry | undefined>;
   onReply?: (sender: string) => void;
@@ -178,7 +180,8 @@ function MessageRow({ row, appId, scope, openId, robotName, openSession, refresh
   const [checking, setChecking] = useState(false);
   const [receiptNote, setReceiptNote] = useState('');
   const outbound = row.direction === 'outbound';
-  const sender = outbound ? robotName : row.senderName || (row.senderId ? `成员 ${row.senderId.slice(-8)}` : 'QQ 成员');
+  const sender = outbound ? robotName : peerName || row.senderName
+    || (scope === 'c2c' ? `私聊 ${openId.slice(-8)}` : row.senderId ? `成员 ${row.senderId.slice(-8)}` : 'QQ 成员');
   const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(' · ');
   const linkedSession = row.sessionId;
   const queryReceipt = async (): Promise<void> => {

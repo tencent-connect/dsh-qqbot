@@ -14,6 +14,7 @@ import { AccountAccessService } from './account-service.ts';
 import { RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
 import { WorkbenchRequestError } from './workbench-routes.ts';
 import { QqTimeline } from './qq-timeline.ts';
+import { QqDisplayNames } from './qq-display-names.ts';
 import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
 import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -41,6 +42,7 @@ export class RobotRuntimes {
   readonly conversationSettings: ConversationSettingsStore;
   readonly timeline: QqTimeline;
   readonly toolPolicies: WorkbenchToolPolicies;
+  private readonly names: QqDisplayNames;
   private readonly slots = new Map<string, GatewaySlot>();
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
@@ -55,6 +57,7 @@ export class RobotRuntimes {
     this.prefs = new PrefsStore(undefined, { onError: message => logger.warn(message) });
     this.conversationSettings = new ConversationSettingsStore(join(PLUGIN_HOME, 'conversation-settings.json'));
     this.timeline = new QqTimeline(join(PLUGIN_HOME, 'timeline'), logger);
+    this.names = new QqDisplayNames(join(PLUGIN_HOME, 'qq-display-names.json'), logger);
     this.toolPolicies = new WorkbenchToolPolicies(ctx, agents,
       key => this.conversationSettings.get(key).agent, id => this.prefs.findKnownSessionKey(id));
     ctx.effect(() => () => {
@@ -147,7 +150,7 @@ export class RobotRuntimes {
         const profile = profiles && Object.hasOwn(profiles, openId) ? profiles[openId] : undefined;
         if (profile?.scene === scope && profile.nickname) return profile.nickname.slice(0, 300);
         const legacy = members?.peerName(scope, openId);
-        return legacy?.alias || legacy?.name || '';
+        return legacy?.alias || this.names.peer(appId, scope, openId) || legacy?.name || '';
       },
     };
   }
@@ -397,6 +400,7 @@ export class RobotRuntimes {
         };
         slot.runtime = bootstrapGateway(child, this.agents, config, this.logger, access, mediaRoot, this.prefs, receiving, {
           timeline: this.timeline,
+          names: this.names,
           recording: ({ scope, targetId }) => this.conversationSettings.get(peerKey(config.appId, scope, targetId)).recording,
           initialize: async ({ scope, targetId }) => {
             const key = peerKey(config.appId, scope, targetId);

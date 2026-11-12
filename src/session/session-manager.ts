@@ -778,8 +778,12 @@ export class SessionManager {
   private async createFresh(key: string, sessionId: string, settings = this.peerSettings?.read(key)) {
     const route = this.configuredRoute(key, settings);
     const composed = await this.composePreset(settings?.preset || this.getEffectivePresetByKey(key), !!settings?.preset);
-    const cwd = settings?.cwd || this.workspaceDir();
-    if (settings?.cwd && !statSync(cwd).isDirectory()) throw new Error('所选工作区目录不可用。');
+    const selectedCwd = settings?.cwd;
+    const usesDefault = !selectedCwd || selectedCwd === resolveAgentCwd(this.config.cwd);
+    const cwd = usesDefault ? this.workspaceDir() : selectedCwd;
+    if (!usesDefault && !statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error('所选工作区目录不可用。');
+    }
     const permission = settings?.permission;
     const permissions = permission ? this.host.globalService('permissionPresets') as {
       catalog(): { options: readonly { value: string }[] };
@@ -910,12 +914,9 @@ export class SessionManager {
   }
 
   /** Agent 工作目录：显式配置优先，缺省独立目录 ~/.dsh-qqbot/workspace（不随宿主进程 cwd） */
-  private workspaceCache: string | undefined;
   private workspaceDir(): string {
-    if (this.workspaceCache) return this.workspaceCache;
     const dir = resolveAgentCwd(this.config.cwd);
     mkdirSync(dir, { recursive: true });
-    this.workspaceCache = dir;
     return dir;
   }
 

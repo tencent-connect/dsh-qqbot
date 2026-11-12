@@ -16,6 +16,8 @@ import { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { TurnTracker } from '../transport/turn-tracker.ts';
 import type { ReplyTarget } from '../types.ts';
 import { bootstrapGateway } from './bootstrap.ts';
+import { QqDisplayNames } from '../runtime/qq-display-names.ts';
+import { QqTimeline } from '../runtime/qq-timeline.ts';
 
 const sandbox = vi.hoisted(() => ({ dir: undefined as string | undefined, profile: undefined as string | undefined }));
 vi.mock('../shared/dirs.ts', async original => {
@@ -32,7 +34,11 @@ afterEach(() => {
   sandbox.profile = undefined;
 });
 
-async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (target: ReplyTarget) => boolean) {
+async function gateway(
+  access: Partial<AccessControlConfig> = {},
+  receiving?: (target: ReplyTarget) => boolean,
+  makeHistory?: (dir: string, logger: Parameters<typeof bootstrapGateway>[3]) => NonNullable<Parameters<typeof bootstrapGateway>[8]>,
+) {
   sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-gateway-'));
   const options = ConfigSchema({
     appId: 'gateway-test', appSecret: 'fixture', sessionIdleTimeout: 0,
@@ -55,7 +61,7 @@ async function gateway(access: Partial<AccessControlConfig> = {}, receiving?: (t
   const dispatch = vi.spyOn(QuestionChannel.prototype, 'handleInteraction').mockReturnValue(true);
   const cache = vi.spyOn(ReplyIdCache.prototype, 'cacheEventId');
   const dispose = vi.spyOn(SessionManager.prototype, 'disposeAll');
-  const runtime = bootstrapGateway(ctx, { get: vi.fn() } as unknown as DshAgentRegistry, options, logger, undefined, undefined, undefined, receiving);
+  const runtime = bootstrapGateway(ctx, { get: vi.fn() } as unknown as DshAgentRegistry, options, logger, undefined, undefined, undefined, receiving, makeHistory?.(sandbox.dir, logger));
   const callback = on.mock.calls.find(([event]) => event === 'interaction')?.[1] as
     ((ctx: unknown, event: InteractionEvent) => Promise<void>);
   const message = on.mock.calls.find(([event]) => event === 'message')?.[1] as (ctx: MiddlewareContext) => Promise<void>;
@@ -84,6 +90,45 @@ async function loopback(listener: RequestListener) {
     await closed;
   };
 }
+
+it('learns admitted private nicknames even when recording is off and keeps them when later events omit the name', async () => {
+  const f = await gateway({ c2cMode: 'allowlist', c2cAllow: ['allowed'] }, undefined, (dir, logger) => ({
+    names: new QqDisplayNames(join(dir, 'names.json'), logger),
+    timeline: new QqTimeline(join(dir, 'timeline'), logger),
+    recording: () => false,
+  }));
+  const send = async (id: string, openId: string, senderName?: string) => {
+    const timestamp = new Date().toISOString();
+    const replyTarget = { scope: 'c2c', targetId: openId, msgId: id } as const;
+    const controller = new AbortController();
+    let stopReason: string | undefined;
+    const context: MiddlewareContext = {
+      bot: f.bot, replyTarget, receivedAt: Date.now(), state: {}, signal: controller.signal,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      message: {
+        kind: 'c2c', senderId: openId, senderName, messageId: id, content: 'hello', timestamp, replyTarget,
+        rawEventType: 'C2C_MESSAGE_CREATE', raw: { id, content: 'hello', timestamp, author: { user_openid: openId } },
+      },
+      stop(reason) { stopReason = reason; },
+      get stopped() { return stopReason !== undefined; },
+      get stopReason() { return stopReason; },
+      abort(reason) { controller.abort(reason); this.stop(reason); },
+      get aborted() { return controller.signal.aborted; },
+    };
+    await runMiddlewareChain(f.bot.getMiddlewares(), context);
+  };
+  try {
+    await send('named', 'allowed', '小明');
+    await send('unnamed', 'allowed');
+    await send('blocked', 'blocked', '无权限');
+    const names = new QqDisplayNames(join(sandbox.dir!, 'names.json'), { info() {}, warn() {}, error() {}, debug() {} });
+    expect(names.peer('gateway-test', 'c2c', 'allowed')).toBe('小明');
+    expect(names.peer('gateway-test', 'c2c', 'blocked')).toBeUndefined();
+    expect(names.peer('another-bot', 'c2c', 'allowed')).toBeUndefined();
+  } finally {
+    await f.unload();
+  }
+});
 
 it('blocks an inbound error reply when access is revoked while the SDK gets its token', async () => {
   const request = vi.fn();

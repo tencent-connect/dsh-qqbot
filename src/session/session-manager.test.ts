@@ -6,7 +6,7 @@
  * - E3 连带：prefs 损坏导致映射丢失时必须留下可见日志
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
@@ -169,6 +169,28 @@ function createdIds(registry: { create: { mock: { calls: Array<[{ sessionId: str
 beforeEach(() => {
   env.home = mkdtempSync(join(tmpdir(), 'im-qqbot-session-'));
   mkdirSync(join(env.home, 'workspace'), { recursive: true });
+});
+
+it.each([true, false])('creates the robot default workspace only (uses default: %s)', async usesDefault => {
+  const robotWorkspace = join(env.home, 'robots', APP_ID, 'workspace');
+  const selectedWorkspace = usesDefault ? robotWorkspace : join(env.home, 'unavailable-project');
+  const config = ConfigSchema({ appId: APP_ID, appSecret: 'secret', cwd: robotWorkspace, sessionIdleTimeout: 0 });
+  const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+  const manager = new SessionManager(absentCtx(), registry, config, createLogger(), undefined, {
+    read: () => ({ ...WORKBENCH_SETTINGS, cwd: selectedWorkspace }),
+  });
+  managers.push(manager);
+
+  const opening = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+  if (usesDefault) {
+    await opening;
+    expect(registry.create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd: robotWorkspace } }));
+    expect(existsSync(robotWorkspace)).toBe(true);
+  } else {
+    await expect(opening).rejects.toThrow('所选工作区目录不可用');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(existsSync(selectedWorkspace)).toBe(false);
+  }
 });
 
 it('applies staged model, effort, preset, workspace and native permission on new Session only', async () => {

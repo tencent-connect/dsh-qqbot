@@ -510,6 +510,7 @@ window.__ModuleLoader__.load({
 					robotName,
 					openSession,
 					refreshEntry,
+					peerName: scope === "c2c" ? peer.alias || peer.name : void 0,
 					onReply: !disabledReason && canQuoteTimelineEntry(row) ? (sender) => composer.current?.replyTo(row, sender) : void 0,
 					compact: !newDay && grouped(previous, row)
 				});
@@ -530,11 +531,11 @@ window.__ModuleLoader__.load({
 				onUpdate: reload
 			}));
 		}
-		function MessageRow({ row, appId, scope, openId, robotName, openSession, refreshEntry, onReply, compact }) {
+		function MessageRow({ row, appId, scope, openId, robotName, peerName, openSession, refreshEntry, onReply, compact }) {
 			const [checking, setChecking] = (0, react.useState)(false);
 			const [receiptNote, setReceiptNote] = (0, react.useState)("");
 			const outbound = row.direction === "outbound";
-			const sender = outbound ? robotName : row.senderName || (row.senderId ? `成员 ${row.senderId.slice(-8)}` : "QQ 成员");
+			const sender = outbound ? robotName : peerName || row.senderName || (scope === "c2c" ? `私聊 ${openId.slice(-8)}` : row.senderId ? `成员 ${row.senderId.slice(-8)}` : "QQ 成员");
 			const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(" · ");
 			const linkedSession = row.sessionId;
 			const queryReceipt = async () => {

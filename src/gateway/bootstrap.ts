@@ -31,6 +31,7 @@ import { PLUGIN_HOME } from '../shared/dirs.ts';
 import { ManualQqSender, createManualTransport } from '../transport/manual-send.ts';
 import { resolveReplyTarget } from '../transport/reply-target.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
+import type { QqDisplayNames } from '../runtime/qq-display-names.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
@@ -83,6 +84,7 @@ export function bootstrapGateway(
     recording: (target: ReplyTarget) => boolean;
     initialize?: (target: ReplyTarget) => Promise<void>;
     agent?: PeerAgentSettings;
+    names?: QqDisplayNames;
   },
 ): GatewayRuntime {
   const manager = new SessionManager(ctx, agents, config, logger, prefs, history?.agent);
@@ -138,6 +140,10 @@ export function bootstrapGateway(
     const { message, replyTarget } = messageContext;
     const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
     if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope) return;
+    const senderName = messageSenderName(message);
+    if (replyTarget.scope === 'c2c' && allowTarget(replyTarget)) {
+      history.names?.savePeer(config.appId, replyTarget.scope, peer, senderName);
+    }
     await history.initialize?.(replyTarget);
     if (!canRecord(replyTarget)) return;
     const body = message.content.replaceAll(`<@!${config.appId}>`, '').replaceAll(`<@${config.appId}>`, '').trim();
@@ -158,7 +164,7 @@ export function bootstrapGateway(
       id: receivedEntryId(message.messageId), at: Date.parse(message.timestamp) || Date.now(),
       direction: 'inbound', status: 'received', platformId: message.messageId,
       text: pairing ? '配对码已隐藏' : command ? command[0] : timelineText(body),
-      senderId: message.senderId, senderName: messageSenderName(message),
+      senderId: message.senderId, senderName,
       attachments: message.attachments?.length || undefined, quote,
     }, true);
   }), reportInbound, (messageContext, text) => {
