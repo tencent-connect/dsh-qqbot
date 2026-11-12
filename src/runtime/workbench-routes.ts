@@ -1,9 +1,20 @@
+import { readFile } from 'node:fs/promises';
 import type { Context } from '@deepseek-ai/cordis';
-import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotBinding, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
+import { BindingService } from '../setup/binding-service.ts';
+import type { SetupCredentials } from '../setup/persist.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
 import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
+
+export function registerWorkbenchGroupGuideImages(ctx: Context): void {
+  for (const [filename, path] of Object.entries(WORKBENCH_GROUP_GUIDE_IMAGES)) {
+    const image = new URL(`../../assets/qq-group-permissions/${filename}`, import.meta.url);
+    registerWorkbenchFetch(ctx, path, ['GET'], async () =>
+      new Response(await readFile(image), { headers: { 'Content-Type': 'image/png', 'Cache-Control': 'no-store' } }));
+  }
+}
 
 export function registerWorkbenchTools(ctx: Context): void {
   registerWorkbenchFetch(ctx, WORKBENCH_TOOLS_PATH, ['GET'], async request => {
@@ -65,6 +76,7 @@ export function registerWorkbenchFetch(
   path: string,
   methods: readonly ('GET' | 'POST')[],
   handle: (request: Request, assertWritable: () => void) => Promise<Response>,
+  onDispose?: () => void,
 ): void {
   ctx.inject(['connection'], scope => {
     const connection = scope.get('connection') as { fetch?: ConnectionFetchRegistry } | undefined;
@@ -95,10 +107,114 @@ export function registerWorkbenchFetch(
       });
       return () => {
         active = false;
+        onDispose?.();
         return unregister();
       };
     }, `im-qqbot.workbench:${path}`);
   });
+}
+
+interface RobotBindAttempt {
+  id: string;
+  service: BindingService;
+  timer: ReturnType<typeof setTimeout>;
+  submission?: Promise<WorkbenchRobotBinding>;
+  result?: WorkbenchRobotBinding;
+}
+
+export function registerWorkbenchRobotBinding(
+  ctx: Context,
+  saveRobot: (patch: WorkbenchRobotPatch) => Promise<WorkbenchRobot>,
+  createBinding: () => BindingService,
+): void {
+  let attempt: RobotBindAttempt | undefined;
+  const clearAttempt = () => {
+    if (!attempt) return;
+    const previous = attempt;
+    attempt = undefined;
+    clearTimeout(previous.timer);
+    previous.service.dispose();
+  };
+  const submit = (current: RobotBindAttempt, credentials: SetupCredentials): Promise<WorkbenchRobotBinding> => {
+    if (current.submission) return current.submission;
+    current.service.dispose();
+    current.result = { phase: 'saving' };
+    current.submission = (async (): Promise<WorkbenchRobotBinding> => {
+      try {
+        const appId = robotAppId(credentials.appId);
+        const appSecret = robotSecret(credentials.appSecret);
+        const userOpenid = credentials.userOpenid;
+        const robot = await saveRobot({ appId, appSecret, revision: null,
+          ...(userOpenid ? { access: robotAccessPatch({ c2cMode: 'allowlist', c2cAllow: [userOpenid] }) } : {}),
+        });
+        return { phase: 'bound', robot: publicRobot(robot) };
+      } catch (error) {
+        return { phase: 'failed', reason: error instanceof RobotConfigConflictError
+          || (error instanceof WorkbenchRequestError && error.status === 409)
+          ? '这个机器人已添加，请在机器人列表中选择它。' : '绑定未保存，请核对凭据后重试。' };
+      }
+    })().then(result => {
+      current.result = result;
+      if (result.phase === 'failed') current.submission = undefined;
+      return result;
+    });
+    return current.submission;
+  };
+
+  registerWorkbenchFetch(ctx, WORKBENCH_ROBOT_BIND_PATH, ['GET', 'POST'], async (request, assertWritable) => {
+    if (request.method === 'GET') {
+      if (!attempt || new URL(request.url).searchParams.get('id') !== attempt.id) {
+        throw new WorkbenchRequestError(404, '绑定已结束，请刷新二维码。');
+      }
+      return workbenchJson(attempt.result ?? attempt.service.wireState());
+    }
+    const text = await request.text();
+    let body: Record<string, unknown>;
+    try {
+      if (Buffer.byteLength(text) > 4096) throw new Error();
+      body = robotObject(JSON.parse(text), ['action', 'id', 'appId', 'appSecret']);
+    } catch {
+      throw new WorkbenchRequestError(400, '绑定请求无效。');
+    }
+    const { action, id } = body;
+    if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)) {
+      throw new WorkbenchRequestError(400, '绑定标识无效。');
+    }
+    assertWritable();
+    if (action === 'start') {
+      if (attempt?.submission && attempt.result?.phase === 'saving') {
+        throw new WorkbenchRequestError(409, '正在保存机器人，请稍候。');
+      }
+      clearAttempt();
+      const service = createBinding();
+      const timer = setTimeout(() => { if (attempt === current) clearAttempt(); }, 10 * 60_000);
+      timer.unref();
+      const current: RobotBindAttempt = { id, service, timer };
+      attempt = current;
+      void service.start().then(credentials => {
+        if (credentials && attempt === current) return submit(current, credentials);
+      }).catch(() => {
+        if (attempt === current) attempt.result = { phase: 'failed', reason: '无法生成二维码，请刷新后重试。' };
+      });
+      return workbenchJson(service.wireState());
+    }
+    if (action === 'cancel') {
+      if (attempt?.id === id && attempt.result?.phase !== 'saving') clearAttempt();
+      return workbenchJson({ ok: true });
+    }
+    if (action === 'manual') {
+      const current = attempt;
+      if (!current || current.id !== id) throw new WorkbenchRequestError(404, '绑定已结束，请刷新二维码。');
+      let credentials: SetupCredentials;
+      try {
+        credentials = { appId: robotAppId(body.appId), appSecret: robotSecret(body.appSecret) };
+      } catch {
+        throw new WorkbenchRequestError(400, '请填写有效的 AppID 和 AppSecret。');
+      }
+      return workbenchJson(await submit(current, credentials));
+    }
+    throw new WorkbenchRequestError(400, '绑定操作无效。');
+  }, clearAttempt);
 }
 
 export function registerWorkbenchRoutes(

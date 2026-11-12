@@ -1,6 +1,7 @@
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
+import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson } from './http.ts';
 import { QqComposer, type QqComposerHandle } from './workbench-composer.ts';
@@ -41,13 +42,7 @@ function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): 
   };
 }
 
-export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }: {
-  appId: string;
-  peer: WorkbenchConversation;
-  robotName: string;
-  disabledReason?: string;
-  openSession?: (id: string) => void;
-}): ReactNode {
+export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }: QqWorkbenchViewProps): ReactNode {
   const [page, setPage] = useState<TimelinePage>();
   const [error, setError] = useState('');
   const [readingOlder, setReadingOlder] = useState(false);

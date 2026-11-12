@@ -1,6 +1,14 @@
 import type { AccessControlConfig } from '../config.ts';
+import type { BindStateWire } from './bind-protocol.ts';
 
 export const WORKBENCH_ROBOTS_PATH = '/api/qqbot/workbench/robots';
+export const WORKBENCH_ROBOT_BIND_PATH = '/api/qqbot/workbench/robots/bind';
+export const WORKBENCH_GROUP_GUIDE_IMAGES = {
+  'message-scope.png': '/api/qqbot/workbench/group-permissions/message-scope.png',
+  'proactive.png': '/api/qqbot/workbench/group-permissions/proactive.png',
+} as const;
+
+export type WorkbenchRobotBinding = Exclude<BindStateWire, { phase: 'bound' }> | { phase: 'bound'; robot: WorkbenchRobot };
 
 export type WorkbenchRobotState = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disabled';
 

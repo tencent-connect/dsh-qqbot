@@ -136,6 +136,7 @@ export class RobotRuntimes {
       mediaRoot: robotMediaRoot(appId, record.kind),
       access: record.kind === 'additional' ? record.access : this.primary!.access.currentAccess(),
       liveSessionId: (scope: ChatScope, openId: string) => manager?.getSessionRecord(scope, openId)?.sessionId,
+      sessionChangePending: (scope: ChatScope, openId: string) => manager?.sessionChangePending(scope, openId) ?? false,
       agentSettings: (scope: ChatScope, openId: string, existing: boolean) => {
         const key = peerKey(appId, scope, openId);
         return this.conversationSettings.get(key).agent

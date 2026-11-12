@@ -46,7 +46,7 @@ export interface OutboundHandlers {
 
 /** dsh Session 简化类型 */
 export interface SessionLike {
-  header: { id: string };
+  header: { id: string; cwd?: string };
 }
 
 /** 工具调用记录（tool/call 建立，tool/result 消费） */
@@ -140,7 +140,7 @@ class OutboundRouter {
     const plan = this.tracker.planFor(sessionId);
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
-      this.finishTurn(sessionId, event, plan);
+      this.finishTurn(sessionId, event, plan, session.header.cwd);
       this.outputOptions.delete(sessionId);
       return;
     }
@@ -322,7 +322,7 @@ class OutboundRouter {
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
    * 外层轮次失败不撤销已完成的声明（宿主契约），故失败轮的文件仍投递。
    */
-  private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined): void {
+  private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined, sessionCwd?: string): void {
     const buffer = this.buffers.get(sessionId);
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
@@ -349,7 +349,7 @@ class OutboundRouter {
         await this.send(plan.target, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
-        await this.deliverer.deliver(plan.target, files);
+        await this.deliverer.deliver(plan.target, files, sessionCwd);
       }
       this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
     })();

@@ -16,6 +16,7 @@ import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import { workbenchImage } from './workbench-image.ts';
+import type { QqbotTimelineService, QqConversationRef } from '../shared/workbench-extension.ts';
 import type { ManualAttachment } from '../transport/manual-send.ts';
 
 interface PeerSettings {
@@ -28,7 +29,7 @@ interface PeerSettings {
 const defaults: Readonly<PeerSettings> = Object.freeze({ alias: '', receiving: true, recording: true, revision: 0 });
 export const peerKey = (appId: string, scope: ChatScope, openId: string): string => `qqbot:${appId}:${scope}:${openId}`;
 
-function validOpenId(value: unknown): value is string {
+export function validOpenId(value: unknown): value is string {
   return typeof value === 'string' && /^\S{1,1024}$/.test(value) && !/[\x00-\x1f\x7f]/.test(value);
 }
 function parsePeer(appId: string, key: string): { scope: ChatScope; openId: string } | undefined {
@@ -159,6 +160,7 @@ interface ConversationAccount {
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
+  sessionChangePending?(scope: ChatScope, openId: string): boolean;
 }
 type RuntimeReader = Pick<RobotRuntimes, 'prefs' | 'conversationSettings' | 'timeline'> & Partial<Pick<RobotRuntimes, 'toolPolicies' | 'newSession'>> & {
   conversationAccount(appId: string): ConversationAccount | undefined;
@@ -245,7 +247,31 @@ async function parsePatch(request: Request): Promise<WorkbenchConversationPatch>
   };
 }
 
-export function registerWorkbenchConversations(ctx: Context, robots: RuntimeReader, logger: Logger): void {
+export function workbenchTimelineService(robots: Pick<RuntimeReader, 'conversationAccount' | 'timeline'>): QqbotTimelineService {
+  return {
+    timelinePage({ appId, scope, openId }, before) {
+      if (!robots.conversationAccount(appId)) return undefined;
+      return robots.timeline.page(appId, { scope, targetId: openId }, before);
+    },
+    timelineEntry({ appId, scope, openId }, entryId) {
+      if (!robots.conversationAccount(appId)) return undefined;
+      return robots.timeline.entry(appId, { scope, targetId: openId }, entryId);
+    },
+    async timelineImage({ appId, scope, openId }, entryId, index) {
+      const account = robots.conversationAccount(appId);
+      if (!account?.mediaRoot) return undefined;
+      const file = robots.timeline.imageFile(appId, { scope, targetId: openId }, entryId, index);
+      return file ? workbenchImage(account.mediaRoot, file) : undefined;
+    },
+  };
+}
+
+export function registerWorkbenchConversations(
+  ctx: Context,
+  robots: RuntimeReader,
+  logger: Logger,
+  timeline = workbenchTimelineService(robots),
+): void {
   registerWorkbenchFetch(ctx, WORKBENCH_TIMELINE_PATH, ['GET'], async request => {
     if (request.method !== 'GET') return workbenchJson({ error: '不支持的请求方法。' }, 405);
     const query = new URL(request.url).searchParams;
@@ -265,20 +291,18 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     } catch {
       return workbenchJson({ error: 'QQ 流水查询参数无效。' }, 400);
     }
-    const account = robots.conversationAccount(appId);
-    if (!account) return workbenchJson({ error: '找不到这个 QQ 机器人。' }, 404);
+    if (!robots.conversationAccount(appId)) return workbenchJson({ error: '找不到这个 QQ 机器人。' }, 404);
     try {
-      const target: { scope: ChatScope; targetId: string } = { scope, targetId: openId };
+      const target: QqConversationRef = { appId, scope, openId };
       if (entryId !== undefined) {
         if (image !== null) {
-          const file = robots.timeline.imageFile(appId, target, entryId, Number(image));
-          const preview = account.mediaRoot && file ? await workbenchImage(account.mediaRoot, file) : undefined;
+          const preview = await timeline.timelineImage(target, entryId, Number(image));
           return preview ?? workbenchJson({ error: '图片已过期或无法预览。' }, 404);
         }
-        const entry = robots.timeline.entry(appId, target, entryId);
+        const entry = timeline.timelineEntry(target, entryId);
         return entry ? workbenchJson(entry) : workbenchJson({ error: '这条记录已不可用。' }, 404);
       }
-      const page = robots.timeline.page(appId, target, before);
+      const page = timeline.timelinePage(target, before);
       return page ? workbenchJson(page) : workbenchJson({ error: '该页记录已不可用，请刷新。' }, 404);
     } catch {
       return workbenchJson({ error: 'QQ 流水读取失败，记录可能不完整。' }, 503);
@@ -338,13 +362,26 @@ export function registerWorkbenchConversations(ctx: Context, robots: RuntimeRead
     const [conversation] = await projectConversations(robots, patch.appId, persistence, patch);
     if (!conversation) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
     const key = peerKey(patch.appId, patch.scope, patch.openId);
-    const binding = robots.prefs.listSessionBindings(patch.appId).find(row => row.key === key);
-    const sessions = [...new Set([...conversation.sessions.map(session => session.id),
-      ...(binding?.history ?? []), ...(binding?.current ? [binding.current] : [])])];
+    const sessionBindings = () => {
+      const account = robots.conversationAccount(patch.appId);
+      const binding = robots.prefs.listSessionBindings(patch.appId).find(row => row.key === key);
+      const live = account?.liveSessionId(patch.scope, patch.openId);
+      const pending = account?.sessionChangePending?.(patch.scope, patch.openId);
+      return { current: binding?.current, history: binding?.history ?? [], live, pending };
+    };
+    const baseline = patch.agent ? sessionBindings() : undefined;
+    const sessions = [...new Set([...conversation.sessions.map(session => session.id), ...(baseline?.history ?? []),
+      ...(baseline?.current ? [baseline.current] : []), ...(baseline?.live ? [baseline.live] : [])])];
     const assertCurrent = () => {
       assertWritable();
       if (robots.conversationSettings.get(key).revision !== patch.revision) {
         throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
+      }
+      if (baseline) {
+        const current = sessionBindings();
+        if (baseline.pending || current.pending || JSON.stringify(current) !== JSON.stringify(baseline)) {
+          throw new WorkbenchRequestError(409, 'Session 正在切换或已更新，请重新加载后再保存。');
+        }
       }
     };
     try {

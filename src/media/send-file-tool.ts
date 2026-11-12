@@ -118,7 +118,11 @@ export function registerSendFileTool(
         return [{ type: 'text', text: `已发送 ${v.fileName} → ${v.target}` }];
       },
     },
-    async execute(args: unknown, exec: { signal: AbortSignal; agent?: { id?: string }; callId?: string }): Promise<Record<string, unknown>> {
+    async execute(args: unknown, exec: {
+      signal: AbortSignal;
+      agent?: { id?: string; session?: { header?: { cwd?: string } } };
+      callId?: string;
+    }): Promise<Record<string, unknown>> {
       const { file_path, target } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
@@ -163,7 +167,8 @@ export function registerSendFileTool(
         appId: config.appId, key: deliveryKey('file-tool', agentId, exec.callId), sessionId: owner ? agentId : undefined, allowed, fixed: true,
       });
 
-      const cwd = resolveAgentCwd(config.cwd);
+      const sessionCwd = owner === undefined ? undefined : exec.agent?.session?.header?.cwd;
+      const cwd = resolveAgentCwd(sessionCwd || config.cwd);
       const absPath = resolve(file_path);
       if (!isPathAllowed(absPath, config.sendFile, cwd, mediaRoot)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);

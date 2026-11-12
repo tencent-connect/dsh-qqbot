@@ -1,0 +1,30 @@
+{
+  "name": "@tencent-connect/dsh-qqbot-workbench-history",
+  "version": "0.5.6",
+  "type": "module",
+  "license": "MIT",
+  "description": "QQ message history and direct sending for the DSH QQBot workbench.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "locale"
+  ],
+  "peerDependencies": {
+    "@tencent-connect/dsh-qqbot": "^0.5.6"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@tencent-connect/dsh-qqbot"
+      ]
+    }
+  }
+}

@@ -873,13 +873,29 @@ export class SessionManager {
     return undefined;
   }
 
+  sessionChangePending(scope: ChatScope, peerId: string): boolean {
+    const key = this.sessionKey(scope, peerId);
+    return this.inflight.has(key) || this.switching.has(key) || this.rebuilding.has(key);
+  }
+
   async remove(scope: ChatScope, peerId: string): Promise<void> {
     this.assertActive();
     const key = this.sessionKey(scope, peerId);
-    if (this.switching.has(key) || this.rebuilding.has(key)) throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
+    const assertNotSwitching = () => {
+      if (this.switching.has(key) || this.rebuilding.has(key)) throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
+    };
+    assertNotSwitching();
+    let previous: string | undefined;
+    if (this.modelResolver.getSessionId(key) === undefined) {
+      const legacy = legacyDerivedSessionId(key);
+      if (await this.host.sessionExists(legacy)) previous = legacy;
+      assertNotSwitching();
+      // A concurrent resume or reset may already have established the mapping.
+      if (this.modelResolver.getSessionId(key) !== undefined) previous = undefined;
+    }
     const record = this.sessions.get(key);
     try {
-      this.modelResolver.setSessionId(key, mintSessionId(), { durable: true });
+      this.modelResolver.setSessionId(key, mintSessionId(), { durable: true, previous });
     } catch {
       throw new SessionSwitchConflict('无法保存新 Session，原会话保持不变，请稍后重试。');
     }

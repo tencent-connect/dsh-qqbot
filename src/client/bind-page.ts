@@ -224,6 +224,10 @@ export function useBindState(enabled = true): { state: BindStateWire | null; gon
 }
 
 interface ManualResult { ok: boolean; message?: string; error?: string }
+interface BindActions {
+  refresh: () => void;
+  submit: (appId: string, appSecret: string) => Promise<ManualResult>;
+}
 
 /** 手动提交凭据（填写 / 更换共用） */
 export async function submitManualCredentials(appId: string, appSecret: string): Promise<ManualResult> {
@@ -245,7 +249,9 @@ export async function submitManualCredentials(appId: string, appSecret: string):
  * appSecret 永不回显（占位符提示），提交成功后展示保存结果；
  * 宿主写入 profile patch 并经 HMR 重载，状态轮询随后收敛为 bound。
  */
-function ManualForm({ initialAppId, recheck, onCancel }: { initialAppId?: string; recheck: () => void; onCancel?: () => void }): ReactNode {
+function ManualForm({ initialAppId, recheck, onCancel, save = submitManualCredentials }: {
+  initialAppId?: string; recheck: () => void; onCancel?: () => void; save?: BindActions['submit'];
+}): ReactNode {
   const formId = useId();
   const [appId, setAppId] = useState(initialAppId ?? '');
   const [appSecret, setAppSecret] = useState('');
@@ -263,7 +269,7 @@ function ManualForm({ initialAppId, recheck, onCancel }: { initialAppId?: string
     }
     setBusy(true);
     setResult(null);
-    void submitManualCredentials(trimmedId, trimmedSecret).then((outcome) => {
+    void save(trimmedId, trimmedSecret).then((outcome) => {
       setResult(outcome);
       if (outcome.ok) {
         setAppSecret('');
@@ -271,7 +277,7 @@ function ManualForm({ initialAppId, recheck, onCancel }: { initialAppId?: string
       }
       setBusy(false);
     });
-  }, [appId, appSecret, busy, recheck]);
+  }, [appId, appSecret, busy, recheck, save]);
 
   const saveButton = createElement(Button, {
     key: 'save', variant: 'primary', size: 'sm', type: 'submit', form: formId,
@@ -284,7 +290,8 @@ function ManualForm({ initialAppId, recheck, onCancel }: { initialAppId?: string
         createElement('div', { className: 'imqb-status-icon' }, '✅'),
         createElement('div', { className: 'imqb-status-meta' },
           createElement('p', { className: 'imqb-status-title' }, result.message ?? '凭据已保存'),
-          createElement('p', { className: 'imqb-status-sub' }, '插件将自动重载，连接结果可在左侧 QQ 导航底部查看'),
+          save === submitManualCredentials ? createElement('p', { className: 'imqb-status-sub' },
+            '插件将自动重载，连接结果可在左侧 QQ 导航底部查看') : null,
         ),
         createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: recheck }, '刷新状态'),
       ),
@@ -413,39 +420,40 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
 }
 
 /** 未绑定视图：扫码 / 手动填写切换 */
-function UnboundView({ state, recheck }: { state: Extract<BindStateWire, { phase: 'waiting' }>; recheck: () => void }): ReactNode {
-  const [mode, setMode] = useState<'qr' | 'manual'>('qr');
+function UnboundView({ state, recheck, actions }: {
+  state: Extract<BindStateWire, { phase: 'waiting' | 'starting' | 'failed' }>;
+  recheck: () => void;
+  actions?: BindActions;
+}): ReactNode {
+  const [manual, setManual] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(() => {
     if (busy) return;
+    if (actions) { actions.refresh(); return; }
     setBusy(true);
     setError(null);
     void fetchJson<{ ok?: boolean }>(BIND_REFRESH_PATH, { method: 'POST' })
       .then(() => { recheck(); })
       .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : '刷新失败，请重试'); })
       .finally(() => { setBusy(false); });
-  }, [busy, recheck]);
-
-  if (mode === 'manual') {
-    return createElement('div', { className: 'imqb-panel' },
-      createElement('p', { className: 'imqb-title' }, '手动填写凭据'),
-      createElement(ManualForm, { recheck }),
-      createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => { setMode('qr'); } }, '改用扫码绑定'),
-    );
-  }
+  }, [actions, busy, recheck]);
 
   return createElement('div', { className: 'imqb-panel' },
-    state.qrSvg === undefined
-      ? null
-      : createElement('img', { src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr' }),
     createElement('p', { className: 'imqb-title' }, '扫码绑定 QQ 机器人'),
-    createElement('p', { className: 'imqb-hint' }, '使用手机 QQ 扫描二维码完成绑定'),
-    createElement('a', { href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '二维码显示异常？在浏览器中打开'),
+    state.phase === 'waiting'
+      ? [
+          state.qrSvg ? createElement('img', { key: 'qr', src: state.qrSvg, alt: 'QQ 扫码二维码', width: 220, height: 220, className: 'imqb-qr' }) : null,
+          createElement('p', { key: 'hint', className: 'imqb-hint' }, '使用手机 QQ 扫描二维码完成绑定'),
+          createElement('a', { key: 'link', href: state.url, target: '_blank', rel: 'noreferrer noopener', className: 'imqb-link' }, '在浏览器中打开绑定页'),
+        ]
+      : createElement('p', { className: state.phase === 'failed' ? 'imqb-error' : 'imqb-hint', role: 'status' },
+          state.phase === 'failed' ? state.reason : '正在获取二维码…'),
     createElement('div', { className: 'imqb-row' },
-      createElement(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: refresh }, busy ? '正在刷新…' : '刷新二维码'),
-      createElement(Button, { variant: 'outline', size: 'sm', onClick: () => { setMode('manual'); } }, '手动填写'),
+      createElement(Button, { variant: 'outline', size: 'sm', disabled: busy || state.phase === 'starting', onClick: refresh }, busy ? '正在刷新…' : '刷新二维码'),
+      createElement(Button, { variant: 'outline', size: 'sm', 'aria-expanded': manual, onClick: () => setManual(!manual) }, '手动填写'),
     ),
+    manual ? createElement(ManualForm, { recheck, save: actions?.submit }) : null,
     error ? createElement('p', { className: 'imqb-error', role: 'alert' }, error) : null,
   );
 }
@@ -476,6 +484,7 @@ interface BindPanelBodyProps {
   gone?: boolean;
   recheck?: () => void;
   error?: string | null;
+  actions?: BindActions;
 }
 
 export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
@@ -506,14 +515,14 @@ export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
     );
   }
 
-  if (state === null || state.phase === 'starting') {
+  if ((state === null || state.phase === 'starting') && !props.actions) {
     return createElement('div', { className: 'imqb-panel' },
       createElement('p', { className: error ? 'imqb-error' : 'imqb-hint', role: 'status' }, error ?? '正在获取绑定状态…'),
       error ? createElement(Button, { variant: 'outline', size: 'sm', onClick: recheck }, '重试读取绑定状态') : null,
     );
   }
 
-  if (state.phase === 'saving') {
+  if (state?.phase === 'saving') {
     // 扫码路径：保留二维码做模糊过渡（手动填写路径无二维码，用紧凑态）
     if (lastQr !== null) {
       return createElement('div', { className: 'imqb-panel' },
@@ -537,13 +546,13 @@ export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
     );
   }
 
-  if (state.phase === 'failed') {
+  if (state?.phase === 'failed' && !props.actions) {
     return createElement(FailedView, { reason: state.reason, recheck });
   }
 
-  if (state.phase === 'bound') {
+  if (state?.phase === 'bound') {
     return createElement(BoundView, { key: state.appId, appId: state.appId, recheck });
   }
 
-  return createElement(UnboundView, { state, recheck });
+  return createElement(UnboundView, { state: state ?? { phase: 'starting' }, recheck, actions: props.actions });
 }

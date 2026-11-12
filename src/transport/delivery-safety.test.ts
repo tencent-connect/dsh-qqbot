@@ -173,12 +173,25 @@ describe('explicit file tool source and replay checks', () => {
       ownerOf: id => accounts.find(account => account.sessionId === id)?.descriptor.config.appId,
       defaultAppId: () => accounts.length === 1 ? accounts[0]?.descriptor.config.appId : undefined,
     }, logger);
-    const definition = registry.register.mock.calls[0]?.[0] as { execute(args: unknown, exec: { agent: { id: string }; callId?: string; signal: AbortSignal }): Promise<unknown> };
-    return (file: string, callId: string | undefined, agentId: string, explicit?: string) => definition.execute(
+    const definition = registry.register.mock.calls[0]?.[0] as { execute(args: unknown, exec: {
+      agent: { id: string; session?: { header: { cwd: string } } }; callId?: string; signal: AbortSignal;
+    }): Promise<unknown> };
+    return (file: string, callId: string | undefined, agentId: string, explicit?: string, cwd?: string) => definition.execute(
       { file_path: file, target: explicit },
-      { agent: { id: agentId }, callId, signal: new AbortController().signal },
+      { agent: { id: agentId, session: cwd ? { header: { cwd } } : undefined }, callId, signal: new AbortController().signal },
     );
   }
+
+  it('sends a QQ Session file from the selected workspace and rejects the old robot workspace', async () => {
+    const f = runtime('app', 'qq-session');
+    const cwd = directory();
+    const selected = join(cwd, 'report.txt');
+    writeFileSync(selected, 'from the new workspace');
+    const execute = tool(f);
+    await expect(execute(selected, 'selected', f.sessionId, undefined, cwd)).resolves.toMatchObject({ fileName: 'report.txt' });
+    await expect(execute(f.file, 'old-root', f.sessionId, undefined, cwd)).rejects.toThrow('不在允许的目录内');
+    expect(f.raw.sendFile).toHaveBeenCalledExactlyOnceWith(target, { localPath: selected }, expect.anything());
+  });
 
   it('preserves the original reply target when explicitly sending to the current private chat', async () => {
     const f = runtime('app', 'qq-session'), execute = tool(f);

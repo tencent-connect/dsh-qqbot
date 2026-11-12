@@ -722,6 +722,16 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
   });
 });
 
+it.each([true, false])('preserves only a verified legacy Session on the first QQ /new (exists=%s)', async exists => {
+  const { registry } = createRegistry(async () => { throw new Error('unexpected resume'); });
+  const manager = createManagerWithCtx(registry, onDiskCtx(...(exists ? [LEGACY_ID] : [])));
+  expect(persistedId()).toBeUndefined();
+  await manager.remove('c2c', PEER);
+  expect(new PrefsStore().listSessionBindings(APP_ID)).toEqual([
+    { key: KEY, current: expect.stringMatching(MINTED), history: exists ? [LEGACY_ID] : [] },
+  ]);
+});
+
 describe('web workbench session switching', () => {
   const settings = WORKBENCH_SETTINGS;
 

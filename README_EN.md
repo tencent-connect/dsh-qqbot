@@ -131,6 +131,20 @@ All three rosters (direct chat, group, commands) support three ways to add membe
 
 The config API returns `config.accessRevision`; submit it together with `access` updates. If the roster or mode changed since your read, the update returns 409 instead of overwriting the newer grants.
 
+### QQ group message scope and proactive messaging
+
+Ask the group owner to open the bot's settings in the mobile QQ group. Set these permissions separately for each group.
+
+| Mobile QQ setting | Behavior in DSH |
+|---|---|
+| Bot group message scope → Receive all group messages | QQ can deliver new messages that do not mention the bot. The workbench records them when the group is allowed and both receiving and saving messages are enabled for the conversation. In mention-only mode, ordinary messages can become recent context but do not start an Agent turn on their own. The workbench starts recording when messages arrive and does not backfill group history. |
+| Allow the bot to proactively message the group | The bot can send when no usable reply reference is available. Manual workbench sends prefer a valid reply reference when one exists. Automatic delivery of web replies uses a separate bot setting. |
+
+<img src="./assets/qq-group-permissions/message-scope.png" alt="Group message scope options in mobile QQ" width="300" />
+<img src="./assets/qq-group-permissions/proactive.png" alt="Proactive group messaging setting in mobile QQ" width="300" />
+
+The phone status bar and the bot adder’s display name are masked.
+
 ### Proactive delivery (proactiveDelivery)
 
 Turns triggered by QQ inbound always reply passively; service turns (e.g. schedules) are always pushed proactively. This only controls turns driven by non-QQ input (e.g. continuing a QQ session from the desktop):

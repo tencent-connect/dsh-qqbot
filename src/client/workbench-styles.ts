@@ -66,13 +66,11 @@ export const WORKBENCH_STYLES = `
 .imqw-robot-settings-head { margin-bottom: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
 .imqw-robot-settings-head button { flex: none; }
 .imqw-layout .imqw-robot-settings-head h2 { font-size: 20px; margin-bottom: 4px; }
-.imqw-robot-settings .imqr-inline {
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-2);
-  padding: 16px;
+.imqw-primary-settings {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
 }
-.imqw-primary-settings { margin-top: 20px; }
 .imqw-robot-tab { margin-top: 16px; }
 .imqw-primary-settings .imqb2-group-title { padding-top: 20px; font-size: 13px; }
 .imqw-robots .imqr-row[data-selected], .imqw-peer[data-selected] > .imqw-peer-row {
@@ -238,6 +236,7 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
   gap: 12px;
 }
 .imqw-settings .imqw-form { min-height: 100%; gap: 0; }
+.imqw-settings:has(> .imqw-extension-settings) .imqw-form { min-height: 0; }
 .imqw-settings-group, .imqw-defaults-section { border-top: 1px solid var(--dsw-alias-border-l2); }
 .imqw-settings-group > summary {
   display: flex;
@@ -253,6 +252,11 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
 .imqw-settings-group:not([open]) > summary > svg { transform: rotate(-90deg); }
 .imqw-settings-group > summary > .imqw-muted { margin-inline-start: auto; text-align: end; }
 .imqw-settings-group-body, .imqw-defaults-section { display: grid; gap: 12px; min-width: 0; padding-bottom: 12px; }
+.imqw-group-guide-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.imqw-group-guide-heading button { flex: none; }
+.imqw-group-guide-dialog { max-height: 100%; }
+.imqw-group-guide-scroll { min-height: 0; overflow-y: auto; }
+.imqw-group-guide-image { display: block; width: 100%; height: auto; border-radius: 6px; }
 .imqw-settings-meta > summary { color: var(--dsw-alias-label-tertiary); font-size: 12px; cursor: pointer; }
 .imqw-settings-meta[open] > summary { margin-bottom: 8px; }
 .imqw-settings summary:focus-visible { outline: 2px solid var(--dsw-focus-ring-color); outline-offset: 2px; }

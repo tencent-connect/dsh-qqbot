@@ -1,4 +1,4 @@
-import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
@@ -8,10 +8,11 @@ import {
   type WorkbenchNewSession,
   type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
-import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
-import { QqTimelineView } from './workbench-timeline.ts';
+import { extensionSettingsProps, type WorkbenchExtensions } from './workbench-extensions.ts';
+import type { QqWorkbenchSettingsSection, QqWorkbenchView } from '../shared/workbench-extension.ts';
 import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
@@ -20,6 +21,7 @@ import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
+type RobotView = 'conversation' | 'settings' | 'add';
 type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording' | 'agent'>;
 
 interface Draft extends EditableSettings {
@@ -118,24 +120,27 @@ interface SessionNavigation {
 }
 
 export interface QQWorkbenchProps extends SessionNavigation {
+  extensions: WorkbenchExtensions;
   primarySettings: ReactNode;
   primaryAccountSettings: ReactNode;
   agentSource?: AgentFormSource;
 }
 
-export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+export function QQWorkbench({ extensions, primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+  const views = useSyncExternalStore(extensions.subscribe, extensions.getViews);
+  const settingsSections = useSyncExternalStore(extensions.subscribe, extensions.getSettingsSections);
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
-  const [robotSettings, setRobotSettings] = useState(false);
+  const [robotView, setRobotView] = useState<RobotView>('conversation');
   const [robotPage, setRobotPage] = useState('account');
   const robotTabsId = useId();
-  const layout = useWorkbenchLayout(nav.collapsed, !robotSettings, nav.peerSettingsOpen);
+  const layout = useWorkbenchLayout(nav.collapsed, robotView === 'conversation', nav.peerSettingsOpen);
 
   const navigate = (patch: Partial<Navigation>): void => {
     Object.assign(lastNavigation, patch);
     setNav({ ...lastNavigation });
   };
   const selectRobot = (appId: string): void => {
-    setRobotSettings(false);
+    setRobotView('conversation');
     if (nav.appId === appId) return;
     navigate({ appId, smallPage: 'list' });
   };
@@ -147,16 +152,38 @@ export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSour
       collapsed: layout.iconsOnly,
       compact: layout.compact,
       onToggleCollapse: () => navigate({ collapsed: !nav.collapsed }),
+      onAdd: () => setRobotView('add'),
+      onCancelAdd: () => setRobotView('conversation'),
       onOpenSettings: appId => {
         if (nav.appId !== appId) navigate({ appId });
         setRobotPage('account');
-        setRobotSettings(true);
+        setRobotView('settings');
       },
-      render: ({ robots, unavailable, rail, accountSettings }) => {
+      render: ({ robots, unavailable, rail, accountSettings, cancelAdd, busy }) => {
         if (unavailable) return h('div', { className: 'imqb-pluginPage' },
           h('div', { className: 'imqb-pluginPageContent' }, primarySettings));
         const robot = robots?.find(candidate => candidate.appId === nav.appId) ?? robots?.[0];
-        const showRobotSettings = Boolean(robotSettings && robot && accountSettings);
+        const primaryUnbound = robots?.length === 0;
+        const adding = robotView === 'add';
+        const editing = robotView === 'settings' && robot !== undefined && accountSettings !== null;
+        const showRobotSettings = primaryUnbound || adding || editing;
+        const settingsSubtitle = editing && robot
+          ? `${accountName(robot)} · ${ROBOT_STATE_LABELS[robot.state]}`
+          : primaryUnbound ? '主机器人 · 未绑定' : '新机器人 · 未绑定';
+        const settingsBody = editing && robot ? h(Fragment, null,
+          h(SegmentedControl, { id: robotTabsId, label: '机器人设置页面', value: robotPage,
+            options: [{ value: 'account', label: '账号与权限' }, { value: 'defaults', label: '新会话默认设置' }],
+            onChange: setRobotPage,
+          }),
+          h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-account-panel`, 'aria-labelledby': `${robotTabsId}-account`, hidden: robotPage !== 'account' },
+            accountSettings,
+            robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
+              h('h3', null, '凭据与访问'),
+              primaryAccountSettings,
+            ) : null),
+          h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-defaults-panel`, 'aria-labelledby': `${robotTabsId}-defaults`, hidden: robotPage !== 'defaults' },
+            h(WorkbenchDefaultsForm, { key: robot.appId, appId: robot.appId, source: agentSource })),
+        ) : primaryUnbound ? primaryAccountSettings : accountSettings;
         return h('div', { className: 'imqw-root', ref: layout.root },
           h('style', null, WORKBENCH_STYLES),
           h('div', {
@@ -173,32 +200,23 @@ export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSour
                 className: 'imqw-conversation-grid', hidden: showRobotSettings,
                 'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
               }, h(RobotConversations, {
-                key: robot.appId, robot, agentSource, settingsOpen: nav.peerSettingsOpen,
+                key: robot.appId, robot, agentSource, views, settingsSections: showRobotSettings ? [] : settingsSections, settingsOpen: nav.peerSettingsOpen,
                 settingsVisible: nav.peerSettingsOpen && (!layout.singlePage || nav.smallPage === 'settings'),
                 singlePage: layout.singlePage, ...sessionNavigation,
                 treeDivider: layout.divider('tree'), settingsDivider: layout.divider('settings'),
                 onToggleSettings: open => navigate({ peerSettingsOpen: open, smallPage: open ? 'settings' : 'conversation' }),
                 onSmallPage: page => navigate({ smallPage: page }),
-              })) : h('section', { className: 'imqw-empty' },
-                robots?.length === 0 ? primarySettings : h('p', { role: 'status' }, rail ? '机器人列表暂不可用' : '正在读取机器人…')),
-              showRobotSettings && robot ? h('section', { className: 'imqw-robot-settings', 'aria-label': '机器人设置' },
+              })) : showRobotSettings ? null : h('section', { className: 'imqw-empty' },
+                h('p', { role: 'status' }, rail ? '机器人列表暂不可用' : '正在读取机器人…')),
+              showRobotSettings ? h('section', { className: 'imqw-robot-settings', 'aria-label': '机器人设置' },
                 h('div', { className: 'imqw-robot-settings-inner' },
                   h('header', { className: 'imqw-column-head imqw-robot-settings-head' },
                     h('div', null, h('h2', null, '机器人设置'),
-                      h('p', { className: 'imqw-muted' }, `${accountName(robot)} · ${ROBOT_STATE_LABELS[robot.state]}`)),
-                    h(Button, { size: 'sm', variant: 'outline', onClick: () => setRobotSettings(false) }, '返回会话')),
-                  h(SegmentedControl, { id: robotTabsId, label: '机器人设置页面', value: robotPage,
-                    options: [{ value: 'account', label: '账号与权限' }, { value: 'defaults', label: '新会话默认设置' }],
-                    onChange: setRobotPage,
-                  }),
-                  h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-account-panel`, 'aria-labelledby': `${robotTabsId}-account`, hidden: robotPage !== 'account' },
-                    accountSettings,
-                    robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
-                      h('h3', null, '凭据与访问'),
-                      primaryAccountSettings,
-                    ) : null),
-                  h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-defaults-panel`, 'aria-labelledby': `${robotTabsId}-defaults`, hidden: robotPage !== 'defaults' },
-                    h(WorkbenchDefaultsForm, { key: robot.appId, appId: robot.appId, source: agentSource })),
+                      h('p', { className: 'imqw-muted' }, settingsSubtitle)),
+                    primaryUnbound ? null : h(Button, { size: 'sm', variant: 'outline', disabled: adding && busy,
+                      onClick: adding ? cancelAdd : () => setRobotView('conversation'),
+                    }, '返回会话')),
+                  settingsBody,
                 ),
               ) : null,
             ),
@@ -210,6 +228,8 @@ export function QQWorkbench({ primarySettings, primaryAccountSettings, agentSour
 }
 
 interface RobotConversationsProps extends SessionNavigation {
+  views: readonly QqWorkbenchView[];
+  settingsSections: readonly QqWorkbenchSettingsSection[];
   robot: WorkbenchRobot;
   agentSource?: AgentFormSource;
   settingsOpen: boolean;
@@ -221,8 +241,13 @@ interface RobotConversationsProps extends SessionNavigation {
   onSmallPage: (page: SmallPage) => void;
 }
 
-function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
+function RobotConversations({ robot, agentSource, views, settingsSections, settingsOpen, settingsVisible, singlePage, treeDivider, settingsDivider, openSession, restoreSession, archivedSessionIds, sessionTitle, workspaceTitle, onToggleSettings, onSmallPage }: RobotConversationsProps): ReactNode {
   const { appId } = robot;
+  const [openViewId, setOpenViewId] = useState<string>();
+  const activeView = views.find(view => view.id === openViewId);
+  useEffect(() => {
+    if (!activeView) setOpenViewId(undefined);
+  }, [activeView]);
   const [peers, setPeers] = useState<WorkbenchConversation[] | null>(null);
   const [selection, setSelection] = useState(() => peerSelections.get(appId));
   const [query, setQuery] = useState('');
@@ -493,6 +518,11 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
           h('h2', { title: peer && peerName(peer) }, peer ? peerName(peer) : accountName(robot)),
           h('p', { className: 'imqw-muted' }, peer ? `${peer.scope === 'group' ? '群聊' : '私聊'} · ${label}` : '请从会话列表选择对话')),
         h('div', { className: 'imqw-actions' },
+          peer ? views.map(view => h(Button, {
+            key: view.id, type: 'button', size: 'sm', variant: 'outline',
+            'aria-expanded': activeView === view,
+            onClick: () => setOpenViewId(activeView === view ? undefined : view.id),
+          }, `${activeView === view ? '收起' : '查看'} ${view.title}`)) : null,
           currentArchived
             ? h(Button, { size: 'sm', variant: 'outline', disabled: !restoreSession || !!busyKey || !!restoring,
               onClick: () => { void restoreCurrent(); } }, restoring === current?.id ? '恢复中…' : '恢复原会话')
@@ -520,13 +550,13 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
         workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd),
         current.preset,
       ].filter(Boolean).join(' · ')) : null,
-      peer ? h(QqTimelineView, { key: peerKey, appId, peer, robotName: accountName(robot), openSession: openSession && openNative,
+      peer && activeView ? h(activeView.component, { key: `${activeView.id}:${peerKey}`, appId, peer, robotName: accountName(robot), openSession: openSession && openNative,
         disabledReason: !robot.enabled || robot.state !== 'connected' ? '机器人未连接'
           : !peer.admitted ? '此会话未获准接入' : !peer.receiving ? '此会话已暂停' : undefined }) : null,
     ),
     settingsDivider,
     h('aside', { id: settingsId, className: 'imqw-settings', 'aria-label': '会话设置', hidden: !settingsOpen },
-      peer && peerKey ? h(ConversationSettings, {
+      peer && peerKey ? h(Fragment, null, h(ConversationSettings, {
             key: peerKey, robot, peer, agentSource, closeButton, archived: currentArchived,
             workspace: current && workspaceTitle?.(current.id, current.cwd), draft: peerDrafts.get(peerKey) ?? selectDraft(peer),
             busy: busyKey === peerKey, feedback: feedback?.key === peerKey ? feedback : undefined,
@@ -537,7 +567,10 @@ function RobotConversations({ robot, agentSource, settingsOpen, settingsVisible,
               setFeedback(undefined);
             },
             onSave: draft => { void save(peer, draft); },
-          }) : h(Fragment, null,
+          }), settingsVisible ? settingsSections.map(section =>
+            h(ExtensionSettingsGroup, {
+              key: `${peerKey}:${section.id}`, section, appId, scope: peer.scope, openId: peer.openId,
+            })) : null) : h(Fragment, null,
             h('header', { className: 'imqw-column-head' }, h('h2', null, '会话设置'), closeButton),
             h('p', { className: 'imqw-muted' }, '选择群聊或联系人后可以编辑。')),
     ),
@@ -571,6 +604,53 @@ function SettingsGroup({ title, hint, defaultOpen, children }: { title: string; 
     h('summary', null, h(IconChevronDownOutlineRegular, { size: 14 }), h('strong', null, title),
       hint ? h('span', { className: 'imqw-muted' }, hint) : null),
     h('div', { className: 'imqw-settings-group-body' }, children));
+}
+
+function ExtensionSettingsGroup({ section, appId, scope, openId }: {
+  section: QqWorkbenchSettingsSection;
+  appId: string;
+  scope: WorkbenchConversation['scope'];
+  openId: string;
+}): ReactNode {
+  const [opened, setOpened] = useState(false);
+  const [props] = useState(() => extensionSettingsProps(section.id, { appId, scope, openId }));
+  return h('details', {
+    className: 'imqw-settings-group imqw-extension-settings',
+    onToggle: (event: SyntheticEvent<HTMLDetailsElement>) => { if (event.currentTarget.open) setOpened(true); },
+  },
+    h('summary', null, h(IconChevronDownOutlineRegular, { size: 14 }), h('strong', null, section.title)),
+    opened ? h('div', { className: 'imqw-settings-group-body' }, h(section.component, props)) : null,
+  );
+}
+
+const groupPermissionGuide = [
+  {
+    title: '获取群内全部消息',
+    description: '在「机器人可获取的群聊消息范围」中选择此项，工作台才能接收普通群消息。是否记录消息和是否仅在 @ 时回复由 DSH 设置决定。',
+    image: WORKBENCH_GROUP_GUIDE_IMAGES['message-scope.png'],
+  },
+  {
+    title: '机器人主动在群聊内发言',
+    description: '开启后，工作台可在没有可用回复凭据时主动发言。网页回答的自动推送仍由机器人的主动推送配置决定。',
+    image: WORKBENCH_GROUP_GUIDE_IMAGES['proactive.png'],
+  },
+] as const;
+
+function GroupPermissionGuide(): ReactNode {
+  const [preview, setPreview] = useState<typeof groupPermissionGuide[number]>();
+  return h(SettingsGroup, { title: 'QQ 群权限', hint: '在手机 QQ 设置', children: h(Fragment, null,
+    h('p', { className: 'imqw-muted' }, '请群主在手机 QQ 的群聊中打开机器人的设置。'),
+    groupPermissionGuide.map(item => h('div', { key: item.image },
+      h('div', { className: 'imqw-group-guide-heading' },
+        h('strong', null, item.title),
+        h(Button, { type: 'button', size: 'sm', variant: 'ghost', 'aria-haspopup': 'dialog',
+          'aria-label': `看图：${item.title}`, onClick: () => setPreview(item) }, '看图')),
+      h('p', { className: 'imqw-muted' }, item.description))),
+    preview ? h(Modal, {
+      open: true, title: preview.title, closeLabel: '关闭', onClose: () => setPreview(undefined),
+      className: 'imqw-group-guide-dialog', contentClassName: 'imqw-group-guide-scroll',
+    }, h('img', { className: 'imqw-group-guide-image', src: preview.image, alt: `手机 QQ 设置截图：${preview.title}` })) : null,
+  ) });
 }
 
 interface ConversationSettingsProps {
@@ -656,6 +736,7 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
           h('dt', null, 'OpenID'), h('dd', null, h('code', null, peer.openId)),
         )),
     ) }),
+    peer.scope === 'group' ? h(GroupPermissionGuide) : null,
     fields ? h(Fragment, null,
       h(SettingsGroup, { title: 'Agent 基本设置', children: h(Fragment, null,
         current ? h('p', { className: 'imqw-muted' }, [archived ? '当前 Session 已归档' : '当前 Session', workspace || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ')) : null,
