@@ -4,10 +4,8 @@
  * 隔离文件 I/O 操作，便于单元测试时 mock。
  * 存储路径：~/.dsh-qqbot/model-prefs.json（全局共享，多实例/多进程共存）。
  *
- * 并发安全（该文件存在多个写者——同进程多 bot 实例、跨进程多 profile）：
- * - 原子写：同目录临时文件 + rename，崩溃不留半份文件；
- * - 写前合并：重读磁盘，保留其他写者的条目，内存覆盖同 key（本进程视角权威）；
- * - 删除墓碑：本进程显式删除的 key 在合并时压住磁盘旧值，防止「删除被并发写复活」。
+ * 写前重读磁盘，只合并本实例待保存的修改与删除。原子替换后清除待写键。
+ * 同进程的同步写入不会交错。原子替换不提供跨进程读改写互斥。
  */
 import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -25,15 +23,10 @@ interface PrefsFile {
   overrides: Record<string, ModelRoute>;
   /** sessionKey → 最新 sessionId（fork 后更新，用于重启后恢复到 fork 后的会话） */
   sessionIds: Record<string, string>;
+  /** Previously current native sessions, grouped by the same peer key. */
+  sessionHistory?: Record<string, string[]>;
   /** sessionKey → preset id（per-peer preset 覆盖） */
   presets: Record<string, string>;
-}
-
-/** 各段的删除墓碑（key 集合），合并时用于压住磁盘上的旧值 */
-interface Tombstones {
-  overrides: Set<string>;
-  sessionIds: Set<string>;
-  presets: Set<string>;
 }
 
 export class PrefsStore {
@@ -43,10 +36,14 @@ export class PrefsStore {
   private sessionIds = new Map<string, string>();
   /** sessionIds 的反向索引（sessionId → sessionKey），与 sessionIds 同步维护 */
   private sessionKeys = new Map<string, string>();
+  private readonly sessionHistory = new Map<string, string[]>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
-  /** 本进程显式删除的 key（防止并发合并把删除复活） */
-  private deleted: Tombstones = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
+  private readonly pending: Record<Exclude<keyof PrefsFile, 'sessionHistory'>, Set<string>> = {
+    overrides: new Set(),
+    sessionIds: new Set(),
+    presets: new Set(),
+  };
   /** 隔离偏好文件路径 */
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
@@ -67,16 +64,12 @@ export class PrefsStore {
 
   setOverride(sessionKey: string, route: ModelRoute): void {
     this.overrides.set(sessionKey, route);
-    this.deleted.overrides.delete(sessionKey);
-    this.write();
+    this.write('overrides', sessionKey);
   }
 
   clearOverride(sessionKey: string): boolean {
     const deleted = this.overrides.delete(sessionKey);
-    if (deleted) {
-      this.deleted.overrides.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('overrides', sessionKey);
     return deleted;
   }
 
@@ -98,21 +91,70 @@ export class PrefsStore {
     return this.sessionKeys.get(sessionId);
   }
 
-  setSessionId(sessionKey: string, sessionId: string): void {
+  findUniqueCurrentSessionKey(sessionId: string): string | undefined {
+    let owner: string | undefined;
+    for (const [key, id] of this.sessionIds) {
+      if (id !== sessionId) continue;
+      if (owner !== undefined) return undefined;
+      owner = key;
+    }
+    return owner;
+  }
+
+  hasForeignCurrentBinding(sessionKey: string, sessionId: string): boolean {
+    for (const [key, id] of this.sessionIds) {
+      if (id === sessionId && key !== sessionKey) return true;
+    }
+    return false;
+  }
+
+  findKnownSessionKey(sessionId: string): string | undefined {
+    const current = this.findSessionKey(sessionId);
+    if (current !== undefined) return current;
+    for (const [key, ids] of this.sessionHistory) {
+      if (ids.includes(sessionId)) return key;
+    }
+    return undefined;
+  }
+
+  listSessionBindings(appId: string): { key: string; current?: string; history: readonly string[] }[] {
+    const prefix = `qqbot:${appId}:`;
+    return [...new Set([...this.sessionIds.keys(), ...this.sessionHistory.keys(), ...this.overrides.keys(), ...this.presets.keys()])]
+      .filter(key => key.startsWith(prefix))
+      .map(key => ({
+        key, current: this.sessionIds.get(key), history: [...(this.sessionHistory.get(key) ?? [])],
+      }));
+  }
+
+  setSessionId(sessionKey: string, sessionId: string, options?: { durable: true; previous?: string }): void {
+    const previous = this.sessionIds.get(sessionKey);
+    const history = this.sessionHistory.get(sessionKey);
+    const alreadyPending = this.pending.sessionIds.has(sessionKey);
+    this.rememberSession(sessionKey, sessionId, options?.previous ?? previous);
     this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);
     this.sessionKeys.set(sessionId, sessionKey);
-    this.deleted.sessionIds.delete(sessionKey);
-    this.write();
+    try {
+      this.write('sessionIds', sessionKey, options?.durable);
+    } catch (error) {
+      this.unindexSessionId(sessionKey);
+      if (previous === undefined) this.sessionIds.delete(sessionKey);
+      else {
+        this.sessionIds.set(sessionKey, previous);
+        this.sessionKeys.set(previous, sessionKey);
+      }
+      if (history === undefined) this.sessionHistory.delete(sessionKey);
+      else this.sessionHistory.set(sessionKey, history);
+      if (!alreadyPending) this.pending.sessionIds.delete(sessionKey);
+      throw error;
+    }
   }
 
   clearSessionId(sessionKey: string): boolean {
+    this.rememberSession(sessionKey);
     this.unindexSessionId(sessionKey);
     const deleted = this.sessionIds.delete(sessionKey);
-    if (deleted) {
-      this.deleted.sessionIds.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('sessionIds', sessionKey);
     return deleted;
   }
 
@@ -124,20 +166,24 @@ export class PrefsStore {
 
   setPreset(sessionKey: string, presetId: string): void {
     this.presets.set(sessionKey, presetId);
-    this.deleted.presets.delete(sessionKey);
-    this.write();
+    this.write('presets', sessionKey);
   }
 
   clearPreset(sessionKey: string): boolean {
     const deleted = this.presets.delete(sessionKey);
-    if (deleted) {
-      this.deleted.presets.add(sessionKey);
-      this.write();
-    }
+    if (deleted) this.write('presets', sessionKey);
     return deleted;
   }
 
   // ── 私有方法 ──
+
+  private rememberSession(key: string, next?: string, previous = this.sessionIds.get(key)): void {
+    if (previous === undefined || previous === next) return;
+    const history = new Set(this.sessionHistory.get(key));
+    history.add(previous);
+    if (next !== undefined) history.delete(next);
+    this.sessionHistory.set(key, [...history]);
+  }
 
   /** 移除 sessionKey 当前指向的反向索引（仅当索引仍归属该 key） */
   private unindexSessionId(sessionKey: string): void {
@@ -167,6 +213,12 @@ export class PrefsStore {
           }
         }
       }
+      if (data.sessionHistory && typeof data.sessionHistory === 'object') {
+        for (const [key, ids] of Object.entries(data.sessionHistory)) {
+          if (!Array.isArray(ids)) continue;
+          this.sessionHistory.set(key, [...new Set(ids.filter(id => typeof id === 'string' && id && id !== this.sessionIds.get(key)))]);
+        }
+      }
       if (data.presets && typeof data.presets === 'object') {
         for (const [key, presetId] of Object.entries(data.presets)) {
           if (typeof presetId === 'string' && presetId) {
@@ -191,12 +243,12 @@ export class PrefsStore {
    * 丢掉（用户表现为「QQ 里丢上下文」且无从恢复）。备份保留一份人工可救的证据。
    */
   private readDiskState(): PrefsFile | null {
-    if (!existsSync(this.prefsPath)) return null;
     let raw: string;
     try {
       raw = readFileSync(this.prefsPath, 'utf8');
-    } catch {
-      return null; // 读不到（权限/并发删除）：按首次写处理，不备份
+    } catch (err) {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return null;
+      throw err;
     }
     try {
       const data = JSON.parse(raw) as PrefsFile;
@@ -222,26 +274,39 @@ export class PrefsStore {
     }
   }
 
-  /** 合并内存与磁盘（内存覆盖同 key，磁盘独有的其他写者条目保留，墓碑 key 除外） */
   private mergeDisk(disk: PrefsFile | null): PrefsFile {
-    const pick = <T>(mem: Map<string, T>, diskMap: Record<string, T> | undefined, tomb: Set<string>): Record<string, T> => {
-      const out = Object.fromEntries(mem.entries());
-      if (diskMap && typeof diskMap === 'object') {
-        for (const [key, value] of Object.entries(diskMap)) {
-          if (key in out || tomb.has(key)) continue;
-          out[key] = value;
-        }
+    const merge = <T>(section: keyof typeof this.pending, mem: Map<string, T>, saved?: Record<string, T>): Record<string, T> => {
+      if (disk === null) return Object.fromEntries(mem);
+      const out = new Map(saved && typeof saved === 'object' ? Object.entries(saved) : []);
+      for (const key of this.pending[section]) {
+        const value = mem.get(key);
+        if (value === undefined) out.delete(key);
+        else out.set(key, value);
       }
-      return out;
+      return Object.fromEntries(out);
     };
+    const history = new Map(Object.entries(disk?.sessionHistory ?? Object.fromEntries(this.sessionHistory)));
+    for (const key of this.pending.sessionIds) {
+      const saved = history.get(key);
+      const ids = new Set(Array.isArray(saved) ? saved.filter(id => typeof id === 'string' && id) : []);
+      for (const id of this.sessionHistory.get(key) ?? []) ids.add(id);
+      const previous = disk?.sessionIds?.[key];
+      if (typeof previous === 'string' && previous) ids.add(previous);
+      const current = this.sessionIds.get(key);
+      if (current !== undefined) ids.delete(current);
+      if (ids.size) history.set(key, [...ids]);
+      else history.delete(key);
+    }
     return {
-      overrides: pick(this.overrides, disk?.overrides, this.deleted.overrides),
-      sessionIds: pick(this.sessionIds, disk?.sessionIds, this.deleted.sessionIds),
-      presets: pick(this.presets, disk?.presets, this.deleted.presets),
+      overrides: merge('overrides', this.overrides, disk?.overrides),
+      sessionIds: merge('sessionIds', this.sessionIds, disk?.sessionIds),
+      ...(history.size > 0 ? { sessionHistory: Object.fromEntries(history) } : {}),
+      presets: merge('presets', this.presets, disk?.presets),
     };
   }
 
-  private write(): void {
+  private write(section: keyof typeof this.pending, key: string, durable = false): void {
+    this.pending[section].add(key);
     try {
       mkdirSync(dirname(this.prefsPath), { recursive: true });
       const data = this.mergeDisk(this.readDiskState());
@@ -252,6 +317,12 @@ export class PrefsStore {
       try {
         writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
         renameSync(tmpPath, this.prefsPath);
+        for (const peer of this.pending.sessionIds) {
+          const ids = data.sessionHistory?.[peer];
+          if (ids?.length) this.sessionHistory.set(peer, ids);
+          else this.sessionHistory.delete(peer);
+        }
+        for (const keys of Object.values(this.pending)) keys.clear();
       } catch (err) {
         try { unlinkSync(tmpPath); } catch { /* 临时文件可能不存在 */ }
         throw err;
@@ -260,6 +331,7 @@ export class PrefsStore {
       const msg = `writePrefs failed: ${err instanceof Error ? err.message : String(err)}`;
       this.onError?.(msg);
       this.debugLog?.(msg);
+      if (durable) throw err;
     }
   }
 }

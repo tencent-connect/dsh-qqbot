@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrefsStore } from './prefs-store.ts';
@@ -33,7 +33,79 @@ describe('PrefsStore 并发安全（E3）', () => {
     });
   });
 
-  it('内存覆盖磁盘同 key：本进程视角权威', () => {
+  it('两个实例交错写入时保留另一账号的新会话、模型和预设', () => {
+    const a = store();
+    a.setSessionId('botA:peer', 'session-a1');
+    a.setPreset('botA:peer', 'preset-a1');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a1' });
+    const b = store();
+
+    a.setSessionId('botA:peer', 'session-a2');
+    a.clearPreset('botA:peer');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a2' });
+    b.setSessionId('botB:peer', 'session-b1');
+
+    const restored = store();
+    expect(restored.getSessionId('botA:peer')).toBe('session-a2');
+    expect(restored.findSessionKey('session-a1')).toBeUndefined();
+    expect(restored.getPreset('botA:peer')).toBeUndefined();
+    expect(restored.getOverride('botA:peer')).toEqual({ provider: 'provider', model: 'model-a2' });
+    expect(restored.getSessionId('botB:peer')).toBe('session-b1');
+  });
+
+  it('保存失败后重试待写改动，保留期间已落盘的其他账号更新', () => {
+    const onError = vi.fn();
+    const a = new PrefsStore(undefined, { path, onError });
+    a.setPreset('botA:peer', 'preset-a1');
+    a.setSessionId('botB:peer', 'session-b1');
+    const b = store();
+
+    const saved = join(dir, 'saved-prefs.json');
+    renameSync(path, saved);
+    mkdirSync(path);
+    a.clearPreset('botA:peer');
+    a.setSessionId('botA:peer', 'session-a1');
+    expect(onError).toHaveBeenCalledTimes(2);
+    rmSync(path, { recursive: true });
+    renameSync(saved, path);
+
+    b.setSessionId('botB:peer', 'session-b2');
+    a.setOverride('botA:peer', { provider: 'provider', model: 'model-a1' });
+    const restored = store();
+    expect(restored.getPreset('botA:peer')).toBeUndefined();
+    expect(restored.getSessionId('botA:peer')).toBe('session-a1');
+    expect(restored.getSessionId('botB:peer')).toBe('session-b2');
+  });
+
+  it('显式发送只解析唯一的当前映射，拒绝历史或重复映射', () => {
+    const a = store();
+    a.setSessionId('qqbot:A:c2c:same', 'old');
+    a.setSessionId('qqbot:A:c2c:same', 'current');
+    expect(a.findUniqueCurrentSessionKey('old')).toBeUndefined();
+    expect(a.findUniqueCurrentSessionKey('current')).toBe('qqbot:A:c2c:same');
+    a.setSessionId('qqbot:B:group:same', 'current');
+    expect(store().findUniqueCurrentSessionKey('current')).toBeUndefined();
+  });
+
+  it('严格写入失败后保留原 Session，后续保存不重试失败的切换', () => {
+    const a = store();
+    const key = 'qqbot:botA:c2c:peer';
+    const saved = join(dir, 'saved-prefs.json');
+    a.setSessionId(key, 'old');
+    renameSync(path, saved);
+    mkdirSync(path);
+
+    expect(() => a.setSessionId(key, 'new', { durable: true })).toThrow();
+    expect(a.getSessionId(key)).toBe('old');
+    expect(a.findKnownSessionKey('new')).toBeUndefined();
+
+    rmSync(path, { recursive: true });
+    renameSync(saved, path);
+    a.setPreset(key, 'standard');
+    expect(store().getSessionId(key)).toBe('old');
+  });
+
+  it('显式修改同一键时，新值覆盖磁盘旧值', () => {
     const a = store();
     a.setSessionId('k', 'old');
 
@@ -136,5 +208,40 @@ describe('PrefsStore.findSessionKey 反向索引', () => {
     store().setSessionId('k', 'session-1');
 
     expect(store().findSessionKey('session-1')).toBe('k');
+  });
+});
+
+describe('QQ Session history', () => {
+  it('retains replaced and cleared bindings without giving them a current delivery address', () => {
+    const a = store();
+    const peer = 'qqbot:A:c2c:same';
+    a.setSessionId(peer, 'legacy');
+    a.setSessionId(peer, 'replacement');
+    a.clearSessionId(peer);
+    a.setSessionId('qqbot:B:c2c:same', 'other-bot');
+    a.setSessionId('qqbot:A:group:same', 'group');
+
+    const restored = store();
+    expect(restored.listSessionBindings('A')).toEqual([
+      { key: 'qqbot:A:group:same', current: 'group', history: [] },
+      { key: peer, current: undefined, history: ['legacy', 'replacement'] },
+    ]);
+    for (const sessionId of ['legacy', 'replacement']) {
+      expect(restored.findSessionKey(sessionId)).toBeUndefined();
+      expect(restored.findKnownSessionKey(sessionId)).toBe(peer);
+    }
+    expect(restored.findKnownSessionKey('other-bot')).toBe('qqbot:B:c2c:same');
+  });
+
+  it('keeps on-disk history when a stale writer replaces the same current binding', () => {
+    const first = store();
+    const peer = 'qqbot:A:c2c:same';
+    first.setSessionId(peer, 'first');
+    const stale = store();
+    first.setSessionId(peer, 'second');
+    stale.setSessionId(peer, 'third');
+    expect(store().listSessionBindings('A')).toEqual([
+      { key: peer, current: 'third', history: ['first', 'second'] },
+    ]);
   });
 });

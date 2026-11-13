@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { Middleware, MiddlewareContext, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -21,20 +21,45 @@ import {
 } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import type { ReplyIdCache } from '../transport/msgid-cache.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 export function setupMiddlewares(
   bot: QQBot,
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
+  replyIds: ReplyIdCache,
+  isActive: () => boolean,
+  mediaRoot?: string,
+  receiving?: (target: ReplyTarget) => boolean,
+  onAdmitted?: (ctx: MiddlewareContext) => void | Promise<void>,
+  onSkipped?: (target: ReplyTarget, outcome: TimelineInboundOutcome) => void,
+  pairingReply: (ctx: MiddlewareContext, text: string) => Promise<unknown> = (ctx, text) => ctx.bot.sendText(ctx.replyTarget, text),
 ): void {
-  // 1. 错误兜底（最外层洋葱皮）
+  const blocked = (ctx: MiddlewareContext): boolean => {
+    if (!isActive()) {
+      ctx.stop('gateway-inactive');
+      return true;
+    }
+    if (receiving?.(ctx.replyTarget) === false) {
+      ctx.stop('conversation-paused');
+      return true;
+    }
+    return false;
+  };
+  const requireReceiving: Middleware = async (ctx, next) => {
+    if (!blocked(ctx)) await next();
+  };
+  bot.use(requireReceiving);
+
+  // 1. 错误兜底
   bot.use(errorHandler());
 
   // 2. 消息过滤：bot 回声 + 消息去重
@@ -53,35 +78,64 @@ export function setupMiddlewares(
       return;
     }
     await mention(ctx, async () => limit(ctx, async () => {
+      if (blocked(ctx)) return;
+      let reply: string;
       try {
-        const result = service.beginClaimFromMessage(
+        reply = service.beginClaimFromMessage(
           ctx.replyTarget.scope, ctx.replyTarget.targetId, content,
           ctx.message.senderId, messageSenderName(ctx.message),
-        );
-        await ctx.bot.sendText(ctx.replyTarget, result.message);
+        ).message;
       } catch (err) {
         logger.error(`im-qqbot: 认领处理失败: ${err instanceof Error ? err.message : String(err)}`);
-        try { await ctx.bot.sendText(ctx.replyTarget, '⚠️ 认领处理失败，请稍后重试。'); } catch { /* reply best-effort */ }
+        reply = '⚠️ 认领处理失败，请稍后重试。';
+      }
+      if (blocked(ctx)) return;
+      try {
+        await pairingReply(ctx, reply);
+      } catch (err) {
+        logger.warn(`im-qqbot: 配对结果发送失败: ${err instanceof Error ? err.message : String(err)}`);
       }
       ctx.stop('claim-result');
     }));
   });
 
   // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
-  bot.use((ctx, next) => {
+  const admit: Middleware = (ctx, next) => {
     const access = manager.accountAccess?.currentAccess() ?? config.access;
     return accessPolicy({
       c2c: { mode: access.c2cMode, allow: access.c2cAllow },
       group: { mode: access.groupMode, allow: access.groupAllow },
       onBlock: (_ctx, reason) => { if (config.debug) logger.debug('Access blocked: ' + reason); },
     })(ctx, next);
+  };
+  bot.use(admit);
+  if (onAdmitted) bot.use(async (ctx, next) => {
+    if (blocked(ctx)) return;
+    await onAdmitted(ctx);
+    await next();
+    if (!onSkipped) return;
+    const reason = ctx.stopReason;
+    if (reason === 'mention-gate:no_mention' || reason === 'mention-gate:other_mention') {
+      onSkipped(ctx.replyTarget, 'mention-required');
+    } else if (reason?.startsWith('rate-limit:')) {
+      onSkipped(ctx.replyTarget, 'rate-limited');
+    } else if (reason === 'concurrency:queue-full') {
+      onSkipped(ctx.replyTarget, 'queue-full');
+    }
   });
 
   // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
   //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
+  const history = getHistoryStore();
   bot.use(historyBuffer({
     limit: config.historyLimit,
-    store: getHistoryStore(),
+    store: {
+      list: (key, limit) => history.list(key, limit),
+      append: (key, entry, limit) => {
+        const targetId = key.slice(config.appId.length + 1);
+        if (isActive() && receiving?.({ scope: 'group', targetId }) !== false) return history.append(key, entry, limit);
+      },
+    },
     recordOnSkip: true,
     groupKey: (ctx) => {
       const gid = ctx.message.groupOpenid;
@@ -89,6 +143,7 @@ export function setupMiddlewares(
       return historyGroupKey(config.appId, gid);
     },
   }));
+  bot.use(requireReceiving);
 
   // 5. 群聊 @bot 门控
   bot.use(mention);
@@ -108,6 +163,7 @@ export function setupMiddlewares(
     autoHelp: false,
     commands: buildCommandList({ manager, config, logger }),
   });
+  bot.use(requireReceiving);
   bot.use(slash.middleware);
   bot.use(async (ctx, next) => {
     if (ctx.message.content.trim().startsWith('/')) {
@@ -120,14 +176,16 @@ export function setupMiddlewares(
     await next();
   });
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
-  bot.use(questionAnswer(manager));
+  bot.use(questionAnswer(manager, replyIds));
 
-  // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
+  // 9. 同 peer 串行。不能合并不同发送者，否则无法保留每条输入的身份和回复窗口。
   bot.use(concurrencyGuard({
-    strategy: 'merge',
+    strategy: 'queue',
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
   }));
+  bot.use(requireReceiving);
+  bot.use(admit);
 
   // 10. C2C 输入状态指示
   bot.use(typingIndicator());
@@ -139,7 +197,7 @@ export function setupMiddlewares(
   }));
 
   // 11.5. 附件下载（file 附件下载到本地，供 @提及 / 工具访问）
-  bot.use(attachmentProcessor(config, logger));
+  bot.use(attachmentProcessor(config, logger, mediaRoot));
 
   // 12. 上下文组装（将 history + quote + sender 组成 envelope）
   bot.use(envelopeFormatter({

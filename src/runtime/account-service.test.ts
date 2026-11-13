@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigSchema } from '../config.ts';
 import { MemberStore } from './member-store.ts';
 import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
-import { readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
+import { readPairingState } from './pairing-state.ts';
+import { persistCredentialsToProfile, readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { whitelistEntries } from '../client/whitelist-export.ts';
 import * as files from '../shared/atomic-file.ts';
 
@@ -78,7 +79,32 @@ describe('membership persistence and pairing scope', () => {
     const id = purpose === 'allow-group' ? 'peer' : 'sender';
     expect(service.beginClaimFromMessage(scope, 'peer', first, 'sender', 'Test').ok).toBe(true);
     expect(service.revokePair(id, purpose).ok).toBe(true);
-    expect(fixture().service.beginClaimFromMessage(scope, 'peer', second, 'sender', 'Test').ok).toBe(false);
+    const reloaded = fixture().service;
+    expect(reloaded.isActivePairCode(second)).toBe(true);
+    expect(reloaded.pairing.claimResult(second, id)).toBeUndefined();
+    expect(reloaded.beginClaimFromMessage(scope, 'peer', second, 'sender', 'Test').ok).toBe(false);
+    const list = purpose === 'owner' ? 'owners' : purpose === 'allow-c2c' ? 'allowC2c' : 'allowGroup';
+    expect(reloaded.pairStatus()[list]).toEqual([]);
+  });
+  it('replays the pairing model counterexample after restoring only the pre-revocation pairing file', () => {
+    const { service } = fixture();
+    const purpose = 'allow-c2c';
+    const first = service.issuePairCode(purpose).code;
+    expect(service.beginClaimFromMessage('c2c', 'sender', first, 'sender', 'Test').ok).toBe(true);
+    const second = service.issuePairCode(purpose).code;
+    const statePath = join(profile.dir!, 'pairing.json');
+    const beforeRevocation = readFileSync(statePath);
+    expect(service.revokePair('sender', purpose).ok).toBe(true);
+    expect(readPairingState(statePath).map(batch => batch.revokedOpenids)).toEqual([['sender'], ['sender']]);
+    writeFileSync(statePath, beforeRevocation);
+
+    const reloaded = fixture().service;
+    expect(reloaded.pairStatus().allowC2c).toEqual([]);
+    expect(reloaded.pairing.claimResult(first, 'sender')?.state).toBe('added');
+    expect(reloaded.pairing.claimResult(second, 'sender')).toBeUndefined();
+    expect(reloaded.beginClaimFromMessage('c2c', 'sender', first, 'sender', 'Test').ok).toBe(false);
+    expect(reloaded.beginClaimFromMessage('c2c', 'sender', second, 'sender', 'Test').ok).toBe(true);
+    expect(fixture().service.pairStatus().allowC2c.map(member => member.openid)).toEqual(['sender']);
   });
   it('keeps revocation authoritative when a prior successful membership write lost its receipt', () => {
     const { service } = fixture(); const code = service.issuePairCode('allow-c2c').code;
@@ -248,4 +274,17 @@ describe('membership persistence and pairing scope', () => {
     expect(service.addManualMember('allow-group', 'team').ok).toBe(true);
     expect(readProfileAccess(undefined, profile.dir)).toMatchObject({ c2cMode: 'disabled', c2cAllow: ['keep'], groupMode: 'open', groupAllow: ['team'], commandMode: 'disabled' });
   });
+});
+
+it('rejects an old account even when the replacement keeps the same conversation lists', () => {
+  const { service } = fixture();
+  expect(persistCredentialsToProfile({ appId: service.config.appId, appSecret: 'fixture' }, profile.dir!, service.logger)).toBe(true);
+  expect(service.addManualMember('allow-c2c', 'peer').ok).toBe(true);
+  expect(service.addManualMember('allow-group', 'team').ok).toBe(true);
+  expect(service.allowsConversation('c2c', 'peer')).toBe(true);
+  expect(service.allowsConversation('group', 'team')).toBe(true);
+  expect(persistCredentialsToProfile({ appId: 'replacement', appSecret: 'fixture' }, profile.dir!, service.logger)).toBe(true);
+  expect(readProfileAccess(undefined, profile.dir, 'replacement')).toMatchObject({ c2cAllow: ['peer'], groupAllow: ['team'] });
+  expect(() => service.allowsConversation('c2c', 'peer')).toThrow();
+  expect(() => service.allowsConversation('group', 'team')).toThrow();
 });

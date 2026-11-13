@@ -22,12 +22,24 @@ export interface AccountAccessDeps {
   random?: () => number;
   store?: MemberStore;
   pairing?: PairingService;
+  access?: {
+    read(): AccessControlConfig;
+    update(change: (access: AccessControlConfig) => AccessControlConfig): void;
+  };
+}
+
+export function allowsConversation(access: AccessControlConfig, scope: ChatScope, openid: string): boolean {
+  const mode = scope === 'group' ? access.groupMode : access.c2cMode;
+  const allow = scope === 'group' ? access.groupAllow : access.c2cAllow;
+  return mode === 'open' || (mode === 'allowlist' && allow.includes(openid));
 }
 
 export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
+  private readonly accessBackend?: AccountAccessDeps['access'];
   constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}) {
+    this.accessBackend = deps.access;
     this.pairing = deps.pairing ?? new PairingService({
       stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
       random: deps.random ?? secureRandom,
@@ -183,11 +195,17 @@ export class AccountAccessService {
   }
 
   private updateMembership(purpose: Exclude<PairPurpose, 'owner'>, change: (list: readonly string[]) => string[]): boolean {
+    const field = purpose === 'allow-group' ? 'groupAllow' : 'c2cAllow';
+    const update = (access: AccessControlConfig) => ({ ...access, [field]: change(access[field]) });
+    if (this.accessBackend) {
+      this.accessBackend.update(update);
+      return true;
+    }
+
     const profileDir = getProfileDir() ?? undefined;
     const { appId, access: fallback } = this.config;
     const { access, revision } = readProfileAccessSnapshot(fallback, profileDir, appId);
-    const field = purpose === 'allow-group' ? 'groupAllow' : 'c2cAllow';
-    const next = { ...access, [field]: change(access[field]) };
+    const next = update(access);
     const persisted = updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision });
     if (persisted) this.syncConfigAccess(next);
     return persisted;
@@ -202,8 +220,12 @@ export class AccountAccessService {
     this.config.access = access;
   }
 
-  currentAccess() {
+  currentAccess(): AccessControlConfig {
+    if (this.accessBackend) return this.accessBackend.read();
     return readProfileAccess(this.config.access, getProfileDir() ?? undefined, this.config.appId);
+  }
+  allowsConversation(scope: ChatScope, openid: string): boolean {
+    return allowsConversation(this.currentAccess(), scope, openid);
   }
   commandAccessError(actor?: string): string | undefined {
     const mode = this.currentAccess().commandMode;

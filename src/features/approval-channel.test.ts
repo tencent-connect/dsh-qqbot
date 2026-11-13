@@ -389,6 +389,71 @@ describe('ApprovalChannel.handleInteraction', () => {
 });
 
 describe('ApprovalChannel.cancelPending', () => {
+  it.each(['signal', 'session'])('rejects a late approval card after cancellation by %s', async (source) => {
+    const sent: SentMessage[] = [];
+    const receipt = Promise.withResolvers<void>();
+    const sender = createSender(sent);
+    sender.sendMarkdown.mockImplementationOnce(async (_target, text, opts) => {
+      sent.push({ text, opts });
+      await receipt.promise;
+    });
+    const record = makeRecord(sessionKey('c2c', 'peer-qq'));
+    const channel = new ApprovalChannel(createManager({ findBySessionId: () => record }), sender, makeConfig(), createLogger());
+    const { handler } = installAndCapture(channel, sent);
+    const controller = new AbortController();
+    const decision = handler(makeRequest({ signal: controller.signal }), () => Promise.resolve('unavailable'));
+    expect(sent).toHaveLength(1);
+
+    if (source === 'signal') controller.abort();
+    else channel.cancelPending(record.sessionKey);
+    receipt.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(channel.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(false);
+    await expect(decision).resolves.toBe('cancelled');
+  });
+
+  it('does not let an older send receipt replace a newer approval', async () => {
+    const sent: SentMessage[] = [];
+    const oldReceipt = Promise.withResolvers<void>();
+    const sender = createSender(sent);
+    sender.sendMarkdown.mockImplementationOnce(async (_target, text, opts) => {
+      sent.push({ text, opts });
+      await oldReceipt.promise;
+    });
+    const record = makeRecord(sessionKey('c2c', 'peer-qq'));
+    const channel = new ApprovalChannel(createManager({ findBySessionId: () => record }), sender, makeConfig(), createLogger());
+    const { handler } = installAndCapture(channel, sent);
+    const old = handler(makeRequest({ callId: 'old' }), () => Promise.resolve('unavailable'));
+    const current = handler(makeRequest({ callId: 'current' }), () => Promise.resolve('unavailable'));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    oldReceipt.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const click = (index: number) => channel.handleInteraction(makeEvent(extractButtonData(sent[index]!, 'allow'), { user: 'peer-qq' }));
+    expect(click(0)).toBe(false);
+    expect(click(1)).toBe(true);
+    expect(click(1)).toBe(false);
+    await expect(old).resolves.toBe('cancelled');
+    await expect(current).resolves.toBe('allowed-once');
+  });
+
+  it('does not wait for a decision when the sender skipped the approval submission', async () => {
+    const sent: SentMessage[] = [];
+    const sender = {
+      sendMarkdown: vi.fn(async (_target: ReplyTarget, text: string, opts?: { keyboard?: unknown }) => {
+        sent.push({ text, opts });
+        return false;
+      }),
+    };
+    const record = makeRecord(sessionKey('c2c', 'peer-qq'));
+    const channel = new ApprovalChannel(createManager({ findBySessionId: () => record }), sender, makeConfig(), createLogger());
+    const { handler } = installAndCapture(channel, sent);
+    const decision = handler(makeRequest(), () => Promise.resolve('unavailable'));
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(channel.handleInteraction(makeEvent(buttonDataOf(sent, 'allow'), { user: 'peer-qq' }))).toBe(false);
+    await expect(decision).resolves.toBe('unavailable');
+  });
+
   it('cancels a pending approval on session eviction', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(

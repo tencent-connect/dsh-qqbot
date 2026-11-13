@@ -210,13 +210,13 @@ describe('OutboundRouter: deliverables/presented', () => {
       type: 'assistant/message',
       data: { message: { content: [{ type: 'text', text: 'final reply' }] } },
     });
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
+    outbound.routeSessionEvent({ header: { id: 'sess-qq', cwd: '/test/selected-workspace' } }, turnEnd);
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/report.xlsx' }]);
+    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/report.xlsx' }], '/test/selected-workspace');
     // 文本先于文件：markdown 发送的调用序在 deliver 之前
     const textOrder = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(textOrder).toBeLessThan(deliver.mock.invocationCallOrder[0]);
@@ -235,7 +235,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     await Promise.resolve();
 
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }]);
+    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }], undefined);
   });
 
   it('assistant/message 在途文本未送达前不投递文件（等待 pending 发送完成）', async () => {
@@ -545,7 +545,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
 
     const pushed = { scope: 'c2c', targetId: 'user1', forceProactive: true };
     expect(bot.sendMarkdown).toHaveBeenCalledWith(pushed, 'scheduled');
-    expect(deliver).toHaveBeenCalledWith(pushed, [{ path: '/tmp/a.png' }]);
+    expect(deliver).toHaveBeenCalledWith(pushed, [{ path: '/tmp/a.png' }], undefined);
   });
 
   it('回合结束释放本回合认领的 QQ 入站登记', () => {

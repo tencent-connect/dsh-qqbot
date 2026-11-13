@@ -3,9 +3,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
+import type { ModelRoute } from '../model/types.ts';
 
 /** AgentSetup hook 类型 */
-export type AgentSetup = (agentCtx: Context) => Promise<void> | void;
+export type AgentSetup = (agentCtx: Context, agent?: DshAgent) => Promise<void> | void;
 
 /** dsh SessionEvent 简化类型（用于统计 token 用量 / 导出） */
 export interface SessionEventLike {
@@ -23,11 +24,16 @@ export interface SessionEventLike {
 export interface DshAgent {
   readonly id: string;
   readonly ctx: Context;
+  readonly model?: {
+    current?(): (ModelRoute & { reasoningEffort?: string }) | undefined;
+    select(route: ModelRoute & { reasoningEffort?: string }): void;
+  };
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
   /** 底层 session（fork 时作为 source；snapshotEvents 用于统计/导出） */
   readonly session: {
     readonly id: string;
+    readonly header?: { agentPreset?: string; parentSession?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;
@@ -80,7 +86,7 @@ export interface DshAgentRegistry {
   /** 从持久化存储恢复 session */
   resume(options: {
     resumeSessionId: string;
-    agentOptions?: { provider?: string; model?: string };
+    agentOptions?: { provider?: string; model?: string; reasoningEffort?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
   /** 创建全新 session */
@@ -90,7 +96,7 @@ export interface DshAgentRegistry {
     seed?: readonly unknown[];
     /** 继承前缀长度（seeded fork 用，对齐宿官方 commands.fork） */
     inheritedEventCount?: number;
-    agentOptions?: { provider?: string; model?: string };
+    agentOptions?: { provider?: string; model?: string; reasoningEffort?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
 }
@@ -126,7 +132,7 @@ export interface SessionRecord {
   replyTarget: ReplyTarget;
   scope: ChatScope;
   peerId: string;
-  senderId: string;
+  senderId?: string;
   lastActivity: number;
   agentPreset?: string;
 }

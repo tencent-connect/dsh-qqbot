@@ -11,7 +11,8 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { QqInputRegistry } from './qq-input-origin.ts';
-import type { SessionManager } from '../session/index.ts';
+import { deliveryKey } from './delivery-ledger.ts';
+import { SessionArchivedError, type SessionManager } from '../session/session-manager.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
 import {
@@ -22,6 +23,7 @@ import {
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 // ── 类型定义 ──
 
@@ -92,6 +94,8 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
   inputs: QqInputRegistry,
+  allowTarget: (target: ReplyTarget) => boolean,
+  report?: (target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => void,
 ): Promise<void> {
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
@@ -99,17 +103,30 @@ export async function handleInbound(
 
   const scope: ChatScope = msg.kind === 'group' ? 'group' : 'c2c';
   const peerId = scope === 'group' ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
+  const inputKey = deliveryKey('input', scope, peerId, msg.messageId);
+  if (inputs.ledger) {
+    if (!msg.messageId || !msg.senderId || (scope === 'group' && !msg.groupOpenid)) {
+      logger.warn('im-qqbot: QQ input has no verifiable platform identity');
+      return;
+    }
+    if (inputs.ledger.hasInput(inputKey)) return;
+  }
 
   const replyTarget: ReplyTarget = {
     scope,
     targetId: peerId,
     msgId: msg.messageId,
   };
+  const canSubmit = () => !ctx.signal.aborted && allowTarget(replyTarget);
+  if (!canSubmit()) return;
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   const agentBody = assembleAgentBody(msg, mwState, scope, logger);
 
-  if (!agentBody) return;
+  if (!agentBody) {
+    report?.(replyTarget, 'empty');
+    return;
+  }
 
   logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
 
@@ -119,14 +136,19 @@ export async function handleInbound(
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
+    if (!canSubmit()) return;
+    const archived = err instanceof SessionArchivedError;
+    report?.(replyTarget, archived ? 'session-archived' : 'submit-failed');
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
-      await bot.sendMarkdown(replyTarget, '⚠️ 处理消息时出现异常，请稍后重试。');
+      await bot.sendMarkdown(replyTarget, archived ? err.message : '⚠️ 处理消息时出现异常，请稍后重试。');
     } catch (sendErr) {
       logger.error(`fallback reply failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
     }
     return;
   }
+
+  if (!canSubmit()) return;
 
   // ── 构建 UserMessage → followup ──
   const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
@@ -138,8 +160,22 @@ export async function handleInbound(
 
   // 按宿主保证跨边界不变的 Message.id 登记 QQ 入站，出站据此认领回合归属
   //（不在 source 上写非契约字段，也不在 SessionRecord 上抢标记）。
+  if (inputs.ledger && !inputs.ledger.registerInput({
+    key: inputKey,
+    messageId: String(message.id), sessionId: record.sessionId,
+    senderId: msg.senderId, target: replyTarget, contentHash: deliveryKey(message.content),
+  })) {
+    logger.info('im-qqbot: duplicate QQ input ignored');
+    return;
+  }
   inputs.register(String(message.id));
-  record.agent.followup(message);
+  try {
+    record.agent.followup(message);
+  } catch (error) {
+    report?.(replyTarget, 'submit-failed');
+    throw error;
+  }
+  report?.(replyTarget, 'submitted', record.sessionId);
   logger.info(`→ followup sent: key=${scope}:${peerId}`);
 
   // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）

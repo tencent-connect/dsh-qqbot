@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { Context, Service } from '@deepseek-ai/cordis';
+import { ApiError, type InlineKeyboard, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { bindDelivery, guardSender } from '../transport/delivery-context.ts';
+import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import {
   QuestionChannel,
   type UserQuestion,
@@ -17,13 +20,12 @@ function createLogger(): Logger {
 
 interface SentMessage {
   text: string;
-  opts?: { keyboard?: unknown };
+  opts?: { keyboard?: InlineKeyboard };
 }
 
-function createSender(sent: SentMessage[], opts?: { failKeyboard?: boolean }) {
+function createSender(sent: SentMessage[]) {
   return {
-    sendMarkdown: vi.fn(async (_target: ReplyTarget, content: string, o?: { keyboard?: unknown }) => {
-      if (o?.keyboard && opts?.failKeyboard) throw new Error('keyboard not permitted');
+    sendMarkdown: vi.fn(async (_target: ReplyTarget, content: string, o?: { keyboard?: InlineKeyboard }) => {
       sent.push({ text: content, opts: o });
     }),
   };
@@ -57,6 +59,10 @@ function startAsk(
   const request: UserQuestionRequest = { questions, ...(signal ? { signal } : {}) };
   const record = makeRecord(key, scope);
   return ch.askViaQQ(record, record.replyTarget, request);
+}
+
+function sentButton(sent: SentMessage[], message: number, option: number): string | undefined {
+  return sent[message]?.opts?.keyboard?.content.rows[0]?.buttons[option]?.action.data;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -201,16 +207,36 @@ describe('QuestionChannel.askViaQQ', () => {
     await p;
   });
 
-  it('falls back to plain text when keyboard send fails', async () => {
-    const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent, { failKeyboard: true }), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const p = startAsk(ch, 'c2c', 'U1', [q2()]);
-    await sleep(20);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.opts).toBeUndefined();
-    expect(sent[0]?.text).toContain('回复编号选择');
-    ch.tryAnswer('c2c', 'U1', '1');
-    await p;
+  it.each([true, false])('reuses the question operation and falls back only on a definite rejection (%s)', async (rejected) => {
+    const ledger = new DeliveryLedger();
+    const record = makeRecord('question-session');
+    const target = bindDelivery(record.replyTarget, { appId: 'fixture-app', key: 'question-turn', allowed: () => true });
+    const response = rejected
+      ? new ApiError('keyboard not permitted', 403, '/v2/users/x/messages', 40034010)
+      : new ApiError('response timeout', 0, '/v2/users/x/messages');
+    const sendMarkdown = vi.fn().mockRejectedValueOnce(response).mockResolvedValue(undefined);
+    const sender = guardSender({ sendMarkdown, openStream: vi.fn() }, ledger);
+    const manager = createManager({ getSessionRecord: () => record });
+    const channel = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const request = { questions: [q2()], wait: { callId: 'native-call' } };
+    if (!rejected) {
+      await expect(channel.askViaQQ(record, target, request)).rejects.toThrow('response timeout');
+      expect(sendMarkdown).toHaveBeenCalledTimes(1);
+      return;
+    }
+
+    const first = channel.askViaQQ(record, target, request);
+    await vi.waitFor(() => {
+      expect(channel.tryAnswer('c2c', 'x', '1')).toBe(true);
+    });
+    await first;
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(sendMarkdown.mock.calls[0]?.[2]).toHaveProperty('keyboard');
+    expect(sendMarkdown.mock.calls[1]?.[1]).toContain('回复编号选择');
+
+    await expect(channel.askViaQQ(record, target, { ...request })).rejects.toThrow('not submitted again');
+    expect(channel.tryAnswer('c2c', 'x', '1')).toBe(false);
+    expect(sendMarkdown).toHaveBeenCalledTimes(2);
   });
 
   it('rejects when the question cannot be delivered at all', async () => {
@@ -248,6 +274,30 @@ describe('QuestionChannel.askViaQQ', () => {
     await p2;
   });
 
+  it('keeps the original waiter when the same request arrives again during the first send', async () => {
+    const sent: SentMessage[] = [];
+    const receipt = Promise.withResolvers<void>();
+    const sender = createSender(sent);
+    sender.sendMarkdown.mockImplementationOnce(async () => receipt.promise);
+    const channel = new QuestionChannel(createManager(), sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const record = makeRecord(sessionKey('c2c', 'U1'));
+    const request = { questions: [q2()], wait: { callId: 'active' } };
+    const current = channel.askViaQQ(record, record.replyTarget, request);
+    try {
+      const duplicate = channel.askViaQQ(record, record.replyTarget, { ...request }).catch((error: unknown) => error);
+      expect(sender.sendMarkdown).toHaveBeenCalledOnce();
+      expect(await duplicate).toMatchObject({ message: 'QQ question is already pending' });
+      receipt.resolve();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(channel.tryAnswer('c2c', 'U1', '1')).toBe(true);
+      await expect(current).resolves.toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+    } finally {
+      receipt.resolve();
+      channel.uninstall();
+      await current.catch(() => {});
+    }
+  });
+
   it('times out and rejects when the user never answers', async () => {
     const sent: SentMessage[] = [];
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 20 }, createLogger());
@@ -271,12 +321,91 @@ describe('QuestionChannel.handleInteraction', () => {
     } as InteractionEvent;
   }
 
+  it.each(['cancelled', 'superseded'])('ignores the late receipt of a %s first question', async (reason) => {
+    const sent: SentMessage[] = [];
+    const receipt = Promise.withResolvers<void>();
+    const sender = createSender(sent);
+    sender.sendMarkdown.mockImplementationOnce(async (_target, text, opts) => {
+      sent.push({ text, opts });
+      await receipt.promise;
+    });
+    const channel = new QuestionChannel(createManager(), sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const old = startAsk(channel, 'c2c', 'U1', [q2('old')]).catch((error: unknown) => error);
+    try {
+      if (reason === 'cancelled') channel.cancelPending(sessionKey('c2c', 'U1'));
+      const current = startAsk(channel, 'c2c', 'U1', [q2('current')]).catch((error: unknown) => error);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      receipt.resolve();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      const click = (index: number) => channel.handleInteraction(makeEvent(sentButton(sent, index, 0), { user: 'U1' }));
+      expect(click(0)).toBe(false);
+      expect(click(1)).toBe(true);
+      expect(click(1)).toBe(false);
+      expect(await old).toMatchObject({ code: 'ASK_ABORTED' });
+      expect(await current).toEqual({ answers: [{ id: 'current', selected: ['A'] }] });
+    } finally {
+      channel.uninstall();
+    }
+  });
+
+  it('rejects an old question card when a new request reuses its host call ID', async () => {
+    const sent: SentMessage[] = [];
+    const channel = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const record = makeRecord(sessionKey('c2c', 'U1'));
+    const ask = (id: string) => channel.askViaQQ(record, record.replyTarget, { questions: [q2(id)], wait: { callId: 'reused' } });
+    const first = ask('old').catch((error: unknown) => error);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    channel.cancelPending(record.sessionKey);
+    expect(await first).toMatchObject({ code: 'ASK_ABORTED' });
+    const current = ask('current').catch((error: unknown) => error);
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(channel.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'U1' }))).toBe(false);
+      expect(channel.handleInteraction(makeEvent(sentButton(sent, 1, 1), { user: 'U1' }))).toBe(true);
+      expect(await current).toEqual({ answers: [{ id: 'current', selected: ['B'] }] });
+    } finally {
+      channel.uninstall();
+    }
+  });
+
+  it('keeps a later question current when an earlier request times out during its second send', async () => {
+    vi.useFakeTimers();
+    const sent: SentMessage[] = [];
+    const sender = createSender(sent);
+    const receipt = Promise.withResolvers<void>();
+    const channel = new QuestionChannel(createManager(), sender, { requireMention: false, askTimeoutMs: 20 }, createLogger());
+    const click = (index: number) => channel.handleInteraction(makeEvent(sentButton(sent, index, 0), { user: 'U1' }));
+    try {
+      const old = startAsk(channel, 'c2c', 'U1', [q2('first'), q2('second')]).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      sender.sendMarkdown.mockImplementationOnce(async (_target, text, opts) => {
+        sent.push({ text, opts });
+        await receipt.promise;
+      });
+      expect(click(0)).toBe(true);
+      expect(click(0)).toBe(false);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await old).toMatchObject({ code: 'ASK_ABORTED', message: expect.stringContaining('timed out') });
+
+      const current = startAsk(channel, 'c2c', 'U1', [q2('current')]).catch((error: unknown) => error);
+      receipt.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(click(1)).toBe(false);
+      expect(click(sent.length - 1)).toBe(true);
+      expect(await current).toEqual({ answers: [{ id: 'current', selected: ['A'] }] });
+    } finally {
+      receipt.resolve();
+      channel.uninstall();
+      vi.useRealTimers();
+    }
+  });
+
   it('answers a c2c question by button click', async () => {
     const sent: SentMessage[] = [];
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'c2c', 'U1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 1), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
   });
 
@@ -285,7 +414,7 @@ describe('QuestionChannel.handleInteraction', () => {
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
     const p = startAsk(ch, 'group', 'G1', [q2()]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'someone', group: 'G1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'someone', group: 'G1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
   });
 
@@ -295,8 +424,31 @@ describe('QuestionChannel.handleInteraction', () => {
     const long = '这是一个非常非常长的选项标签超过十八个字符的限制了吧';
     const p = startAsk(ch, 'c2c', 'U7', [{ id: 'q', question: 't', options: [{ label: long }] }]);
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'q', i: 0 }), { user: 'U7' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'U7' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: [long] }] });
+  });
+
+  it.each([false, true])('delivers independent requests with the same question id (native call identity: %s)', async withCallId => {
+    const record = makeRecord('same-session');
+    const sent: SentMessage[] = [];
+    const sender = guardSender({ ...createSender(sent), openStream: vi.fn() }, new DeliveryLedger());
+    const channel = new QuestionChannel(createManager({ getSessionRecord: () => record }), sender,
+      { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const target = bindDelivery(record.replyTarget, { appId: 'fixture-app', key: 'same-turn', allowed: () => true });
+    const ask = (label: string) => channel.askViaQQ(record, target, {
+      questions: [{ id: 'confirm', question: label, options: [{ label }] }],
+      ...(withCallId ? { wait: { callId: label } } : {}),
+    });
+    const first = ask('build');
+    await vi.waitFor(() => expect(channel.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'x' }))).toBe(true));
+    expect(await first).toEqual({ answers: [{ id: 'confirm', selected: ['build'] }] });
+    const second = ask('deploy');
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent.map(message => message.text)).toEqual([expect.stringContaining('build'), expect.stringContaining('deploy')]);
+    expect(sentButton(sent, 0, 0)).not.toBe(sentButton(sent, 1, 0));
+    expect(channel.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'x' }))).toBe(false);
+    await vi.waitFor(() => expect(channel.handleInteraction(makeEvent(sentButton(sent, 1, 0), { user: 'x' }))).toBe(true));
+    expect(await second).toEqual({ answers: [{ id: 'confirm', selected: ['deploy'] }] });
   });
 
   it('rejects malformed or stale clicks without consuming the question', async () => {
@@ -322,14 +474,39 @@ describe('QuestionChannel.handleInteraction', () => {
     const p = startAsk(ch, 'c2c', 'U1', [q1, q2b]);
     await sleep(20);
     // 答第一题（按钮点击），推进到第二题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 0 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 0), { user: 'U1' }))).toBe(true);
     await sleep(20);
     expect(sent).toHaveLength(2); // 第二题已发出
     // 旧题（q=a）按钮在新题发出后被点击 → 忽略，不消费当前题
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'a', i: 1 }), { user: 'U1' }))).toBe(false);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 0, 1), { user: 'U1' }))).toBe(false);
     // 当前题（q=b）仍可正常作答
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'b', i: 1 }), { user: 'U1' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(sentButton(sent, 1, 1), { user: 'U1' }))).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'a', selected: ['A1'] }, { id: 'b', selected: ['B2'] }] });
+  });
+});
+
+describe('QuestionChannel.routeRequest', () => {
+  it('answers through QQ only for an owned eligible turn and delegates other requests', async () => {
+    const record = makeRecord('qq-session');
+    const sent: SentMessage[] = [];
+    const targetFor = vi.fn((): ReplyTarget | undefined => record.replyTarget);
+    const channel = new QuestionChannel(createManager({
+      findBySessionId: id => id === 'qq-session' ? record : undefined,
+      getSessionRecord: () => record,
+    }), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger(), { targetFor });
+    const next = vi.fn(async () => ({ answers: [] }));
+    const request = { agent: { id: 'qq-session' }, questions: [q2()] };
+    await expect(channel.routeRequest({ ...request, agent: { id: 'web-session' } }, next)).resolves.toEqual({ answers: [] });
+    await expect(channel.routeRequest({ ...request, questions: [{ ...q2(), intent: {} }] }, next)).resolves.toEqual({ answers: [] });
+    targetFor.mockReturnValueOnce(undefined);
+    await expect(channel.routeRequest(request, next)).resolves.toEqual({ answers: [] });
+    expect(next).toHaveBeenCalledTimes(3);
+    expect(sent).toHaveLength(0);
+    const pending = channel.routeRequest(request, next);
+    await vi.waitFor(() => expect(channel.tryAnswer('c2c', 'x', '2')).toBe(true));
+    await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
+    expect(sent).toHaveLength(1);
+    expect(next).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -410,13 +587,122 @@ describe('QuestionChannel.install routing', () => {
   it('uninstall restores the original ask', async () => {
     const sent: SentMessage[] = [];
     const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
-      ask: async () => ({ answers: [] }),
-    };
+    const original = async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] });
+    const uq = { ask: original };
     ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.__qqQuestionPatched).toBe(true);
+    expect(uq.ask).not.toBe(original);
     ch.uninstall();
-    expect(uq.__qqQuestionPatched).toBeUndefined();
+    expect(uq.ask).toBe(original);
+  });
+
+  it('routes questions for the same OpenID to separate accounts and stops just one', async () => {
+    const makeChannel = (appId: string) => {
+      const record = makeRecord(`qqbot:${appId}:c2c:shared`);
+      const sender = createSender([]);
+      const manager = createManager({
+        findBySessionId: id => id === appId ? record : undefined,
+        getSessionRecord: (_scope, peer) => peer === 'shared' ? record : undefined,
+      });
+      return {
+        sender,
+        channel: new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger()),
+      };
+    };
+    const first = makeChannel('first');
+    const second = makeChannel('second');
+    const original = vi.fn(async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }));
+    const uq = { ask: original };
+    const ctx = { get: () => uq };
+    first.channel.install(ctx);
+    const sharedAsk = uq.ask;
+    second.channel.install(ctx);
+    expect(uq.ask).toBe(sharedAsk);
+
+    const firstAnswer = uq.ask({ questions: [q2('first')], agent: { id: 'first' } });
+    const canceled = expect(firstAnswer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    const secondAnswer = uq.ask({ questions: [q2('second')], agent: { id: 'second' } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(first.sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(second.sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    first.channel.uninstall();
+    await canceled;
+    expect(uq.ask).toBe(sharedAsk);
+    expect(first.channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
+    expect(second.channel.tryAnswer('c2c', 'shared', '2')).toBe(true);
+    await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
+
+    await uq.ask({ questions: [q2('local')], agent: { id: 'first' } });
+    expect(original).toHaveBeenCalledTimes(1);
+    second.channel.uninstall();
+    expect(uq.ask).toBe(original);
+  });
+
+  it('does not recreate a pending question when the first send finishes after uninstall', async () => {
+    const record = makeRecord(sessionKey('c2c', 'shared'));
+    const { promise, resolve } = Promise.withResolvers<void>();
+    const sender = { sendMarkdown: vi.fn(() => promise) };
+    const channel = new QuestionChannel(
+      createManager({ findBySessionId: () => record }), sender,
+      { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+    );
+    const uq = { ask: async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }) };
+    channel.install({ get: () => uq });
+    const answer = uq.ask({ questions: [q2()], agent: { id: 'session' } });
+    const canceled = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    channel.uninstall();
+    resolve();
+    await canceled;
+    expect(channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
+  });
+
+  it('shares the question dispatcher between Cordis service proxies', async () => {
+    const hostAsk = vi.fn(async () => ({ answers: [] }));
+    class HostQuestions extends Service {
+      constructor(ctx: Context) { super(ctx, 'userQuestions'); }
+      ask(request: UserQuestionRequest): Promise<UserQuestionResult> {
+        return hostAsk(this.ctx, request);
+      }
+    }
+    const ctx = new Context();
+    const host = ctx.plugin(HostQuestions);
+    await host.await();
+    const record = makeRecord(sessionKey('c2c', 'shared'));
+    const makeChannel = (id: string) => new QuestionChannel(
+      createManager({
+        findBySessionId: session => session === id ? record : undefined,
+        getSessionRecord: () => record,
+      }),
+      createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
+    );
+    const first = makeChannel('first');
+    const second = makeChannel('second');
+    const mount = (channel: QuestionChannel) => ctx.plugin(scope => {
+      channel.install(scope);
+      scope.effect(() => () => channel.uninstall());
+    });
+    const firstFiber = mount(first);
+    const secondFiber = mount(second);
+    try {
+      await Promise.all([firstFiber.await(), secondFiber.await()]);
+      await firstFiber.dispose();
+      const service = ctx.get('userQuestions') as HostQuestions;
+      const secondAnswer = service.ask({ questions: [q2('second')], agent: { id: 'second' } });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(second.tryAnswer('c2c', 'shared', '2')).toBe(true);
+      await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
+      expect(hostAsk).not.toHaveBeenCalled();
+      const local = { questions: [q2('local')], agent: { id: 'first' } };
+      await service.ask(local);
+      expect(hostAsk).toHaveBeenCalledWith(expect.anything(), local);
+      await secondFiber.dispose();
+      expect(Object.getOwnPropertyDescriptor(service, 'ask')).toBeUndefined();
+    } finally {
+      await Promise.all([firstFiber.dispose(), secondFiber.dispose()]);
+      await host.dispose();
+    }
   });
 
   it('disables gracefully when the userQuestions service is missing', () => {

@@ -15,7 +15,7 @@ import type { QQBotSender } from './outbound-buffer.ts';
 
 /** 交付物投递器（outbound 路由只依赖此接口，便于测试注入） */
 export interface DeliverablesDelivererLike {
-  deliver: (target: ReplyTarget, files: PresentedFileRef[]) => Promise<void>;
+  deliver: (target: ReplyTarget, files: PresentedFileRef[], sessionCwd?: string) => Promise<void>;
 }
 
 export class DeliverablesDeliverer implements DeliverablesDelivererLike {
@@ -29,6 +29,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
     mediaBot: MediaSenderLike,
     config: ImQQBotConfig,
     logger: Logger,
+    private readonly mediaRoot?: string,
   ) {
     this.sender = sender;
     this.mediaBot = mediaBot;
@@ -37,9 +38,9 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
   }
 
   /** 轮末投递一批声明文件到本回合目标：逐个发送，未送达的聚合为一条文字提示 */
-  public async deliver(target: ReplyTarget, files: PresentedFileRef[]): Promise<void> {
+  public async deliver(target: ReplyTarget, files: PresentedFileRef[], sessionCwd?: string): Promise<void> {
     const limit = Math.max(1, this.config.sendFile?.maxFiles ?? 4);
-    const cwd = resolveAgentCwd(this.config.cwd);
+    const cwd = resolveAgentCwd(sessionCwd || this.config.cwd);
     const missed: string[] = [];
     let sent = 0;
 
@@ -51,7 +52,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
         missed.push(`${display}（超出单轮投递上限，未发送）`);
         continue;
       }
-      if (!isPathAllowed(absPath, this.config.sendFile, cwd)) {
+      if (!isPathAllowed(absPath, this.config.sendFile, cwd, this.mediaRoot)) {
         missed.push(`${display}（路径不在允许范围）`);
         continue;
       }
@@ -65,7 +66,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
       } else if (result.outcome === 'failed') {
         this.logger.warn(`im-qqbot: 交付物发送失败 ${display}: ${result.error}`);
         missed.push(display);
-      } else {
+      } else if (result.outcome === 'missing') {
         missed.push(display);
       }
     }
