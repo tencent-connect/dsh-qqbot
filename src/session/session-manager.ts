@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { PrefsStore } from '../model/prefs-store.ts';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
 import { mkdirSync, statSync } from 'node:fs';
-import { resolveAgentCwd } from '../shared/dirs.ts';
+import { resolveAgentCwd, resolveRobotWorkspace } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
@@ -124,7 +124,13 @@ export class SessionManager {
     this.agents = agents;
     this.config = config;
     this.logger = logger;
-    this.host = createHostAdapter(ctx, logger);
+    const robotWorkspace = resolveRobotWorkspace(config.appId);
+    const legacyWorkspace = resolveAgentCwd(undefined);
+    this.host = createHostAdapter(ctx, logger, cwd => {
+      if (cwd === robotWorkspace) return `QQBot · ${config.appId}`;
+      if (cwd === legacyWorkspace) return `QQBot · ${config.appId}（旧默认）`;
+      return undefined;
+    });
     this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
     this.modelResolver = new ModelResolver(ctx, config, logger, prefs);
 

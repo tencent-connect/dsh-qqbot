@@ -6,7 +6,7 @@ import { bootstrapGateway, openDeliveryLedger, type GatewayRuntime } from '../ga
 import { registerSendFileTool } from '../media/send-file-tool.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import type { DshAgentRegistry } from '../session/index.ts';
-import { PLUGIN_HOME } from '../shared/dirs.ts';
+import { PLUGIN_HOME, resolveRobotWorkspace } from '../shared/dirs.ts';
 import type { WorkbenchRobot, WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { registerAccountRoutes } from './account-routes.ts';
@@ -261,7 +261,7 @@ export class RobotRuntimes {
     if (record.kind === 'primary') return this.primary!.config;
     return {
       ...ConfigSchema({} as ImQQBotConfig), appId, appSecret: record.appSecret,
-      cwd: join(PLUGIN_HOME, 'robots', appId, 'workspace'), access: record.access,
+      cwd: resolveRobotWorkspace(appId), access: record.access,
     };
   }
 

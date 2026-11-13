@@ -21,7 +21,8 @@ const env = vi.hoisted(() => ({ home: '' }));
 
 vi.mock('../shared/dirs.ts', () => ({
   get PLUGIN_HOME() { return env.home; },
-  resolveAgentCwd: (cwd: string | undefined) => cwd || `${env.home}/workspace`,
+  resolveAgentCwd: (cwd: string | undefined) => cwd || join(env.home, 'workspace'),
+  resolveRobotWorkspace: (appId: string) => join(env.home, 'robots', appId, 'workspace'),
 }));
 
 const { SessionManager } = await import('./session-manager.ts');
@@ -605,7 +606,7 @@ describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () =>
     // attach 是 fire-and-forget，等待其落到工作区
     await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith(record.sessionId));
     // 关键回归：cwd 必须等于 meta.cwd（resolveAgentCwd(config.cwd)），而非 process.cwd()
-    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot');
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot · app1（旧默认）');
   });
 
   it('恢复会话时同样挂载（升级后老会话在下一次创建记录时补挂）', async () => {
@@ -619,7 +620,7 @@ describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () =>
 
     expect(record.sessionId).toBe('session-current');
     await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith('session-current'));
-    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot');
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot · app1（旧默认）');
   });
 });
 

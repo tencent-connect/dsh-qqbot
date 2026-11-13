@@ -63,9 +63,6 @@ export interface WorkspaceRegistryLike {
   create(path: string, title?: string): Promise<WorkspaceLike>;
 }
 
-/** 插件创建的工作区显示名；仅在该 cwd 尚无工作区时生效（幂等 create 不改既有 title） */
-const WORKSPACE_TITLE = 'QQBot';
-
 /**
  * 持久化服务的最小只读契约。
  *
@@ -110,7 +107,11 @@ async function importModule(spec: string, logger?: AdapterLogger): Promise<Recor
   return mod;
 }
 
-export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAdapter {
+export function createHostAdapter(
+  ctx: Context,
+  logger?: AdapterLogger,
+  workspaceTitle?: (cwd: string) => string | undefined,
+): HostAdapter {
   const capabilities: string[] = [];
 
   // events 读取路径只有运行时才能确定，sessionEvents 内自适应
@@ -191,7 +192,7 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         return;
       }
       try {
-        const workspace = await registry.create(cwd, WORKSPACE_TITLE);
+        const workspace = await registry.create(cwd, workspaceTitle?.(cwd));
         if (!workspace || typeof workspace.attachSession !== 'function') {
           // 宿主接口演进：返回对象不含 attachSession → warn 避免静默失效
           logger?.warn?.(`host adapter: workspaceRegistry.create 返回了无 attachSession 的对象，跳过会话 ${sessionId}`);

@@ -120,15 +120,15 @@ describe('attachSessionToWorkspace', () => {
     return { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   }
 
-  it('把会话挂载到 cwd 对应的工作区（title=qqbot）', async () => {
+  it('把会话挂载到 cwd 对应的现有或新建工作区', async () => {
     const ws = { path: '/proj', attachSession: vi.fn().mockResolvedValue(undefined) };
     const registry = { create: vi.fn().mockResolvedValue(ws) };
     const logger = makeLogger();
-    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger, () => 'QQBot · robot1');
 
     await adapter.attachSessionToWorkspace('sess-1', '/proj');
 
-    expect(registry.create).toHaveBeenCalledWith('/proj', 'QQBot');
+    expect(registry.create).toHaveBeenCalledWith('/proj', 'QQBot · robot1');
     expect(ws.attachSession).toHaveBeenCalledWith('sess-1');
     expect(logger.warn).not.toHaveBeenCalled();
   });
