@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **Switchable message handling mode**: a new "Message handling mode" dropdown in settings. "Queue" (default) processes new messages after the current task finishes; "Interrupt" appends new messages to the running task immediately instead of queueing them.
 - **Pairing codes for allowlists**: generate a 10-minute code in account settings and have users send it to the bot in the matching chat to join the DM/group/command roster; one code admits multiple people, with manual OpenID bulk-adding and copy/export as well. After an identity is removed, codes issued before the removal can no longer re-add it.
 - **Independent slash-command access**: new `access.commandMode` (open / allowlist / disabled) checks commands by sender identity, managed separately from the chat admission allowlists.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.

@@ -14,6 +14,7 @@ import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
 import { fetchJson, HttpError } from './http.ts';
+import type { MessageHandlingMode } from '../config.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
 import { SlashCommandList } from './slash-command-list.ts';
 import { COMMANDS_PATH, type SlashCommandDescriptor } from '../shared/command-protocol.ts';
@@ -56,6 +57,8 @@ function useConfigPanelStyles(): void {
 .imqb2-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 .imqb2-textarea { box-sizing: border-box; width: 100%; min-height: 68px; padding: 8px 12px; resize: vertical; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; }
 .imqb2-textarea:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 2px; }
+.imqb2-select { box-sizing: border-box; width: 100%; min-height: 34px; padding: 6px 10px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; cursor: pointer; }
+.imqb2-select:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 2px; }
 /* Preserve the QQ settings draft and readback feedback in the sticky footer. */
 .imqb2-footer {
   position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center;
@@ -116,6 +119,12 @@ const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
   { value: 'disabled', label: '关闭' },
+];
+
+/** 会话忙时新消息的处理方式（默认值由 ConfigSchema 与表单共同兜底为 queue） */
+const MESSAGE_HANDLING_OPTIONS: ReadonlyArray<{ value: MessageHandlingMode; label: string }> = [
+  { value: 'queue', label: '排队' },
+  { value: 'interrupt', label: '插话' },
 ];
 
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
@@ -356,6 +365,18 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
       commandsError ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
       createElement(SlashCommandList, { commands }),
       createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
+      createElement('div', { className: 'imqb2-field' },
+        createElement('label', { className: 'imqb2-label', htmlFor: 'imqq-messageHandlingMode' }, '消息处理方式'),
+        createElement('select', {
+          id: 'imqq-messageHandlingMode', className: 'imqb2-select',
+          value: form.messageHandlingMode ?? 'queue',
+          onChange: (event: React.ChangeEvent<HTMLSelectElement>) =>
+            patch('messageHandlingMode', event.target.value as MessageHandlingMode),
+        }, MESSAGE_HANDLING_OPTIONS.map(({ value, label }) =>
+          createElement('option', { key: value, value }, label))),
+        createElement('p', { className: 'imqb2-hint' },
+          '排队：当前任务结束后再处理新消息（默认）；插话：新消息立即补充到当前任务。'),
+      ),
       ...([
         ['requireMention', '群聊仅回复 @机器人的消息'],
         ['streaming', '流式输出'],

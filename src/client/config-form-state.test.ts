@@ -72,6 +72,25 @@ describe('config form draft reconciliation', () => {
   });
 });
 
+describe('message handling mode drafts', () => {
+  it('submits a mode change and preserves the edit through a server refresh', () => {
+    const base = baseline();
+    const form: ConfigWire = { ...base, messageHandlingMode: 'interrupt' };
+
+    expect(configPatch(base, form)).toEqual({ messageHandlingMode: 'interrupt' });
+    const rebased = rebaseConfig(base, form, { ...base, streaming: false });
+    expect(rebased.messageHandlingMode).toBe('interrupt');
+    expect(rebased.streaming).toBe(false);
+    expect(configDraft(rebased, form).form.messageHandlingMode).toBe('interrupt');
+  });
+
+  it('rejects an unknown persisted mode', () => {
+    const base = baseline();
+    expect(parseConfigDraft({ baseline: base, form: { ...base, messageHandlingMode: 'bogus' as never } })).toBeUndefined();
+    expect(parseConfigDraft(configDraft(base, { ...base, messageHandlingMode: 'queue' }))?.form.messageHandlingMode).toBe('queue');
+  });
+});
+
 describe('command-mode drafts', () => {
   it('rebases a mode draft onto a revoked list and its new revision', () => {
     const base = { ...baseline(), accessRevision: 'old' };

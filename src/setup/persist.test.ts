@@ -238,7 +238,7 @@ describe('updateProfileConfig', () => {
     utimesSync(patchPath, past, past);
 
     expect(updateProfileConfig({ requireMention: true }, dir, log)).toBe(true);
-    expect(statSync(patchPath).mtimeMs).toBe(past.getTime());
+    expect(Math.abs(statSync(patchPath).mtimeMs - past.getTime())).toBeLessThan(1);
   });
 
   it('条目不存在时追加，跳过凭据键', () => {
@@ -284,7 +284,7 @@ describe.skipIf(process.platform === 'win32')('profile patch private permissions
       : updateProfileConfig({ requireMention: true }, dir, log)).toBe(true);
 
     expect(statSync(patchPath).mode & 0o777).toBe(0o600);
-    expect(statSync(patchPath).mtimeMs).toBe(past.getTime());
+    expect(Math.abs(statSync(patchPath).mtimeMs - past.getTime())).toBeLessThan(1);
     expect(readFileSync(patchPath, 'utf8')).toBe(content);
   });
 

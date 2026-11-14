@@ -13,7 +13,6 @@ import {
   contentSanitizer,
   rateLimiter,
   slashCommand,
-  concurrencyGuard,
   typingIndicator,
   quoteRef,
   historyBuffer,
@@ -25,6 +24,7 @@ import type { Logger } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import { createMessageHandlingMiddleware } from '../middleware/message-handling.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
 
@@ -122,12 +122,9 @@ export function setupMiddlewares(
   // 8.5. 待答问题截获（在 concurrencyGuard 之前，答案消息不排队直接作答）
   bot.use(questionAnswer(manager));
 
-  // 9. 并发串行 + 消息合并（同 peer 排队，避免 session 冲突）
-  bot.use(concurrencyGuard({
-    strategy: 'merge',
-    maxQueue: config.maxQueue,
-    maxProcessingMs: config.processingTimeoutMs,
-  }));
+  // 9. 消息处理方式：排队（当前任务结束后处理新消息）／插话（补充到当前任务）
+  //    斜杠命令与待答问题仍在上方，不受守卫影响。
+  bot.use(createMessageHandlingMiddleware(config));
 
   // 10. C2C 输入状态指示
   bot.use(typingIndicator());

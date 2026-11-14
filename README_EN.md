@@ -107,10 +107,20 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min; `<=0` disables eviction |
 | `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current LLM call |
 | `maxQueue` | number | `20` | Max concurrent queue length |
+| `messageHandlingMode` | `queue`/`interrupt` | `queue` | How new messages are handled while a task is running |
 | `historyLimit` | number | `10` | Group history buffer size |
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |
+
+### Message handling mode
+
+Settings → QQ Bot → Basic settings → "Message handling mode", **Queue** by default:
+
+- `queue`: new messages wait until the current task finishes, then are processed as a merged batch.
+- `interrupt`: new messages skip the queue and are appended to the running task immediately via `agent.followup()`.
+
+Slash commands and answers to pending questions always bypass the queue. Saving the setting reloads the plugin and interrupts any running QQ task.
 
 ### Access control (access)
 

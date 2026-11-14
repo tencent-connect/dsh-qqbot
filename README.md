@@ -107,10 +107,22 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟；`<=0` 表示不回收 |
 | `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
 | `maxQueue` | number | `20` | 并发队列最大长度 |
+| `messageHandlingMode` | `queue`/`interrupt` | `queue` | 消息处理方式：排队／插话 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |
+
+### 消息处理方式（messageHandlingMode）
+
+在设置 →「QQ 机器人」→「基础设置」里的「消息处理方式」下拉中切换，默认 **排队**：
+
+| 选项 | 行为 |
+|------|------|
+| 排队（默认） | 当前任务未结束时，新消息先缓冲；任务收敛后合并下发，即「当前任务结束后处理新消息」 |
+| 插话 | 任务进行中发来的新消息不走队列，立即通过 `agent.followup()` 补充到当前任务；消息带一行「用户插话」标记，提示模型这是对当前任务的补充 |
+
+两种模式都保留 `maxQueue` / `processingTimeoutMs` 的保护；斜杠命令与待答问题的答案始终绕过队列，不受影响。保存设置会触发插件重载，进行中的 QQ 任务会中断，建议任务空闲时切换。
 
 ### 访问控制（access）
 
