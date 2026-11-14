@@ -359,7 +359,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
       ...([
         ['requireMention', '群聊仅回复 @机器人的消息'],
         ['streaming', '流式输出'],
-        ['showToolResults', '显示工具调用结果'],
+        ['showToolResults', '显示工具成功结果'],
       ] as const).filter(([key]) => !accountOnly || key === 'requireMention').map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
         createElement('div', { className: 'imqb2-head' },
           createElement('span', { className: 'imqb2-label' }, label),

@@ -5,6 +5,7 @@ import { open, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
 
 const pluginRoot = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(new URL('../../package.json', import.meta.url));
@@ -23,6 +24,8 @@ Host mode (uses the existing plugin build; never rebuilds DSH or the plugin):
   --secondary provider/other-model     selection-only alternative
   --reasoning high                     optional expected primary reasoning effort
   --allow-model-requests               opt in to primary-model generation tests
+  --core-package /absolute/path.tgz     install a packed QQBot core
+  --history-package /absolute/path.tgz  install records component and verify both switches
   --preset-primary standard            default: standard
   --preset-secondary minimal           default: minimal
   --host-port 0                        default: automatically allocated
@@ -60,6 +63,7 @@ export function parseArgs(argv) {
     ['--mode', 'mode'], ['--dsh-source', 'dshSource'], ['--model-patch', 'modelPatch'],
     ['--primary', 'primary'], ['--secondary', 'secondary'], ['--reasoning', 'reasoning'],
     ['--preset-primary', 'presetPrimary'], ['--preset-secondary', 'presetSecondary'],
+    ['--core-package', 'corePackage'], ['--history-package', 'historyPackage'],
     ['--host-port', 'hostPort'], ['--fixture-port', 'fixturePort'], ['--output', 'output'], ['--python', 'python'],
   ]);
   const seen = new Set();
@@ -88,7 +92,8 @@ export function parseArgs(argv) {
     for (const key of ['dshSource', 'modelPatch', 'primary', 'secondary']) {
       if (!options[key]) throw new Error(`Host mode requires --${key.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase())}.`);
     }
-    for (const key of ['dshSource', 'modelPatch', 'output']) {
+    if (options.historyPackage && !options.corePackage) throw new Error('--history-package requires --core-package.');
+    for (const key of ['dshSource', 'modelPatch', 'output', 'corePackage', 'historyPackage']) {
       if (options[key] && !isAbsolute(options[key])) throw new Error(`${key} must be an absolute path.`);
     }
     options.primary = parseRoute(options.primary);
@@ -141,6 +146,7 @@ export async function createRunConfig(options, projectRoot = pluginRoot) {
     primary: options.primary, secondary: options.secondary,
     presets: { primary: options.presetPrimary, secondary: options.presetSecondary },
     node: process.execPath, allowModelRequests: options.allowModelRequests, modelPatch,
+    corePackage: options.corePackage, historyPackage: options.historyPackage,
   };
   for (const path of [config.home, config.workspace, config.dataDir]) await mkdir(path, { mode: 0o700 });
   return config;
@@ -266,12 +272,19 @@ export async function prepareProfile(config, { signal } = {}) {
   const cli = ['--import', 'tsx/esm', 'apps/cli/src/bin.ts'];
   const options = { cwd: config.dshSource, env, logPath: join(config.runDir, 'install.log') };
   await runLogged(config.node, [...cli, '--profile', config.profile, '--from-default-profile', 'web', '--dump-config'], options, { signal });
-  await runLogged(config.node, [...cli, 'plugin', '--profile', config.profile, 'add', `link:${config.pluginRoot}`], options, { signal });
+  const core = config.corePackage ? `file:${config.corePackage}` : `link:${config.pluginRoot}`;
+  const history = config.historyPackage && `file:${config.historyPackage}`;
+  const packages = history ? [core, history] : [core];
+  await runLogged(config.node, [...cli, 'plugin', '--profile', config.profile, 'add', ...packages], options, { signal });
   const profileDir = join(config.home, 'profiles', config.profile);
   const manifest = JSON.parse(await readFile(join(profileDir, 'package.json'), 'utf8'));
   const plugin = JSON.parse(await readFile(join(config.pluginRoot, 'package.json'), 'utf8'));
-  if (manifest.dependencies?.[plugin.name] !== `link:${config.pluginRoot}` || !manifest.dsh?.profile?.bundles?.includes(plugin.name)) {
+  if (manifest.dependencies?.[plugin.name] !== core || !manifest.dsh?.profile?.bundles?.includes(plugin.name)) {
     throw new Error('Supported plugin installation did not add the dependency and bundle to the isolated profile.');
+  }
+  const historyName = '@tencent-connect/dsh-qqbot-workbench-history';
+  if (history && (manifest.dependencies?.[historyName] !== history || manifest.dsh.profile.bundles.includes(historyName))) {
+    throw new Error('The history package must be installed as a dependency of the same profile.');
   }
   const path = join(profileDir, 'cordis.patch.yml');
   const existing = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return '[]'; throw error; });
@@ -359,6 +372,73 @@ export async function waitForHost(config, owned, { timeoutMs = 90_000, signal } 
   throw new Error(`Isolated Host did not become ready; private log: ${config.hostLog}`);
 }
 
+async function verifyComponents(client, fixture, signal) {
+  const core = 'im-qqbot';
+  const history = 'im-qqbot-workbench-history';
+  const plugin = async id => (await client.rpc('pluginManager/listPlugins')).find(row => row.patchId === id);
+  const fixtureRequest = async (operation, body) => {
+    signal?.throwIfAborted();
+    const response = await fetch(`${fixture.origin}/__fixture/${operation}`, {
+      method: body === undefined ? 'GET' : 'POST', body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert(response.ok, `Fixture ${operation} returned ${response.status}`);
+    return response.json();
+  };
+  const waitUntil = async (read, label) => {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      signal?.throwIfAborted();
+      if (await read()) return;
+      await delay(100);
+    }
+    throw new Error('Component verification timed out: ' + label);
+  };
+  const matches = (row, enabled, fiber) => row?.enabled === enabled && row.fiberPhase === fiber;
+  const toggle = async (id, enabled) => {
+    const row = await plugin(id);
+    assert(row?.entryId, 'Missing component ' + id);
+    await client.rpc('pluginManager/setPluginEnabled', { id: row.entryId, enabled });
+    await waitUntil(async () => matches(await plugin(id), enabled, enabled ? 'active' : null), id + ' ' + enabled);
+  };
+  const results = {};
+  const bundles = await client.rpc('pluginManager/listBundles');
+  const bundle = bundles.find(row => row.name === '@tencent-connect/dsh-qqbot');
+  assert(bundle?.rows.some(row => row.rowId === core) && bundle.rows.some(row => row.rowId === history), 'Both components must belong to the core bundle');
+  assert(matches(await plugin(core), true, 'active') && matches(await plugin(history), true, 'active'), 'Both components must be running after installation');
+  results.installed = true;
+
+  await toggle(history, false);
+  assert(matches(await plugin(core), true, 'active'), 'Disabling history stopped the core');
+  const readyCount = fixture.state.readyCount;
+  const { outbound } = await fixtureRequest('observations');
+  const before = outbound.at(-1)?.sequence ?? 0;
+  await fixtureRequest('outbound', { mode: 'success' });
+  await fixtureRequest('message', { scope: 'group', identity: 'allowed', command: 'ping' });
+  await waitUntil(async () => (await fixtureRequest('observations')).outbound.some(row =>
+    row.sequence > before && row.path.endsWith('/groups/local-fixture-allowed-group/messages') && /pong/i.test(row.content)), 'group reply with history disabled');
+  const timeline = await client.get('/api/qqbot/workbench/timeline?appId=0000000000&scope=group&openId=local-fixture-allowed-group');
+  const pingRows = timeline.entries.filter(row => row.direction === 'inbound' && row.text.includes('/bot-ping'));
+  const lastPing = pingRows.at(-1);
+  assert(lastPing, 'The core did not record ingress while history was disabled');
+  assert.equal(fixture.state.readyCount, readyCount, 'History disable should leave the connected gateway alone');
+  results.historyOff = true;
+
+  await toggle(history, true);
+  const reopened = await client.get('/api/qqbot/workbench/timeline?appId=0000000000&scope=group&openId=local-fixture-allowed-group');
+  assert(reopened.entries.some(row => row.id === lastPing.id), 'The record disappeared when history was re-enabled');
+  results.historyRestored = true;
+
+  await toggle(core, false);
+  await waitUntil(() => fixture.state.activeConnections === 0, 'core gateway disconnection');
+  const dependent = await plugin(history);
+  assert(dependent?.enabled && dependent.fiberPhase !== 'active', 'The history component should wait for its core service');
+  await toggle(core, true);
+  await waitUntil(async () => matches(await plugin(history), true, 'active') && fixture.state.readyCount > readyCount, 'core and history restored');
+  results.coreRestored = true;
+  return results;
+}
+
 export async function runHostVerification(options, { signal } = {}) {
   const config = await createRunConfig(options);
   const configPath = join(config.runDir, 'run.json');
@@ -380,7 +460,11 @@ export async function runHostVerification(options, { signal } = {}) {
       '--port', String(port), '--no-open'], { cwd: config.dshSource, env: buildHostEnvironment(config), logPath: config.hostLog });
     await writePrivateJson(join(config.runDir, 'process.json'), { pid: host.child.pid, cwd: config.dshSource,
       home: config.home, profile: config.profile, hostOrigin: config.hostOrigin });
-    await waitForHost(config, host, { signal });
+    const { client } = await waitForHost(config, host, { signal });
+    if (config.historyPackage) {
+      const results = await verifyComponents(client, fixture, signal);
+      await writePrivateJson(join(config.runDir, 'components.json'), results);
+    }
     await runLogged(options.python, [join(config.pluginRoot, 'tests/e2e/command_matrix.py'), '--config', configPath],
       { cwd: config.pluginRoot, env: buildHostEnvironment(config), logPath: join(config.runDir, 'matrix.log') }, { signal, timeoutMs: 360_000 });
     const matrix = JSON.parse(await readFile(join(config.runDir, 'command-report.json'), 'utf8'));

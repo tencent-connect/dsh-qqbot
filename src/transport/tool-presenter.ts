@@ -2,7 +2,7 @@
  * 工具调用结果 → Markdown 格式化
  *
  * 适配 QQ 消息通道：优先用工具自定义的 presentResult 视图，
- * fallback 到 raw text。错误始终展示，成功结果按 config 开关。
+ * fallback 到 raw text。调用方只传入允许外发的成功结果。
  */
 
 /** dsh-tools 主机平面注册表（presentResult 能力） */
@@ -16,10 +16,7 @@ export interface ToolsRegistryLike {
 export interface ToolResultData {
   message: {
     content: Array<{ type: string; text?: string; content?: unknown; isError?: boolean }>;
-    source: { callId: string };
-    isError?: boolean;
   };
-  error?: { name: string; code: string };
   meta?: unknown;
 }
 
@@ -44,22 +41,14 @@ export function formatToolResult(
   toolsRegistry: ToolsRegistryLike | undefined,
   agent: unknown,
 ): string | null {
-  // 1. 错误优先：始终展示
-  if (data.error) {
-    return `❌ 工具 \`${name}\` 执行失败\n\`${data.error.name}: ${data.error.code}\``;
-  }
-  if (data.message.isError) {
-    return `❌ 工具 \`${name}\` 执行失败\n${truncate(textOf(data.message.content))}`;
-  }
-
-  // 2. 尝试工具自定义视图（presentResult）
+  // 尝试工具自定义视图（presentResult）
   const view = presentResultView(name, rawArgs, data, toolsRegistry, agent);
   if (view) {
     const rendered = renderView(name, view);
     if (rendered) return rendered;
   }
 
-  // 3. fallback raw text
+  // fallback raw text
   const block = data.message.content[0];
   const result = block !== undefined && block.type === 'tool-result' ? textOf(block.content) : textOf(data.message.content);
   if (!result) return null;

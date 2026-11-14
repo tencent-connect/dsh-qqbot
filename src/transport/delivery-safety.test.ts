@@ -419,13 +419,52 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('visible preview'));
   });
 
-  it.each([false, true])('direct native tool text remains visible, including errors with previews disabled (error=%s)', async error => {
+  it.each([false, true])('keeps tool errors out of a recovered reply (previews=%s)', async showToolResults => {
     vi.useFakeTimers();
-    const f = setup({ showToolResults: !error }); f.input();
-    f.emit('tool/call', { turn: 1, callId: 'native', name: 'read', arguments: '{}' });
-    f.emit('tool/result', { turn: 1, message: { source: { callId: 'native' }, isError: error, content: [{ type: 'text', text: 'native tool details' }] } });
+    const f = setup({ showToolResults, streaming: false }); f.input();
+    for (const callId of ['structured', 'message-flag']) {
+      f.emit('tool/call', { turn: 1, callId, name: 'run_code', arguments: '{}' });
+      f.emit('tool/result', { turn: 1,
+        ...(callId === 'structured' ? { error: { name: 'CodeRunFailedError', code: 'CODE_RUN_FAILED' } } : {}),
+        message: { source: { callId }, isError: callId === 'message-flag', content: [{ type: 'text', text: 'internal details' }] },
+      });
+    }
     await vi.runAllTimersAsync();
-    expect(f.bot.sendMarkdown).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('native tool details'));
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+    f.answer();
+    f.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
+    await vi.runAllTimersAsync();
+    expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['answer']);
+  });
+
+  it('drops unsent partial text and sends a single brief notice on terminal failure', async () => {
+    vi.useFakeTimers();
+    const f = setup({ showToolResults: true }); f.input();
+    f.start();
+    f.chunk('unfinished text');
+    const end = { turn: 1, reason: { kind: 'error', error: { code: 'STREAM_CLOSED', message: 'internal provider details' } } };
+    f.emit('turn/end', end);
+    f.emit('turn/end', end);
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).not.toHaveBeenCalled();
+    expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['⚠️ 本轮处理失败，请稍后重试。']);
+  });
+
+  it('does not send a terminal failure notice after access is withdrawn', async () => {
+    vi.useFakeTimers();
+    const f = setup(); f.input();
+    f.emit('turn/end', { turn: 1, reason: { kind: 'error' } });
+    f.revoke();
+    await vi.runAllTimersAsync();
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a canceled turn as a failure', async () => {
+    vi.useFakeTimers();
+    const f = setup(); f.input();
+    f.emit('turn/end', { turn: 1, reason: { kind: 'aborted' } });
+    await vi.runAllTimersAsync();
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
   it('presented files are still delivered once, including a failed outer turn', async () => {

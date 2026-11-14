@@ -224,7 +224,7 @@ export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: Ag
     }),
     ...([
       ['streaming', '私聊流式输出', '仅被动回复支持流式'],
-      ['showToolResults', '显示工具调用结果', '关闭后仍提示工具错误'],
+      ['showToolResults', '显示工具成功结果', '仅在整轮失败时向 QQ 发送简短提示。'],
     ] as const).filter(([key]) => key !== 'streaming' || scope !== 'group').map(([key, label, hint]) =>
       h('div', { className: 'imqw-receiving', key },
         h('span', { title: hint }, label),

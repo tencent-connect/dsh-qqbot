@@ -76,9 +76,11 @@ node scripts/verify-qqbot.mjs --mode host \
 
 可用 `--preset-primary`、`--preset-secondary` 选择已安装的预设，默认 `standard`、`minimal`；`--host-port`、`--fixture-port` 可指定空闲端口，默认自动分配。`--output` 指定本次新建的私有输出目录，已存在目录会被拒绝。
 
+验证发行包时，先按[双包安装说明](docs/workbench/extensions.md)构建并打包，再在上述命令同时追加 `--core-package` 和 `--history-package`，各自指向对应的绝对 `.tgz` 路径。启动器通过 CLI 安装两份包，在真实 Host 验证两个组件都已运行、停用记录期间主机器人仍回复并保存入站、恢复记录读取到该条消息，以及主组件停用和恢复后的依赖与网关状态。结果写入 `components.json`。第三列显隐另在浏览器检查。
+
 启动器会：
 
-1. 新建 `DSH_HOME`、profile、`QQBOT_DATA_DIR` 和工作目录，使用 CLI 的本地 `link:` 安装路径。
+1. 新建 `DSH_HOME`、profile、`QQBOT_DATA_DIR` 和工作目录。默认使用 CLI 的本地 `link:` 路径，指定发行包时使用 `file:` 路径。
 2. 把显式提供的模型 patch 写入该 profile，并设置虚拟 QQ 账号与本地端点。
 3. 检查真实模型目录、默认路由与预设。默认名称存在但 provider 列表为空时直接失败。
 4. 通过真实 QQ SDK 协议、配置 HTTP 接口和 Session RPC 运行矩阵，保存报告。

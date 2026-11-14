@@ -28,6 +28,9 @@ test('offline mode is the default and model generation requires an explicit host
   assert.equal(parseArgs([...args, '--allow-model-requests']).allowModelRequests, true);
   assert.throws(() => parseArgs([...args, '--host-port', '3192', '--fixture-port', '3192']), /separate ports/);
   assert.throws(() => parseArgs([...args, '--mode', 'host']), /Duplicate option/);
+  assert.throws(() => parseArgs([...args, '--history-package', '/records.tgz']), /requires --core-package/);
+  assert.throws(() => parseArgs([...args, '--core-package', './core.tgz']), /must be an absolute path/);
+  assert.equal(parseArgs([...args, '--core-package', '/core.tgz', '--history-package', '/records.tgz']).historyPackage, '/records.tgz');
   assert.throws(() => parseRoute('no-provider'), /provider\/model/);
 });
 

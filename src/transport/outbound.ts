@@ -15,7 +15,6 @@ import { TurnTracker, type DeliveryPlan } from './turn-tracker.ts';
 import { deliveryPart, replyDelivery } from './delivery-context.ts';
 import {
   parseEvent,
-  extractTurnError,
   type MessageEvent,
   type ToolCallEvent,
   type ToolResultEvent,
@@ -54,9 +53,6 @@ interface ToolCallRecord {
   name: string;
   args: string;
 }
-
-/** 不展示给用户的轮次错误码（底层传输/网络错误，对用户无意义，且常被重试兜住） */
-const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
 
 /**
  * 出站路由器：持有会话级状态，按事件类型分发到处理器。
@@ -160,7 +156,6 @@ class OutboundRouter {
         if (record !== undefined) this.onToolCall(sessionId, event);
         break;
       case 'tool/result':
-        plan.target = deliveryPart(plan.target, 'tool-result', event.callId);
         if (record !== undefined) this.onToolResult(record, plan, event);
         break;
       case 'deliverables/presented':
@@ -281,15 +276,14 @@ class OutboundRouter {
     this.toolCalls.set(`${sessionId}:${event.callId}`, { name: event.name, args: event.arguments });
   }
 
-  /** 工具结果：错误始终发送，成功结果按开关 */
+  /** 失败详情留在原生会话，成功结果按开关发送。 */
   private onToolResult(record: SessionRecord, plan: DeliveryPlan, event: ToolResultEvent): void {
     const key = `${record.sessionId}:${event.callId}`;
     const call = this.toolCalls.get(key);
     this.toolCalls.delete(key);
     if (call === undefined) return;
 
-    const nativeError = (event.raw.message as { isError?: unknown } | undefined)?.isError === true;
-    if (event.error === undefined && !nativeError && !(this.outputOptions.get(record.sessionId) ?? this.config).showToolResults) return;
+    if (event.failed || !(this.outputOptions.get(record.sessionId) ?? this.config).showToolResults) return;
 
     const text = formatToolResult(
       call.name,
@@ -300,7 +294,7 @@ class OutboundRouter {
     );
     if (!text) return;
 
-    void this.send(plan.target, text, 'sendToolResult');
+    void this.send(deliveryPart(plan.target, 'tool-result', event.callId), text, 'sendToolResult');
   }
 
   /** 收集本轮声明的交付文件：事件总是先于 turn/end 到达，轮末统一投递 */
@@ -327,7 +321,7 @@ class OutboundRouter {
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
     if (buffer !== undefined) {
-      if (buffer.text.trim()) {
+      if (!event.failed && buffer.text.trim()) {
         flushTask = buffer.flush();
       } else {
         buffer.cancel();
@@ -342,11 +336,10 @@ class OutboundRouter {
     const pending = this.pendingText.get(sessionId) ?? Promise.resolve();
     this.pendingText.delete(sessionId);
 
-    const failure = extractTurnError(event.reason);
     void (async () => {
       await Promise.all([flushTask, pending]);
-      if (plan !== undefined && failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
-        await this.send(plan.target, `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`, 'sendTurnEndError');
+      if (plan !== undefined && event.failed) {
+        await this.send(plan.target, '⚠️ 本轮处理失败，请稍后重试。', 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
         await this.deliverer.deliver(plan.target, files, sessionCwd);

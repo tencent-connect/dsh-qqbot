@@ -296,7 +296,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('E_BROKEN'));
+    expect(bot.sendMarkdown).toHaveBeenCalledExactlyOnceWith(c2cTarget, '⚠️ 本轮处理失败，请稍后重试。');
     expect(deliver).toHaveBeenCalledTimes(1);
   });
 

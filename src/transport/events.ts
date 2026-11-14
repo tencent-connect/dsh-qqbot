@@ -12,15 +12,6 @@ export interface RawSessionEvent {
   data: Record<string, unknown>;
 }
 
-/** turn/end 事件的 reason 结构（兼容 error/failure/顶层 message 三种形态） */
-export interface TurnEndReason {
-  kind?: string;
-  error?: { message?: string; code?: string };
-  failure?: { message?: string; code?: string };
-  message?: string;
-  code?: string;
-}
-
 /** assistant/chunk 事件（仅保留 text-delta） */
 export interface ChunkEvent {
   type: 'assistant/chunk';
@@ -45,7 +36,7 @@ export interface ToolCallEvent {
 export interface ToolResultEvent {
   type: 'tool/result';
   callId: string;
-  error?: { name: string; code: string };
+  failed: boolean;
   /** 原始 data 透传给 presenter 做结构化展示 */
   raw: Record<string, unknown>;
 }
@@ -53,7 +44,7 @@ export interface ToolResultEvent {
 /** turn/end 事件 */
 export interface TurnEndEvent {
   type: 'turn/end';
-  reason: TurnEndReason;
+  failed: boolean;
 }
 
 /** present 工具声明的一个交付文件 */
@@ -107,15 +98,15 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'tool/result': {
-      const data = raw.data as { message?: { source?: { callId?: string } }; error?: { name: string; code: string } };
+      const data = raw.data as { message?: { source?: { callId?: string }; isError?: boolean }; error?: unknown };
       const callId = data.message?.source?.callId;
       if (!callId) return undefined;
-      return { type: 'tool/result', callId, error: data.error, raw: raw.data };
+      return { type: 'tool/result', callId, failed: data.error !== undefined || data.message?.isError === true, raw: raw.data };
     }
 
     case 'turn/end': {
-      const reason = (raw.data as { reason?: TurnEndReason }).reason ?? {};
-      return { type: 'turn/end', reason };
+      const reason = raw.data.reason;
+      return { type: 'turn/end', failed: reason !== null && typeof reason === 'object' && 'kind' in reason && reason.kind === 'error' };
     }
 
     case 'deliverables/presented': {
@@ -136,21 +127,6 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     default:
       return undefined;
   }
-}
-
-/**
- * 从 turn/end reason 提取错误信息
- *
- * 兼容三种形态：error（新格式）、failure（旧格式）、顶层 message/code（最旧格式）。
- */
-export function extractTurnError(reason: TurnEndReason): { code: string; message: string } | undefined {
-  if (reason.kind !== 'error') return undefined;
-
-  const detail = reason.error ?? reason.failure;
-  return {
-    code: detail?.code ?? reason.code ?? 'UNKNOWN',
-    message: detail?.message ?? reason.message ?? 'unknown error',
-  };
 }
 
 // ── agent/assistant-stream 实时流式帧（宿主 v2+） ──
