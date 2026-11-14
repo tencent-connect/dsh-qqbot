@@ -338,7 +338,7 @@ async function hostClient(config) {
     if (!response.ok) throw new Error(`Host ${path.split('?')[0]} returned HTTP ${response.status}.`);
     return response.json();
   };
-  return { get: path => request(path), rpc: async (method, args = {}) => {
+  return { get: path => request(path), post: (path, data) => request(path, data), rpc: async (method, args = {}) => {
     const value = await request('/api/' + method, { type: 'client-request', rpcId: crypto.randomUUID(), method, payload: { args } });
     if (!value.result?.ok) throw new Error(`Host RPC ${method} failed.`);
     return value.result.value;

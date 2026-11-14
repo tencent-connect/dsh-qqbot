@@ -385,7 +385,7 @@ export function registerWorkbenchConversations(
       }
     };
     try {
-      let checkIdle: (() => void) | undefined;
+      let afterSave: (() => void) | undefined;
       if (patch.agent && conversation.agent) {
         try {
           await robots.conversationAccount(patch.appId)?.validateAgent?.(patch.agent, conversation.agent);
@@ -394,14 +394,15 @@ export function registerWorkbenchConversations(
         }
         assertCurrent();
         try {
-          checkIdle = await robots.toolPolicies?.beforeSave(key, sessions, patch.agent);
-          checkIdle?.();
+          const validate = await robots.toolPolicies?.beforeSave(key, sessions, patch.agent);
+          afterSave = validate?.();
         } catch (error) {
           throw new WorkbenchRequestError(409, error instanceof Error ? error.message : '会话正在运行，请稍后重试。');
         }
       }
       assertCurrent();
       const settings = robots.conversationSettings.save(key, { ...patch, agent: patch.agent ?? conversation.agent });
+      afterSave?.();
       return workbenchJson({ conversation: { ...conversation, ...settings } });
     } finally {
       if (patch.agent) robots.toolPolicies?.reconcile(key, sessions);

@@ -20,6 +20,9 @@ interface PresetScope {
   readonly defaultId: string;
   acquireScope(id?: string): Promise<{ key: object } & AsyncDisposable>;
 }
+interface SessionLineage {
+  stat(id: string): Promise<{ header: { parentSession?: string } } | undefined>;
+}
 type NativeExecutor = new (ctx: Context) => ToolExecutor;
 const nativeModule = '@deepseek-ai/dsh-tool-executor-native';
 let native: Promise<NativeExecutor> | undefined;
@@ -33,8 +36,8 @@ function loadNative(): Promise<NativeExecutor> {
 
 // Delegation can outlive the calling Agent or use a different provider. The
 // PTC transport is not a capability that can appear in a custom tool list.
-const excluded = new Set(['run_code', 'subagent', 'subagent_fork', 'spawn_agent', 'send_message', 'workflow', 'plugin_manager']);
-const usable = (name: string): boolean => !excluded.has(name) && !name.startsWith('schedule_');
+const excluded = new Set(['run_code', 'subagent', 'spawn_agent', 'send_message', 'interrupt_agent', 'workflow', 'plugin_manager']);
+const usable = (name: string): boolean => !excluded.has(name) && !name.startsWith('subagent_') && !name.startsWith('schedule_');
 const definitions = (ctx: Context): Tools | undefined => ctx.get('tools') as Tools | undefined;
 const presetOf = (agent: DshAgent): string | undefined => agent.session.header?.agentPreset;
 
@@ -56,32 +59,65 @@ function rank(permission: string): number {
   return WORKBENCH_BASE_PERMISSIONS.findIndex(value => value === permission);
 }
 
+function expands(from: WorkbenchAgentSettings | undefined, to: WorkbenchAgentSettings | undefined): boolean {
+  if (from?.tools === undefined) return false;
+  const tools = from.tools;
+  return to?.tools === undefined || to.tools.some(name => !tools.includes(name))
+    || rank(to.permission) > rank(from.permission);
+}
+
 export class WorkbenchToolPolicies {
   private readonly installed = new WeakMap<DshAgent, { release(): void; replaceable: boolean }>();
-  private readonly owners = new Map<string, string>();
+  private readonly owners = new WeakMap<DshAgent, string>();
 
   constructor(
-    ctx: Context,
+    private readonly ctx: Context,
     private readonly agents: DshAgentRegistry,
     private readonly read: (key: string) => WorkbenchAgentSettings | undefined,
-    owner: (id: string) => string | undefined,
+    private readonly owner: (id: string) => string | undefined,
   ) {
     const lifecycle = ctx as unknown as {
       on(event: 'agent/created' | 'agent/disposed', handler: (event: { agent: DshAgent }) => void | Promise<void>, options: { global: true }): void;
     };
     lifecycle.on('agent/created', async ({ agent }) => {
-      const parent = agent.session.header?.parentSession;
-      const key = this.owners.get(agent.id) ?? owner(agent.id)
-        ?? (parent && (this.owners.get(parent) ?? owner(parent)));
-      if (key && read(key)?.tools !== undefined) await this.attach(agent, key);
+      const key = await this.resolveOwner(agent);
+      if (key) await this.attach(agent, key);
     }, { global: true });
     lifecycle.on('agent/disposed', ({ agent }) => {
-      this.owners.delete(agent.id);
+      this.owners.delete(agent);
       this.installed.delete(agent);
     }, { global: true });
   }
 
+  private knownOwner(agent: DshAgent): string | undefined {
+    return this.owners.get(agent) ?? this.owner(agent.id);
+  }
+
+  private async resolveOwner(agent: DshAgent): Promise<string | undefined> {
+    const direct = this.knownOwner(agent);
+    if (direct !== undefined) return direct;
+    const seen = new Set([agent.id]);
+    let parent = agent.session.header?.parentSession;
+    while (parent !== undefined && !seen.has(parent)) {
+      seen.add(parent);
+      const live = this.agents.get(parent);
+      const key = live ? this.knownOwner(live) : this.owner(parent);
+      if (key !== undefined) return key;
+      const lineage = this.ctx.get('sessionPersistence') as SessionLineage | undefined;
+      parent = live ? live.session.header?.parentSession : (await lineage?.stat(parent))?.header.parentSession;
+    }
+    return undefined;
+  }
+
+  async restoreLive(onlyKey?: string): Promise<void> {
+    for (const agent of this.agents.list?.() ?? []) {
+      const key = await this.resolveOwner(agent);
+      if (key && (onlyKey === undefined || onlyKey === key) && this.agents.get(agent.id) === agent) await this.attach(agent, key);
+    }
+  }
+
   async attach(agent: DshAgent, key: string, force = false): Promise<void> {
+    this.owners.set(agent, key);
     if (this.installed.has(agent) || (!force && this.read(key)?.tools === undefined)) return;
     const tools = definitions(agent.ctx);
     const permission = agent.ctx.get('permissionPresets') as Permissions | undefined;
@@ -95,8 +131,7 @@ export class WorkbenchToolPolicies {
     const Native = await loadNative();
     if (this.installed.has(agent)) return;
     const executor = new Native(agent.ctx);
-    const allows = (name: string): boolean => {
-      const policy = this.read(key);
+    const allows = (policy: WorkbenchAgentSettings | undefined, name: string): boolean => {
       if (policy?.tools === undefined) return true;
       if (!usable(name) || !policy.tools.includes(name)) return false;
       const limit = rank(policy.permission);
@@ -105,51 +140,68 @@ export class WorkbenchToolPolicies {
     };
     const unguard = tools.guard(execution => {
       try {
-        return (this.read(key)?.tools === undefined || (execution.agent === agent && allows(execution.name))) ? undefined : '此 QQ 会话未允许该工具，或当前原生权限超出基础权限。';
+        const policy = this.read(key);
+        return (policy?.tools === undefined || (execution.agent === agent && allows(policy, execution.name))) ? undefined : '此 QQ 会话未允许该工具，或当前原生权限超出基础权限。';
       } catch { return '无法验证此 QQ 会话的工具权限。'; }
     });
     try {
       const select = replaceable ? tools.overrideExecutor! : tools.setExecutor!;
       const deselect = select.call(tools, {
-        describe: definitions => executor.describe(definitions.filter(tool => allows(tool.name))),
+        describe: definitions => {
+          const policy = this.read(key);
+          return executor.describe(definitions.filter(tool => allows(policy, tool.name)));
+        },
         execute: input => executor.execute(input),
       });
       this.installed.set(agent, { replaceable, release: () => { deselect(); unguard(); } });
-      this.owners.set(agent.id, key);
     } catch (error) {
       unguard();
       throw error;
     }
   }
 
-  async beforeSave(key: string, sessions: readonly string[], next: WorkbenchAgentSettings): Promise<() => void> {
-    const live = () => sessions.flatMap(id => {
-      const agent = this.agents.get(id);
-      return agent ? [agent] : [];
-    });
-    const checkIdle = () => {
-      const current = this.read(key);
-      const previous = current?.tools;
-      const widens = current && previous !== undefined && (next.tools === undefined
-        || next.tools.some(name => !previous.includes(name)) || rank(next.permission) > rank(current.permission));
-      if (widens && live().some(agent => agent.status !== 'idle')) throw new Error('会话正在运行，请在空闲后扩大工具权限。');
+  private live(key: string, sessions: readonly string[]): DshAgent[] {
+    const roots = new Set(sessions);
+    return (this.agents.list?.() ?? sessions.flatMap(id => this.agents.get(id) ?? []))
+      .filter(agent => roots.has(agent.id) || this.knownOwner(agent) === key);
+  }
+
+  async beforeSave(key: string, sessions: readonly string[], next: WorkbenchAgentSettings): Promise<() => () => void> {
+    const previous = this.read(key);
+    if (next.tools === undefined && previous?.tools === undefined) return () => () => {};
+    if (!this.agents.list) throw new Error('当前 DSH 无法验证运行中的子 Agent 工具权限。');
+    const widening = expands(previous, next);
+    const narrowing = expands(next, previous);
+    const checkIdle = (live: readonly DshAgent[]) => {
+      if (widening && live.some(agent => agent.status !== 'idle')) throw new Error('会话正在运行，请在空闲后扩大工具权限。');
     };
-    checkIdle();
-    if (next.tools !== undefined) for (const agent of live()) await this.attach(agent, key, true);
+    await this.restoreLive(key);
+    const live = this.live(key, sessions);
+    checkIdle(live);
+    if (next.tools !== undefined) for (const agent of live) {
+      if (this.agents.get(agent.id) === agent) await this.attach(agent, key, true);
+    }
     return () => {
-      checkIdle();
-      if (next.tools !== undefined && live().some(agent => !this.installed.has(agent))) {
+      const current = this.live(key, sessions);
+      checkIdle(current);
+      if (next.tools !== undefined && current.some(agent => !this.installed.has(agent))) {
         throw new Error('会话已重新打开，请重试保存。');
       }
+      // Host guards run before dispatch wrappers such as the async checkpoint.
+      // Fence work already admitted by the old policy after the write succeeds.
+      return () => {
+        if (narrowing) for (const agent of current) {
+          if (agent.status === 'running') agent.cancel({ kind: 'user' }, { keepInbox: true });
+        }
+      };
     };
   }
 
   reconcile(key: string, sessions: readonly string[]): void {
     if (this.read(key)?.tools !== undefined) return;
-    for (const id of sessions) {
-      const agent = this.agents.get(id);
-      const installed = agent && this.installed.get(agent);
-      if (agent && installed?.replaceable) {
+    for (const agent of this.live(key, sessions)) {
+      const installed = this.installed.get(agent);
+      if (installed?.replaceable) {
         installed.release();
         this.installed.delete(agent);
       }

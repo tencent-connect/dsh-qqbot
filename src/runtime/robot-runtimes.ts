@@ -95,6 +95,7 @@ export class RobotRuntimes {
         if (agent) await this.toolPolicies.attach(agent, binding.key);
       }
     }
+    await this.toolPolicies.restoreLive();
     await Promise.all(this.records().map(record => this.sync(record.appId)));
   }
 

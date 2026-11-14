@@ -26,9 +26,10 @@ pnpm test src/runtime/account-service.test.ts src/runtime/pairing-service.test.t
 pnpm test src/session/session-manager.test.ts src/gateway/bootstrap.test.ts
 pnpm test src/transport/qq-delivery.test.ts src/transport/timeline-observer.test.ts
 pnpm test src/features/approval-channel.test.ts src/features/question-channel.test.ts
+pnpm test src/runtime/workbench-tools.test.ts
 ```
 
-第一条运行手动发送、配对撤权、Session 切换、流式回退、审批与提问以及入站归属和出站准入的模型及负对照。后续命令用插件代码回放反例。流式回执超时、撤权和 HTTP 重定向使用真实 QQ SDK 和本地 HTTP 服务，审批与提问使用可控的发卡 Promise 重放取消和晚到回执。当前仓库未接入此 CI 步骤。
+第一条运行手动发送、配对撤权、Session 切换、流式回退、审批与提问、入站归属与出站准入，以及自定义工具权限的模型及负对照。后续命令用插件代码回放反例。流式回执超时、撤权和 HTTP 重定向使用真实 QQ SDK 和本地 HTTP 服务，审批与提问使用可控的发卡 Promise 重放取消和晚到回执。当前仓库未接入此 CI 步骤。
 
 添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
 
@@ -37,6 +38,17 @@ TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal --ledger-loss
 ```
 
 回放和模型都通过时返回 0，环境或结果有问题时返回 2。运行范围与账本恢复说明见[手动发送模型](tests/formal/qq-delivery/README.md)。
+
+## 隔离 Host 回放自定义工具
+
+先按[双包安装说明](docs/workbench/extensions.md)构建两个 QQ 插件包，使用支持 `tools.overrideExecutor` 的 DSH checkout（无需重建 Host）。本命令在新的绝对路径目录中安装包，启动独立 Home、工作区和 loopback 网关；不连接真实 QQ 或模型服务。需要可用的 `pnpm` 和 Node 22.19+ 或 24+。
+
+```bash
+node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
+  /absolute/dsh-qqbot.tgz /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后；撤权后放行，工具本体不得启动。另启动真实的宿主内子 Agent，检查旧请求和 PTC 是否能绕过新策略。使用修复前的包作对照时，追加 `baseline` 以验证两条旧路径确实产生文件。证据写入运行目录的 `report.json`，Host 结束后自动停止。
 
 ## 本地协议夹具
 

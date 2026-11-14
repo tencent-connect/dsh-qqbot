@@ -1,0 +1,243 @@
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost } from './host.mjs';
+import { createQQFixture } from './qq-fixture.mjs';
+import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
+
+const [source, corePackage, historyPackage, dir, expected = 'fixed'] = process.argv.slice(2);
+assertNodeVersion();
+assert([source, corePackage, historyPackage, dir].every(value => value && isAbsolute(value))
+  && ['baseline', 'fixed'].includes(expected), 'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed]');
+await mkdir(dir, { mode: 0o700 });
+const home = join(dir, 'home');
+const workspace = join(dir, 'workspace');
+await mkdir(workspace);
+const profile = 'qqbot-policy';
+const hostPort = await availablePort();
+const hostOrigin = 'http://127.0.0.1:' + hostPort;
+const hostLog = join(dir, 'host.log');
+const primary = { provider: 'policy-fixture', model: 'fixture-primary' };
+const secondary = { provider: primary.provider, model: 'fixture-secondary' };
+const qq = await createQQFixture({ primary, secondary, allowModelRequests: true });
+const pending = new Map();
+const requests = [];
+const report = { expected, hostOrigin, cases: {}, requests };
+
+const server = createServer(async (req, res) => {
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks));
+    const child = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('DELEGATED_POLICY_PROBE'));
+    const isTest = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('QQ_CMD_OK')) || child;
+    const plan = isTest ? pending.get(child ? 'child' : 'root')?.shift() : undefined;
+    if (plan) requests.push({ name: plan.name, tools: (payload.tools ?? []).map(tool => tool.function.name).sort() });
+    const calls = await plan?.response;
+    const delta = calls?.length ? {
+      role: 'assistant', tool_calls: calls.map(({ name, args }, index) => ({
+        index, id: 'call_' + requests.length + '_' + index, type: 'function',
+        function: { name, arguments: JSON.stringify(args) },
+      })),
+    } : { role: 'assistant', content: 'QQ_CMD_OK' };
+    const base = { id: 'fixture', object: 'chat.completion.chunk', created: 123, model: payload.model };
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (const [part, finish_reason] of [[delta, null], [{}, calls?.length ? 'tool_calls' : 'stop']]) {
+      res.write('data: ' + JSON.stringify({ ...base, choices: [{ index: 0, delta: part, finish_reason }] }) + '\n\n');
+    }
+    res.end('data: [DONE]\n\n');
+  } catch {
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+  }
+});
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+let host;
+const controls = [];
+try {
+  const env = {
+    ...process.env, HOME: home, DSH_HOME: home, QQBOT_DATA_DIR: join(dir, 'qq-data'),
+    QQBOT_BASE_URL: qq.origin, QQBOT_TOKEN_BASE_URL: qq.origin,
+    QQBOT_TOOL_TEST_KEY: 'isolated-test-only', DSH_TELEMETRY_MODE: 'DISABLED',
+  };
+  for (const name of Object.keys(process.env)) {
+    if ((name.startsWith('QQBOT_') && !['QQBOT_DATA_DIR', 'QQBOT_BASE_URL', 'QQBOT_TOKEN_BASE_URL', 'QQBOT_TOOL_TEST_KEY'].includes(name))
+      || name === 'NODE_OPTIONS') delete env[name];
+  }
+  const cli = ['--import', 'tsx/esm', 'apps/cli/src/bin.ts'];
+  const select = ['--profile', profile];
+  const install = { cwd: source, env, logPath: join(dir, 'install.log') };
+  await runLogged(process.execPath, [...cli, ...select, '--from-default-profile', 'web', '--dump-config'], install);
+  await runLogged(process.execPath, [...cli, 'plugin', ...select, 'add', 'file:' + corePackage, 'file:' + historyPackage], install);
+  const profileDir = join(home, 'profiles', profile);
+  const barrier = fileURLToPath(new URL('./tool-policy-barrier.mjs', import.meta.url));
+  await writeFile(join(profileDir, 'cordis.patch.yml'), JSON.stringify([
+    { id: 'im-qqbot', config: { appId: DUMMY_APP_ID, appSecret: DUMMY_SECRET, cwd: workspace,
+      preset: 'standard', streaming: false, showToolResults: false,
+      media: { enabled: false }, access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open' } } },
+    { id: 'agent-default-model', config: primary },
+    { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
+      baseURL: 'http://127.0.0.1:' + server.address().port + '/v1', apiKeyEnv: 'QQBOT_TOOL_TEST_KEY',
+      models: [primary.model, secondary.model].map(id => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024 })) } } } },
+    { insert: [{ id: 'qqbot-tool-policy-barrier', name: barrier }] },
+  ], null, 2), { mode: 0o600 });
+  host = await spawnLogged(process.execPath, [...cli, ...select, '--port', String(hostPort), '--no-open'], { cwd: source, env, logPath: hostLog });
+  report.pid = host.child.pid;
+  await writeFile(join(dir, 'process.json'), JSON.stringify({ pid: report.pid, hostOrigin }), { mode: 0o600 });
+  const { client } = await waitForHost({ hostOrigin, hostLog, primary, secondary }, host);
+  const peer = scope => 'local-fixture-allowed-' + (scope === 'group' ? 'group' : 'user');
+  const base = '/api/qqbot/workbench/';
+  const conversation = async scope => (await client.get(base + 'conversations?appId=' + DUMMY_APP_ID)).conversations
+    .find(row => row.openId === peer(scope) && row.scope === scope);
+  const save = async (scope, config) => {
+    const row = await conversation(scope);
+    return (await client.post(base + 'conversations', { appId: DUMMY_APP_ID, scope, openId: peer(scope),
+      revision: row.revision, agent: { ...row.agent, ...config } })).conversation;
+  };
+  const dispatch = async (scope, command = 'smoke') => {
+    const res = await fetch(qq.origin + '/__fixture/message', { method: 'POST', body: JSON.stringify({ scope, command, identity: 'allowed' }) });
+    assert(res.ok, command);
+  };
+  const until = async (fn, label) => {
+    for (let i = 0; i < 100; i++) {
+      const value = await fn();
+      if (value) return value;
+      await sleep(150);
+    }
+    throw new Error('Timed out: ' + label);
+  };
+  const observed = name => until(() => requests.find(entry => entry.name === name), 'model request ' + name);
+  const plan = (name, calls = [], actor = 'root') => {
+    const queue = pending.get(actor) ?? [];
+    queue.push({ name, response: calls });
+    pending.set(actor, queue);
+  };
+  const hold = (name, actor) => {
+    const gate = Promise.withResolvers();
+    controls.push(gate);
+    plan(name, gate.promise, actor);
+    return gate.resolve;
+  };
+  const events = async (sid, parent) => {
+    const address = parent ? { kind: 'subagent', parentSessionId: parent, childSessionId: sid, mode: 'continuable' }
+      : { kind: 'session', sessionId: sid };
+    const result = await client.rpc('session/events', { request: { address, maxMessages: 180 } });
+    return result.records.filter(row => row.type === 'event').map(row => row.event);
+  };
+  const finish = (sid, count, parent) => until(async () => {
+    const rows = await events(sid, parent);
+    return rows.filter(row => row.type === 'turn/end').length >= count && rows;
+  }, 'settled turn ' + sid);
+  const current = scope => until(async () => (await conversation(scope))?.currentSessionId, 'current ' + scope);
+  const barrierPath = '/api/qqbot-test/tool-barrier';
+  await client.get(barrierPath);
+  await fetch(qq.origin + '/__fixture/outbound', { method: 'POST', body: '{"mode":"success"}' });
+  const write = name => ({ name: 'write', args: { file_path: join(workspace, name), content: 'fixture only\n' } });
+
+  await dispatch('group', 'ping');
+  await until(() => conversation('group'), 'discovered group');
+  await save('group', { preset: 'ptc', permission: 'danger-full-access', tools: ['read', 'write'] });
+  plan('ptc-custom', [write('allowed.txt')]);
+  await dispatch('group');
+  const group = await current('group');
+  await finish(group, 1);
+  assert.deepEqual((await observed('ptc-custom')).tools, ['read', 'write']);
+  assert.equal(await readFile(join(workspace, 'allowed.txt'), 'utf8'), 'fixture only\n');
+
+  const program = `return await tools.write(${JSON.stringify(write('ptc-bypass.txt').args)})`;
+  plan('guessed-ptc', [{ name: 'run_code', args: { code: program, description: 'Try to bypass allowlist' } }]);
+  await dispatch('group');
+  const guessed = await finish(group, 2);
+  const guessedCall = guessed.find(row => row.type === 'tool/call' && row.data.name === 'run_code');
+  assert(guessedCall);
+  assert(guessed.some(row => row.type === 'tool/result' && row.data.message.toolCallId === guessedCall.data.callId
+    && row.data.message.isError && /unknown tool|未允许该工具/.test(JSON.stringify(row.data))));
+  assert.equal(existsSync(join(workspace, 'ptc-bypass.txt')), false);
+  report.cases.ptc = 'Exact schemas read/write, real write effect, guessed run_code refused';
+
+  plan('waiting-before-revoke', [write('waiting.txt')]);
+  await dispatch('group');
+  await until(async () => (await client.get(barrierPath)).waiting.includes(group), 'write after Host guard');
+  await save('group', { tools: ['read'] });
+  await client.post(barrierPath, { sessionId: group });
+  const revoked = await finish(group, 3);
+  const afterGuardWrite = existsSync(join(workspace, 'waiting.txt'));
+  assert.equal(afterGuardWrite, expected === 'baseline');
+  if (expected === 'fixed') assert(revoked.some(row => row.type === 'tool/result' && JSON.stringify(row.data).includes('ABORTED_BEFORE_DISPATCH')));
+  report.cases.afterGuard = { fileWritten: afterGuardWrite, turn: revoked.filter(row => row.type === 'turn/end').at(-1).data.reason };
+
+  plan('after-revoke', [write('forbidden.txt'), { name: 'subagent', args: { description: 'Forbidden delegation probe', prompt: 'DELEGATED_POLICY_PROBE' } }]);
+  await dispatch('group');
+  const denied = await finish(group, 4);
+  assert.deepEqual((await observed('after-revoke')).tools, ['read']);
+  assert.equal(existsSync(join(workspace, 'forbidden.txt')), false);
+  assert.equal((await client.get(barrierPath)).children.length, 0);
+  assert(denied.filter(row => row.type === 'tool/result' && JSON.stringify(row.data).includes('未允许该工具')).length >= 2);
+  report.cases.guessedTools = 'Revoked write and guessed subagent both rejected';
+
+  await dispatch('c2c', 'ping');
+  await until(() => conversation('c2c'), 'discovered private chat');
+  await save('c2c', { preset: 'standard', permission: 'danger-full-access' });
+  const releaseChild = hold('child-before-restrict', 'child');
+  plan('native-parent', [{ name: 'subagent', args: { description: 'Live child policy probe', prompt: 'DELEGATED_POLICY_PROBE' } }]);
+  await dispatch('c2c');
+  const direct = await current('c2c');
+  assert((await observed('native-parent')).tools.includes('subagent'));
+  const childBefore = await observed('child-before-restrict');
+  assert(childBefore.tools.includes('write'), 'child started as a real unrestricted Agent');
+  const child = await until(async () => (await client.get(barrierPath)).children.find(([, parent]) => parent === direct)?.[0], 'child lineage');
+  await save('c2c', { tools: ['read'] });
+  releaseChild([write('child-forbidden.txt')]);
+  const childEvents = await finish(child, 1, direct);
+  const childWrite = existsSync(join(workspace, 'child-forbidden.txt'));
+  assert.equal(childWrite, expected === 'baseline');
+  report.cases.liveChild = { fileWritten: childWrite, turn: childEvents.filter(row => row.type === 'turn/end').at(-1).data.reason };
+  assert.equal((await conversation('group')).currentSessionId, group);
+  assert.equal((await conversation('c2c')).currentSessionId, direct);
+  await save('group', { permission: 'read-only' }); // The current Session is still at full access.
+  await client.post(barrierPath, { sessionId: group, permission: 'danger-full-access' });
+  plan('native-cap-conflict', [{ name: 'read', args: { file_path: join(workspace, 'allowed.txt') } }]);
+  await dispatch('group');
+  const conflicted = await finish(group, 5);
+  assert.deepEqual((await observed('native-cap-conflict')).tools, []);
+  assert(conflicted.some(row => row.type === 'tool/result' && row.data.turn === 5 && JSON.stringify(row.data).includes('基础权限')));
+  await client.post(barrierPath, { sessionId: group, permission: 'read-only' });
+  plan('native-cap-restored', [{ name: 'read', args: { file_path: join(workspace, 'allowed.txt') } }]);
+  await dispatch('group');
+  const restored = await finish(group, 6);
+  assert.deepEqual((await observed('native-cap-restored')).tools, ['read']);
+  assert(restored.some(row => row.type === 'tool/result' && row.data.turn === 6 && row.data.message.isError === false));
+  report.cases.nativeCap = 'No model tools or guessed read while above the cap; native read works once restored';
+
+  // An already assembled PTC request can return after switching to custom mode.
+  await save('group', { tools: undefined });
+  await client.post(barrierPath, { sessionId: group, permission: 'danger-full-access' });
+  plan('native-ptc-control', [{ name: 'run_code', args: {
+    code: `return await tools.write(${JSON.stringify(write('ptc-control.txt').args)})`, description: 'Exercise nested write',
+  } }]);
+  await dispatch('group');
+  await finish(group, 7);
+  assert.deepEqual((await observed('native-ptc-control')).tools, ['run_code']);
+  assert.equal(await readFile(join(workspace, 'ptc-control.txt'), 'utf8'), 'fixture only\n');
+
+  const releaseProgram = hold('old-ptc-request', 'root');
+  await dispatch('group');
+  assert.deepEqual((await observed('old-ptc-request')).tools, ['run_code']);
+  await save('group', { permission: 'danger-full-access', tools: ['read'] });
+  releaseProgram([{ name: 'run_code', args: { code: program, description: 'Return the stale PTC call' } }]);
+  const stale = await finish(group, 8);
+  assert.equal(existsSync(join(workspace, 'ptc-bypass.txt')), false);
+  report.cases.stalePtc = { fileWritten: false, turn: stale.filter(row => row.type === 'turn/end').at(-1).data.reason };
+  report.sessions = { group, direct, child };
+  assert.equal(qq.state.unexpectedRequests, 0);
+} finally {
+  for (const gate of controls) gate.resolve([]);
+  await host?.stop();
+  server.closeAllConnections();
+  await Promise.all([qq.close(), new Promise(resolve => server.close(resolve))]);
+  await writeFile(join(dir, 'report.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
+}

@@ -36,7 +36,7 @@ export interface DshAgent {
     readonly header?: { agentPreset?: string; parentSession?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
-  cancel(cause: { kind: string }): void;
+  cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;
   /** 运行一个非 turn 维护任务（compact 等需要 idle 时串行执行的操作） */
@@ -83,6 +83,7 @@ export interface DshAgentHandle {
 export interface DshAgentRegistry {
   /** 获取进程内已存活的 agent */
   get(sessionId: string): DshAgent | undefined;
+  list?(): readonly DshAgent[];
   /** 从持久化存储恢复 session */
   resume(options: {
     resumeSessionId: string;
