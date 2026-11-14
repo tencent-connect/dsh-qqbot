@@ -46,3 +46,23 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
     expect(ConfigSchema(input).proactiveDelivery.externalTurns).toBe(expected);
   });
 });
+
+describe('messageHandlingMode（消息处理方式）', () => {
+  it.each([{}, { messageHandlingMode: undefined }, { messageHandlingMode: null }])(
+    '缺省或空值默认为排队：%j', (input) => {
+      expect(ConfigSchema(input).messageHandlingMode).toBe('queue');
+    },
+  );
+
+  it('显式配置为插话时生效', () => {
+    expect(ConfigSchema({ messageHandlingMode: 'interrupt' }).messageHandlingMode).toBe('interrupt');
+  });
+
+  it('显式配置为排队时生效', () => {
+    expect(ConfigSchema({ messageHandlingMode: 'queue' }).messageHandlingMode).toBe('queue');
+  });
+
+  it('拒绝非法模式', () => {
+    expect(() => ConfigSchema({ messageHandlingMode: 'bogus' })).toThrow();
+  });
+});

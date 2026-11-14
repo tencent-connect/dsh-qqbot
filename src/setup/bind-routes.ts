@@ -94,6 +94,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
+  'messageHandlingMode',
   'access',
 ]);
 
@@ -108,8 +109,18 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   preset: stringSchema('preset'),
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
+  messageHandlingMode: messageHandlingModeSchema,
   access: (v) => AccessControlSchema(v as never),
 };
+
+const MESSAGE_HANDLING_MODES: readonly string[] = ['queue', 'interrupt'];
+
+function messageHandlingModeSchema(value: unknown): string {
+  if (typeof value !== 'string' || !MESSAGE_HANDLING_MODES.includes(value)) {
+    throw new TypeError('messageHandlingMode 必须是 queue 或 interrupt');
+  }
+  return value;
+}
 
 function booleanSchema(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new TypeError(`${name} 必须是布尔值`);

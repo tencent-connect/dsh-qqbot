@@ -1,3 +1,5 @@
+import type { MessageHandlingMode } from '../config.ts';
+
 /** Editable QQ settings and field-level draft reconciliation. */
 export interface AccessControlWire {
   c2cMode: 'open' | 'allowlist' | 'disabled';
@@ -20,12 +22,13 @@ export interface ConfigWire {
   preset?: string;
   groupPrompt?: string;
   directPrompt?: string;
+  messageHandlingMode?: MessageHandlingMode;
   access?: AccessControlWire;
   cwd?: string;
 }
 
 const EDITABLE_KEYS = ['access', 'requireMention', 'streaming', 'showToolResults', 'debug',
-  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt'] as const;
+  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt', 'messageHandlingMode'] as const;
 const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
 export const DEFAULT_ACCESS: AccessControlWire = {
@@ -106,6 +109,8 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
     for (const key of ['requireMention', 'streaming', 'showToolResults', 'debug']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'boolean') return false;
     }
+    if (fields.messageHandlingMode !== undefined
+      && !['queue', 'interrupt'].includes(String(fields.messageHandlingMode))) return false;
     if (fields.access !== undefined) {
       if (fields.access === null || typeof fields.access !== 'object') return false;
       const access = fields.access as Record<string, unknown>;

@@ -563,4 +563,31 @@ describe('bind-routes', () => {
     await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), resNone);
     expect(resNone.statusCode).toBe(200);
   });
+
+  it.each(['queue', 'interrupt'])('POST config：保存消息处理方式 %s', async (mode) => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: 'localhost' }, JSON.stringify({ messageHandlingMode: mode })),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(onUpdateConfig).toHaveBeenCalledWith({ messageHandlingMode: mode });
+  });
+
+  it.each(['bogus', 42, null])('POST config：拒绝非法消息处理方式 %j', async (mode) => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: 'localhost' }, JSON.stringify({ messageHandlingMode: mode })),
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toMatch(/messageHandlingMode/);
+    expect(onUpdateConfig).not.toHaveBeenCalled();
+  });
 });
