@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useState, type ReactNode } from 'react';
+import { createElement as h, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 import { WORKBENCH_TOOL_LIMIT, WORKBENCH_TOOLS_PATH, type WorkbenchToolChoice } from '../shared/workbench-agent-settings.ts';
 import { fetchJson } from './http.ts';
@@ -40,6 +40,14 @@ interface ToolPickerProps {
   onConfirm: (permission: string, tools: string[]) => void;
 }
 
+interface AppliedCombination {
+  key: string;
+  label: string;
+  added: readonly string[];
+  removed: readonly string[];
+  skipped: readonly string[];
+}
+
 export function WorkbenchToolPicker({ initialPermission, initialTools, permissions, preset, disabled, onCancel, onConfirm }: ToolPickerProps): ReactNode {
   const [permission, setPermission] = useState(initialPermission);
   const [tools, setTools] = useState<string[]>(() => [...initialTools]);
@@ -50,9 +58,13 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [combinations, setCombinations] = useState(browserCombinations);
+  const [creating, setCreating] = useState(false);
+  const nameInput = useRef<HTMLInputElement>(null);
   const [combinationName, setCombinationName] = useState('');
   const [combinationError, setCombinationError] = useState('');
-  const [templateNotice, setTemplateNotice] = useState('');
+  const [applied, setApplied] = useState<AppliedCombination>();
+
+  useEffect(() => { if (creating) nameInput.current?.focus(); }, [creating]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -83,7 +95,7 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
   const exceedsLimit = tools.length > WORKBENCH_TOOL_LIMIT;
 
   const updateSelection = (names: readonly string[], checked: boolean): void => {
-    setTemplateNotice('');
+    setApplied(undefined);
     setTools(previous => {
       if (checked) return [...new Set([...previous, ...names.filter(name => available.has(name))])].sort();
       const removed = new Set(names);
@@ -97,14 +109,19 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
       onClick: () => updateSelection(names, !allSelected),
     }, allSelected && names.length ? removeLabel : selectLabel);
   };
-  const apply = (combination: ToolCombination): void => {
-    const next = applyToolCombination(combination.tools, available);
-    setTools(next.tools);
-    setTemplateNotice(next.skipped ? `已套用「${combination.label}」，跳过 ${next.skipped} 项当前不可用的工具。` : '');
+  const combinationButton = (combination: ToolCombination, origin: 'built-in' | 'personal') => {
+    const key = `${origin}:${combination.id}`;
+    return h(Button, {
+      key, type: 'button', size: 'sm', variant: 'outline', disabled: !ready,
+      title: `${combination.label} · ${combination.tools.length} 项`,
+      'aria-pressed': applied?.key === key,
+      onClick: () => {
+        const { tools, added, removed, skipped } = applyToolCombination(combination.tools, available, selected);
+        setTools(tools);
+        setApplied({ key, label: combination.label, added, removed, skipped });
+      },
+    }, combination.label);
   };
-  const useCombination = (combination: ToolCombination) => h(Button, {
-    key: combination.id, type: 'button', size: 'sm', variant: 'outline', disabled: !ready, onClick: () => apply(combination),
-  }, combination.label);
   const updateCombinations = (change: (previous: ToolCombination[]) => ToolCombination[]): boolean => {
     try {
       const storage = window.localStorage;
@@ -118,18 +135,26 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
       return false;
     }
   };
+  const closeCreate = (): void => {
+    setCreating(false);
+    setCombinationName('');
+    setCombinationError('');
+  };
   const saveCombination = (): void => {
     const label = combinationName.trim();
-    if (!label) return;
+    if (!ready || !tools.length || exceedsLimit || !label) return;
+    if (combinations.some(combination => combination.label === label)) {
+      setCombinationError('已有同名组合。');
+      return;
+    }
     const id = globalThis.crypto.randomUUID?.() ?? `u${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    if (updateCombinations(previous => [...previous, { id, label, tools }])) setCombinationName('');
+    if (updateCombinations(previous => [...previous, { id, label, tools }])) closeCreate();
   };
 
   return h(Modal, {
     open: true, title: '自定义工具', closeLabel: '关闭工具选择', onClose: onCancel,
     className: 'imqw-tools-modal', contentClassName: 'imqw-tools-content',
     footer: h('div', { className: 'imqw-tools-footer' },
-      h('span', { className: 'imqw-muted', role: 'status' }, `已选 ${tools.length} 项`),
       h(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: onCancel }, '取消'),
       h(Button, {
         type: 'button', size: 'sm', variant: 'primary',
@@ -143,27 +168,60 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
       h('p', { className: 'imqw-muted' }, '当前 Session 的原生权限高于上限时，所选工具会暂停使用。')),
     h('div', { className: 'imqw-tools-templates' },
       h('div', { className: 'imqw-actions' },
-        h('span', { className: 'imqw-muted' }, '内置模板'), ...BUILT_IN_TOOL_COMBINATIONS.map(useCombination)),
-      h('details', { className: 'imqw-tools-combinations' },
-        h('summary', null, `我的组合（${combinations.length}）`),
-        combinations.length ? h('div', { className: 'imqw-actions' }, ...combinations.map(combination => h('div', {
-          className: 'imqw-tools-combination', key: combination.id,
-        }, useCombination(combination), h(Button, {
-          type: 'button', size: 'sm', variant: 'ghost', disabled,
-          'aria-label': `删除组合 ${combination.label}`,
-          onClick: () => updateCombinations(previous => previous.filter(item => item.id !== combination.id)),
-        }, '×')))) : null,
-        h('div', { className: 'imqw-tools-combination-input' },
+        h('span', { className: 'imqw-muted' }, '内置模板'),
+        ...BUILT_IN_TOOL_COMBINATIONS.map(combination => combinationButton(combination, 'built-in'))),
+      h('section', { className: 'imqw-tools-combinations', 'aria-label': '我的组合' },
+        h('div', { className: 'imqw-tools-section-head' },
+          h('strong', null, '我的组合'),
+          !creating ? h(Button, {
+            type: 'button', size: 'sm', variant: 'outline', disabled,
+            onClick: () => { setCombinationError(''); setCreating(true); },
+          }, '新建组合') : null),
+        combinations.length ? h('div', { className: 'imqw-actions imqw-combination-list' },
+          ...combinations.map(combination => h('div', { className: 'imqw-tools-combination', key: combination.id },
+            combinationButton(combination, 'personal'), h(Button, {
+              type: 'button', size: 'sm', variant: 'ghost', disabled,
+              'aria-label': `删除组合 ${combination.label}`,
+              onClick: () => {
+                if (updateCombinations(previous => previous.filter(item => item.id !== combination.id))
+                  && applied?.key === `personal:${combination.id}`) setApplied(undefined);
+              },
+            }, '×')))) : null,
+        creating ? h('div', { className: 'imqw-tools-combination-input' },
           h(Input, {
+            ref: nameInput,
             value: combinationName, maxLength: 64, placeholder: '输入组合名称', 'aria-label': '组合名称',
-            disabled, onChange: event => setCombinationName(event.currentTarget.value),
+            disabled, onChange: event => { setCombinationName(event.currentTarget.value); setCombinationError(''); },
+            onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); saveCombination(); } },
           }),
+          h(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: closeCreate }, '取消新建'),
           h(Button, {
-            type: 'button', size: 'sm', variant: 'outline',
+            type: 'button', size: 'sm', variant: 'primary',
             disabled: !ready || !tools.length || exceedsLimit || !combinationName.trim(), onClick: saveCombination,
-          }, '存为组合')),
-        combinationError ? h('p', { className: 'imqb-error', role: 'alert' }, combinationError) : null),
-      templateNotice ? h('p', { className: 'imqw-muted', role: 'status' }, templateNotice) : null),
+          }, '保存组合'),
+          h('span', { className: 'imqw-muted imqw-tools-combination-hint' },
+            tools.length ? `保存下方已选的 ${tools.length} 项工具。` : '在下方勾选要保存的工具。')) : null,
+        combinationError ? h('p', { className: 'imqb-error', role: 'alert' }, combinationError) : null)),
+    h('section', { className: 'imqw-tools-selected', 'aria-label': '已选工具' },
+      h('div', { className: 'imqw-tools-section-head' },
+        h('strong', null, `已选工具（${tools.length}）`),
+        h(Button, {
+          type: 'button', size: 'sm', variant: 'ghost', disabled: !ready || !tools.length,
+          onClick: () => updateSelection(tools, false),
+        }, '清空选择')),
+      tools.length ? h('ul', { className: 'imqw-selected-list' }, ...tools.map(name => h('li', { key: name },
+        h('code', null, name),
+        catalog && !available.has(name) ? h('small', { className: 'imqw-muted' }, '不可用') : null,
+        h(Button, {
+          type: 'button', size: 'sm', variant: 'ghost', disabled: !ready,
+          'aria-label': `移除已选工具 ${name}`, onClick: () => updateSelection([name], false),
+        }, '×')))) : h('p', { className: 'imqw-muted' }, '尚未选择工具。'),
+      applied ? h('div', { className: 'imqw-tool-changes', role: 'status', 'aria-label': '组合变更' },
+        h('p', null, `已套用「${applied.label}」`),
+        ...[{ label: '新增', names: applied.added }, { label: '移除', names: applied.removed },
+          { label: '跳过（当前不可用）', names: applied.skipped }].filter(change => change.names.length)
+          .map(change => h('p', { key: change.label, className: 'imqw-muted' },
+            h('span', null, `${change.label} ${change.names.length} 项 `), h('code', null, change.names.join('、'))))) : null),
     h('div', { className: 'imqw-tools-filters' },
       h(Input, {
         type: 'search', value: query, placeholder: '搜索工具名称或描述', 'aria-label': '搜索工具',
@@ -179,11 +237,7 @@ export function WorkbenchToolPicker({ initialPermission, initialTools, permissio
           'aria-pressed': group.id === category, disabled, onClick: () => setCategory(group.id),
         }, group.label))) : null,
     catalog ? h('div', { className: 'imqw-tools-bulk' },
-      bulk(visibleNames, '全选当前筛选', '取消当前筛选的勾选'),
-      h(Button, {
-        type: 'button', size: 'sm', variant: 'ghost', disabled: !ready || !tools.length,
-        onClick: () => updateSelection(tools, false),
-      }, '清空选择')) : null,
+      bulk(visibleNames, '全选当前筛选', '取消当前筛选的勾选')) : null,
     error ? h('div', { className: 'imqw-actions' },
       h('p', { className: 'imqb-error', role: 'alert' }, error),
       h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled, onClick: () => setAttempt(value => value + 1) }, '重试')) : null,

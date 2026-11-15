@@ -52,6 +52,8 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
 
 在命令末尾加 `fixed --browser` 可在同一 Host 回放 QQ 消息列和工具弹窗。浏览器使用 Host Web 工作区的 Playwright。已安装 Chrome 时可设 `QQBOT_BROWSER_CHANNEL=chrome`。用例覆盖引用、消息刷新失败后重试、返回 QQ 对话、旧工具组合、分类批量勾选，以及浏览器确认和服务端保存的边界。
 
+同一回放还会在机器人默认值和现有会话中绑定提示词文件，核对预览及模型请求都读到更新后的文件内容，并验证文件缺失时模型请求会停止。
+
 ## 本地协议夹具
 
 验证入口要求 Node 22.19+ 或 Node 24+（不支持 Node 23）及 Python 3.10+。请先确认当前终端使用的版本。

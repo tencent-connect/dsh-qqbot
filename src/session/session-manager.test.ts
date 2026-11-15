@@ -647,9 +647,10 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
   function promptAgent(id: string, opts: { failSection?: boolean } = {}) {
     const sections = new Map<string, { name: string }>();
     const contexts = new Map<string, { name: string }>();
+    const listeners = new Set<string>();
     const service = {
       section: (s: { name: string }) => {
-        if (opts.failSection) throw new Error('boom: section registration rejected');
+        if (opts.failSection && s.name === 'qqbot:extra') throw new Error('boom: section registration rejected');
         sections.set(s.name, s);
         return () => { sections.delete(s.name); };
       },
@@ -660,21 +661,28 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     };
     const agent = {
       ...fakeAgent(id),
-      ctx: { get: (name: string) => (name === 'systemPrompt' ? service : undefined) },
+      ctx: {
+        get: (name: string) => (name === 'systemPrompt' ? service : undefined),
+        on: (name: string) => {
+          listeners.add(name);
+          return () => { listeners.delete(name); };
+        },
+      },
     } as unknown as DshAgent;
-    return { agent, sections, contexts };
+    return { agent, sections, contexts, listeners };
   }
 
   /** registry：create 产出带 prompt 替身的 agent，并让后续 get() 能复用它（live 路径） */
   function promptRegistry(opts: { failSection?: boolean } = {}) {
     let live: DshAgent | undefined;
-    const created: Array<{ agent: DshAgent; sections: Map<string, unknown>; contexts: Map<string, unknown> }> = [];
+    const created: Array<ReturnType<typeof promptAgent>> = [];
     const registry = {
       get: vi.fn(() => live),
       resume: vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => { throw notFound(resumeSessionId); }),
       create: vi.fn(async (options: { sessionId: string }) => {
-        const { agent, sections, contexts } = promptAgent(options.sessionId, opts);
-        created.push({ agent, sections, contexts });
+        const fixture = promptAgent(options.sessionId, opts);
+        const { agent } = fixture;
+        created.push(fixture);
         live = agent;
         return { agent, dispose: vi.fn(async () => {}) } as DshAgentHandle;
       }),
@@ -682,7 +690,7 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     return { registry, created };
   }
 
-  it('会话建立即注册 4 个 section + 2 个 context；remove() 全部释放', async () => {
+  it('会话建立时注册提示词，移除会话后释放注册项', async () => {
     const { registry, created } = promptRegistry();
     const manager = createManager(registry);
 
@@ -690,10 +698,12 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(created).toHaveLength(1);
     expect([...created[0].sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
     expect([...created[0].contexts.keys()].sort()).toEqual(['qqbot:background', 'qqbot:turn-meta']);
+    expect([...created[0].listeners]).toEqual(['system-prompt/assemble']);
 
     await manager.remove('c2c', PEER);
     expect(created[0].sections.size).toBe(0);
     expect(created[0].contexts.size).toBe(0);
+    expect(created[0].listeners.size).toBe(0);
   });
 
   it('extra section 惰性读取 config：改 directPrompt 即时生效，无需重装', async () => {
@@ -755,7 +765,7 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(allLogText(logger)).toContain('qq prompt install failed');
 
     // 失败不入表：同 agent 再次触发安装时重试（此处模拟再次 remove→复用）
-    expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
+    await expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
     expect(created[0].sections.size).toBe(0);
   });
 });

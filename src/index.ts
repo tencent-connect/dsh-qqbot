@@ -9,7 +9,7 @@ import { BindingService } from './setup/binding-service.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from './media/vision-tool.ts';
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
-import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchRobotBinding, registerWorkbenchRobotRemoval, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
+import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchPromptPreview, registerWorkbenchRobotBinding, registerWorkbenchRobotRemoval, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
 import { registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './runtime/workbench-conversations.ts';
 import { registerWorkbenchAnswer } from './runtime/workbench-answer.ts';
 import { registerWorkbenchExtensionSettings, WorkbenchExtensionSettings } from './runtime/workbench-extension-settings.ts';
@@ -45,6 +45,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   registerWorkbenchDefaults(ctx, robots);
   registerWorkbenchGroupGuideImages(ctx);
   registerWorkbenchTools(ctx);
+  registerWorkbenchPromptPreview(ctx);
   registerWorkbenchConversations(ctx, robots, logger, timeline);
   registerWorkbenchSend(ctx, robots);
   registerWorkbenchAnswer(ctx, robots);

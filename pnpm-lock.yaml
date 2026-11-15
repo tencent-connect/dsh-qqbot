@@ -14,6 +14,12 @@ importers:
       '@tencent-connect/qqbot-nodejs':
         specifier: ^1.0.5
         version: 1.0.5
+      '@xmldom/xmldom':
+        specifier: 0.9.12
+        version: 0.9.12
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       js-yaml:
         specifier: ^4.1.0
         version: 4.3.1
@@ -57,9 +63,6 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
-      fflate:
-        specifier: 0.8.3
-        version: 0.8.3
       react:
         specifier: ^18.2.0
         version: 18.3.1
@@ -352,6 +355,10 @@ packages:
 
   '@vitest/utils@4.1.10':
     resolution: {integrity: sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA==}
+
+  '@xmldom/xmldom@0.9.12':
+    resolution: {integrity: sha512-5AXjrcMClTryPe9LgZrygpB1lj7s0S9E0+W+AHaVKAVyHanafK86iPSvG5xHVSp/jC+VH1UXu0TAEmY279xH7A==}
+    engines: {node: '>=14.6'}
 
   '@yuku-codegen/binding-android-arm64@0.8.7':
     resolution: {integrity: sha512-C/0zV5IhgVdYhGJTwrY0v8dknxlhiKwtVJkMUaexu9/QvRmzlV4vfU3hZlUSgqc2BxQHntL1mCVbDq8j0FRFDw==}
@@ -1274,6 +1281,8 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
+  '@xmldom/xmldom@0.9.12': {}
+
   '@yuku-codegen/binding-android-arm64@0.8.7':
     optional: true
 
@@ -1404,11 +1413,11 @@ snapshots:
 
   expect-type@1.4.0: {}
 
-  fflate@0.8.3: {}
-
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:
       picomatch: 4.0.5
+
+  fflate@0.8.3: {}
 
   find-up@4.1.0:
     dependencies:

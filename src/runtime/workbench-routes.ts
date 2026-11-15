@@ -4,7 +4,8 @@ import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBO
 import { BindingService } from '../setup/binding-service.ts';
 import type { SetupCredentials } from '../setup/persist.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
-import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_PROMPT_PREVIEW_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { PromptFileError, readPromptFile } from '../prompt/file.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
 
@@ -24,6 +25,22 @@ export function registerWorkbenchTools(ctx: Context): void {
       return workbenchJson({ tools: await workbenchToolChoices(ctx, preset) });
     } catch (error) {
       return workbenchJson({ error: error instanceof Error ? error.message : '无法读取工具目录。' }, 503);
+    }
+  });
+}
+
+export function registerWorkbenchPromptPreview(ctx: Context): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_PROMPT_PREVIEW_PATH, ['POST'], async (request, assertActive) => {
+    try {
+      const body = await request.text();
+      if (Buffer.byteLength(body) > 32 * 1024) throw new PromptFileError('预览请求过大。');
+      const { path } = robotObject(JSON.parse(body), ['path']);
+      const text = await readPromptFile(path, request.signal);
+      assertActive();
+      return workbenchJson({ text });
+    } catch (error) {
+      assertActive();
+      throw new WorkbenchRequestError(400, error instanceof PromptFileError ? error.message : '提示词预览请求无效。');
     }
   });
 }

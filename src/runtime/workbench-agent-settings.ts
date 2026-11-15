@@ -4,10 +4,11 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
-import { WORKBENCH_BASE_PERMISSIONS, WORKBENCH_TOOL_LIMIT, type WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import { WORKBENCH_BASE_PERMISSIONS, WORKBENCH_TOOL_LIMIT, type WorkbenchAgentSettings, type WorkbenchPrompt } from '../shared/workbench-agent-settings.ts';
 import { robotObject } from './robot-config.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
 import { EXTRA_MAX_CHARS } from '../prompt/extra.ts';
+import { parsePromptFilePath, readPromptFile } from '../prompt/file.ts';
 
 export function legacyAgentSettings(config: ImQQBotConfig): WorkbenchAgentSettings {
   return {
@@ -28,6 +29,12 @@ export function parseAgentSettings(raw: unknown): WorkbenchAgentSettings {
   const string = (value: unknown, field: string, max: number): string => {
     if (typeof value !== 'string' || value.length > max || value.includes('\0')) throw new Error(`${field}格式无效。`);
     return value;
+  };
+  const prompt = (value: unknown, field: string): WorkbenchPrompt => {
+    if (typeof value === 'string') return string(value, field, EXTRA_MAX_CHARS);
+    const source = robotObject(value, ['kind', 'path']);
+    if (source.kind !== 'file') throw new Error(`${field}来源无效。`);
+    return { kind: 'file', path: parsePromptFilePath(source.path) };
   };
   const route = row.model === null ? null : robotObject(row.model, ['provider', 'model']);
   const model = route && { provider: string(route.provider, '模型提供方', 256).trim(), model: string(route.model, '模型', 1024).trim() };
@@ -50,8 +57,8 @@ export function parseAgentSettings(raw: unknown): WorkbenchAgentSettings {
     model, cwd, reasoningEffort: string(row.reasoningEffort, '推理强度', 64).trim(),
     preset: string(row.preset, 'Agent 预设', 256).trim(),
     permission, ...(tools === undefined ? {} : { tools }),
-    groupPrompt: string(row.groupPrompt, '群聊补充提示词', EXTRA_MAX_CHARS),
-    directPrompt: string(row.directPrompt, '私聊补充提示词', EXTRA_MAX_CHARS),
+    groupPrompt: prompt(row.groupPrompt, '群聊补充提示词'),
+    directPrompt: prompt(row.directPrompt, '私聊补充提示词'),
     streaming: row.streaming, showToolResults: row.showToolResults,
   };
 }
@@ -62,6 +69,13 @@ export interface PermissionCatalog {
 }
 
 export async function validateAgentSettings(ctx: Context, config: ImQQBotConfig, next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void> {
+  for (const field of ['groupPrompt', 'directPrompt'] as const) {
+    const source = next[field];
+    const previous = current[field];
+    if (typeof source !== 'string' && (typeof previous === 'string' || previous.path !== source.path)) {
+      await readPromptFile(source.path);
+    }
+  }
   if (next.tools !== undefined && (next.preset !== current.preset || next.permission !== current.permission
     || JSON.stringify(next.tools) !== JSON.stringify(current.tools))) {
     const choices = await workbenchToolChoices(ctx, next.preset || config.preset);

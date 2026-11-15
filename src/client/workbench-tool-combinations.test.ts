@@ -26,6 +26,7 @@ describe('QQ tool combinations', () => {
     expect(applyToolCombination(
       ['read', 'grep', 'run_code', 'read', 'mcp__fixture__Search'],
       new Set(['read', 'grep', 'mcp__fixture__search']),
-    )).toEqual({ tools: ['grep', 'read'], skipped: 2 });
+      new Set(['read', 'write']),
+    )).toEqual({ tools: ['grep', 'read'], added: ['grep'], removed: ['write'], skipped: ['mcp__fixture__Search', 'run_code'] });
   });
 });

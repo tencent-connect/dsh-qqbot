@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { strToU8, zipSync } from 'fflate';
 import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost } from './host.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
@@ -28,6 +29,7 @@ const secondary = { provider: primary.provider, model: 'fixture-secondary' };
 const qq = await createQQFixture({ primary, secondary, allowModelRequests: true });
 const pending = new Map();
 const requests = [];
+const promptRequests = new Map();
 const report = { expected, hostOrigin, cases: {}, requests };
 
 const server = createServer(async (req, res) => {
@@ -38,7 +40,12 @@ const server = createServer(async (req, res) => {
     const child = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('DELEGATED_POLICY_PROBE'));
     const isTest = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('QQ_CMD_OK')) || child;
     const plan = isTest ? pending.get(child ? 'child' : 'root')?.shift() : undefined;
-    if (plan) requests.push({ name: plan.name, tools: (payload.tools ?? []).map(tool => tool.function.name).sort() });
+    if (plan) {
+      requests.push({ name: plan.name, tools: (payload.tools ?? []).map(tool => tool.function.name).sort() });
+      if (plan.name.startsWith('file-prompt-')) {
+        promptRequests.set(plan.name, JSON.stringify(payload.messages.filter(message => message.role === 'system')));
+      }
+    }
     const calls = await plan?.response;
     const delta = calls?.length ? {
       role: 'assistant', tool_calls: calls.map(({ name, args }, index) => ({
@@ -270,7 +277,44 @@ try {
   report.sessions = { group, direct, child };
   if (browser === '--browser') {
     const { verifyWorkbenchBrowser } = await import('./workbench-browser.mjs');
-    report.browser = await verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until });
+    const word = { path: join(dir, 'group-prompt.docx'), initial: 'QQ_GROUP_WORD_PROMPT' };
+    const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + `<w:body><w:p><w:r><w:t>${word.initial}</w:t></w:r></w:p></w:body></w:document>`;
+    await writeFile(word.path, zipSync({ 'word/document.xml': strToU8(xml) }), { mode: 0o600 });
+    const prompt = { path: join(dir, 'live-prompt.md'), initial: '# QQ_PROMPT_PREVIEW_INITIAL\n', edited: '# QQ_PROMPT_PREVIEW_EDITED\n', word };
+    await writeFile(prompt.path, prompt.initial, { mode: 0o600 });
+    const unauthenticated = await fetch(hostOrigin + base + 'prompt-preview', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: prompt.path }),
+    });
+    assert([401, 403].includes(unauthenticated.status), 'preview requires a trusted Host owner');
+    report.browser = await verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt });
+
+    const before = await conversation('c2c');
+    assert.equal(before.currentSessionId, direct);
+    assert.deepEqual(before.agent.directPrompt, { kind: 'file', path: prompt.path });
+    const turnCount = (await events(direct)).filter(event => event.type === 'turn/end').length;
+    plan('file-prompt-first');
+    await dispatch('c2c');
+    await finish(direct, turnCount + 1);
+    assert(promptRequests.get('file-prompt-first')?.includes(prompt.edited.trim()));
+
+    const latest = '# QQ_PROMPT_RUNTIME_LATEST\n\n末尾一行。';
+    await writeFile(prompt.path, latest, { mode: 0o600 });
+    plan('file-prompt-second');
+    await dispatch('c2c');
+    await finish(direct, turnCount + 2);
+    const system = promptRequests.get('file-prompt-second');
+    assert(system?.includes(JSON.stringify(latest).slice(1, -1)), 'the next model request receives the updated complete file');
+    assert(!system.includes(prompt.edited.trim()), 'the previous file content is gone from the current system prompt');
+    assert.equal((await conversation('c2c')).revision, before.revision);
+
+    await rm(prompt.path);
+    plan('file-prompt-missing');
+    await dispatch('c2c');
+    const stopped = await finish(direct, turnCount + 3);
+    assert.equal(stopped.filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'error');
+    assert(!promptRequests.has('file-prompt-missing'), 'a missing file cannot fall back to old prompt text');
+    report.cases.livePromptFile = { modelSawLatest: true, sameSession: true, noConfigRewrite: true, missingFileStoppedTurn: true };
   }
   assert.equal(qq.state.unexpectedRequests, 0);
 } finally {

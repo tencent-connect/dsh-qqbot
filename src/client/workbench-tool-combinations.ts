@@ -34,8 +34,21 @@ export function writeToolCombinations(storage: Pick<Storage, 'setItem'>, combina
   storage.setItem(storageKey, JSON.stringify(combinations));
 }
 
-export function applyToolCombination(names: readonly string[], available: ReadonlySet<string>): { tools: string[]; skipped: number } {
-  const unique = [...new Set(names)];
-  const tools = unique.filter(name => available.has(name)).sort();
-  return { tools, skipped: unique.length - tools.length };
+interface CombinationChanges {
+  tools: string[];
+  added: string[];
+  removed: string[];
+  skipped: string[];
+}
+
+export function applyToolCombination(names: readonly string[], available: ReadonlySet<string>, current: ReadonlySet<string>): CombinationChanges {
+  const unique = [...new Set(names)].sort();
+  const tools = unique.filter(name => available.has(name));
+  const next = new Set(tools);
+  return {
+    tools,
+    added: tools.filter(name => !current.has(name)),
+    removed: [...current].filter(name => !next.has(name)).sort(),
+    skipped: unique.filter(name => !available.has(name)),
+  };
 }

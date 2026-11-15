@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { DUMMY_APP_ID } from './command-protocol.mjs';
@@ -176,9 +176,16 @@ async function verifyToolPicker(page, client, until) {
   assert.equal(await tool('write').count(), 0);
   await tool('仅看已选').uncheck();
 
-  await dialog.getByText('我的组合（1）', { exact: true }).click();
-  await button(dialog, legacyCombination.label).click();
-  await dialog.getByText(/跳过 1 项当前不可用/).waitFor();
+  const personal = dialog.getByRole('region', { name: '我的组合' });
+  const selected = dialog.getByRole('region', { name: '已选工具' });
+  await tool('write').check();
+  await button(personal, legacyCombination.label).click();
+  const change = dialog.getByRole('status', { name: '组合变更' });
+  await change.getByText('run_code', { exact: true }).waitFor();
+  assert.match(await change.textContent(), /移除.*write/);
+  assert.equal(await button(personal, legacyCombination.label).getAttribute('aria-pressed'), 'true');
+  await selected.getByText('read', { exact: true }).waitFor();
+  assert.equal(await selected.getByText('write', { exact: true }).count(), 0);
   assert.equal(await tool('run_code').count(), 0);
   const categories = dialog.getByRole('group', { name: '工具分类' });
   await button(categories, '文件').click();
@@ -194,10 +201,14 @@ async function verifyToolPicker(page, client, until) {
   await button(dialog, '全选当前筛选').click();
   assert(await tool('bash').isChecked());
   assert.equal(await tool('read').count(), 0, 'filters hide out-of-category tools');
+  await selected.getByText('read', { exact: true }).waitFor();
+  await selected.getByText('bash', { exact: true }).waitFor();
   await button(dialog, '取消当前筛选的勾选').click();
   assert.equal(await tool('bash').isChecked(), false);
-  await dialog.getByRole('textbox', { name: '组合名称' }).fill('本轮验收组合');
-  await button(dialog, '存为组合').click();
+  await button(personal, '新建组合').click();
+  const name = personal.getByRole('textbox', { name: '组合名称' });
+  await name.fill('本轮验收组合');
+  await button(personal, '保存组合').click();
   await button(dialog, '本轮验收组合').waitFor();
   const combinations = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), presetsKey);
   assert.deepEqual(combinations[0], legacyCombination);
@@ -213,9 +224,8 @@ async function verifyToolPicker(page, client, until) {
   assert.deepEqual(saved.settings.tools, ['read']);
   dialog = await openPicker(defaultsForm);
   assert(await tool('read').isChecked(), 'current custom selection can be edited again');
-  await dialog.getByText('我的组合（2）', { exact: true }).click();
-  await button(dialog, '删除组合 本轮验收组合').click();
-  await dialog.getByText('我的组合（1）', { exact: true }).waitFor();
+  await button(personal, '删除组合 本轮验收组合').click();
+  await button(personal, '本轮验收组合').waitFor({ state: 'hidden' });
   assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), presetsKey), [legacyCombination]);
   await button(dialog, '取消').click();
   await button(page, '返回会话').click();
@@ -240,10 +250,69 @@ async function verifyToolPicker(page, client, until) {
   await until(async () => (await conversation())?.agent.tools?.length === 0, 'saved empty allowlist');
   assert.deepEqual((await defaults()).settings.tools, ['read'], 'conversation saves leave bot defaults intact');
   return { legacyCombinations: true, templates: true, filtersAndBulk: true, cancelAndReopen: true,
-    defaultsSaveBoundary: true, conversationSaveBoundary: true, narrowDialog: true };
+    defaultsSaveBoundary: true, conversationSaveBoundary: true, narrowDialog: true, selectedOutsideFilter: true,
+    visibleCombinationCreation: true, appliedToolChanges: true };
 }
 
-export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until }) {
+async function verifyPromptPaths(page, client, until, { path, initial, edited, word }) {
+  const defaults = () => client.get(workbench + 'defaults?appId=' + DUMMY_APP_ID);
+  const conversation = async () => (await client.get(workbench + 'conversations?appId=' + DUMMY_APP_ID))
+    .conversations.find(row => row.openId === directId && row.scope === 'c2c');
+  const bind = async (panel, label, file) => {
+    await panel.getByRole('tablist', { name: label + '来源' }).getByRole('tab', { name: '文件路径', exact: true }).click();
+    const input = panel.getByRole('textbox', { name: label + '文件路径', exact: true });
+    await input.fill(file.path);
+    const preview = button(panel, '预览' + label + '文件');
+    const text = panel.getByLabel(label + '预览', { exact: true });
+    await preview.click();
+    await text.filter({ hasText: file.initial.trim() }).waitFor();
+    assert.equal(await text.textContent(), file.initial);
+    return { input, preview, text };
+  };
+
+  await button(page, '设置主机器人').click();
+  await page.getByRole('tab', { name: '新会话默认设置' }).click();
+  const defaultsForm = page.getByRole('tabpanel', { name: '新会话默认设置' });
+  const baseline = await defaults();
+  await bind(defaultsForm, '群聊补充提示词', word);
+  assert.deepEqual(await defaults(), baseline);
+  await button(defaultsForm, '保存').click();
+  await defaultsForm.getByText('默认设置已保存。', { exact: true }).waitFor();
+  const savedDefaults = await defaults();
+  const source = { kind: 'file', path };
+  assert.deepEqual(savedDefaults.settings.groupPrompt, { kind: 'file', path: word.path });
+  assert.deepEqual(savedDefaults.settings.directPrompt, baseline.settings.directPrompt);
+  await button(page, '返回会话').click();
+
+  await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
+  const settings = page.getByRole('complementary', { name: '会话设置', exact: true });
+  const promptEditor = settings.getByRole('tablist', { name: '私聊补充提示词来源' });
+  if (!(await promptEditor.isVisible())) await settings.locator('summary').filter({ hasText: 'QQ 回复' }).click();
+  const prior = await conversation();
+  const { input, preview, text } = await bind(settings, '私聊补充提示词', { path, initial });
+  assert.deepEqual((await conversation()).agent.directPrompt, prior.agent.directPrompt);
+  await button(settings, '保存').click();
+  const saved = await until(async () => {
+    const latest = await conversation();
+    return latest.agent.directPrompt?.path === path && latest;
+  }, 'saved conversation prompt path');
+  assert.deepEqual(saved.agent.directPrompt, source);
+  assert.deepEqual(saved.agent.groupPrompt, prior.agent.groupPrompt);
+  await writeFile(path, edited, { mode: 0o600 });
+  await preview.click();
+  await text.filter({ hasText: edited.trim() }).waitFor();
+  assert.equal(await text.textContent(), edited);
+  await input.fill(path + '.missing.md');
+  await preview.click();
+  await settings.getByText('找不到补充提示词文件。', { exact: true }).waitFor();
+  await text.waitFor({ state: 'hidden' });
+  await input.fill(path);
+  assert.equal((await conversation()).revision, saved.revision);
+  assert.deepEqual(await defaults(), savedDefaults);
+  return { botDefaultsDocxPath: true, conversationPath: true, latestPreview: true, storedOnlyPath: true, missingPreview: true };
+}
+
+export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt }) {
   const require = createRequire(join(source, 'apps/web/package.json'));
   const { chromium } = require('playwright');
   const login = (await readFile(hostLog, 'utf8')).match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9._~%+-]+/g)?.at(-1);
@@ -269,7 +338,8 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
     const messages = await verifyMessages(page, client, fixture, until);
     const toolPicker = await verifyToolPicker(page, client, until);
-    return { messages, toolPicker };
+    const promptPaths = await verifyPromptPaths(page, client, until, prompt);
+    return { messages, toolPicker, promptPaths };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));
