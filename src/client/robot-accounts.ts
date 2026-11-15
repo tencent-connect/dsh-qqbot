@@ -7,10 +7,11 @@ import {
   type WorkbenchRobot,
   type WorkbenchRobotBinding,
   type WorkbenchRobotPatch,
+  type WorkbenchRobotRemoval,
   type WorkbenchRobotsResponse,
 } from '../shared/workbench-protocol.ts';
 import { BindPanelBody, QQ_BOT_LOGO_PATH } from './bind-page.ts';
-import { AccessSettings } from './config-panel.ts';
+import { AccessSettings, ConfigPanel } from './config-panel.ts';
 import { fetchJson, HttpError } from './http.ts';
 
 export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
@@ -97,6 +98,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
   const [removing, setRemoving] = useState<WorkbenchRobot>();
+  const [removeMode, setRemoveMode] = useState<WorkbenchRobotRemoval>();
   const [removeError, setRemoveError] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   const [editError, setEditError] = useState('');
@@ -144,6 +146,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     if (!removing || !removeError || busy || !robots) return;
     const latest = robots.find(robot => robot.appId === removing.appId);
     if (!latest) {
+      if (removeMode === 'clear') return;
       setRemoving(undefined);
       setEditor(current => current?.kind === 'edit' && current.baseline.appId === removing.appId ? null : current);
       if (selectedAppId === removing.appId && robots[0]) onSelect(robots[0].appId);
@@ -151,7 +154,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       setRemoving(latest);
       setRemoveError('机器人配置已更新，请确认当前机器人后再解绑。');
     }
-  }, [busy, removing, removeError, robots, selectedAppId, onSelect]);
+  }, [busy, removing, removeError, removeMode, robots, selectedAppId, onSelect]);
 
   useEffect(() => {
     if (!bindId) return;
@@ -279,17 +282,23 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     }
   };
 
-  const remove = async (robot: WorkbenchRobot): Promise<void> => {
+  const openRemove = (robot: WorkbenchRobot): void => {
+    setRemoveError('');
+    setRemoveMode(undefined);
+    setRemoving(robot);
+  };
+  const remove = async (robot: WorkbenchRobot, mode: WorkbenchRobotRemoval): Promise<void> => {
     if (mutation.current) return;
     const controller = new AbortController();
     mutation.current = controller;
     generation.current++;
     setBusy(true);
     setRemoveError('');
+    setRemoveMode(mode);
     try {
       await fetchJson(WORKBENCH_ROBOT_REMOVE_PATH, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ appId: robot.appId, revision: robot.revision }), signal: controller.signal,
+        body: JSON.stringify({ appId: robot.appId, revision: robot.revision, bindingRevision: robot.bindingRevision, mode }), signal: controller.signal,
       });
       if (controller.signal.aborted) return;
       setRobots(current => current?.filter(item => item.appId !== robot.appId) ?? null);
@@ -300,7 +309,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         if (next) onSelect(next.appId);
       }
     } catch (error) {
-      if (!controller.signal.aborted) setRemoveError(error instanceof HttpError && error.status === 409
+      if (!controller.signal.aborted) setRemoveError(error instanceof HttpError && (error.status === 409 || error.status === 503)
         ? error.message : '暂未确认解绑结果。若刷新后仍显示此机器人，可以重试。');
     } finally {
       if (mutation.current === controller) {
@@ -375,16 +384,13 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, '草稿已合并，请核对后保存。') : null,
   );
   const startBinding = (): void => startEdit({ kind: 'add', id: crypto.randomUUID() });
-  const accountSettings = editor?.kind === 'add'
-    ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
-        key: bindId, state: bindState?.phase === 'bound' ? { phase: 'saving' } : bindState ?? null,
-        actions: { refresh: startBinding, submit: submitBinding } })
-    : editor ? h('section', { className: 'imqr-inline' },
+  const enabled = current?.enabled ?? (editor?.kind === 'edit' && editor.baseline.enabled);
+  const accountControls = editor?.kind === 'edit' ? h(Fragment, null,
     h('h3', null, '账号信息'),
     h('div', { className: 'imqr-inline-state' },
       h('span', null, '启用机器人'),
       h(Switch, {
-        checked: current?.enabled ?? editor.baseline.enabled,
+        checked: enabled,
         label: '启用机器人', disabled: busy,
         onChange: enabled => {
           const robot = current ?? editor.baseline;
@@ -392,30 +398,47 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         },
       }),
     ),
-    form,
-    editor.baseline.primary ? null : h(Fragment, null,
-      h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
-        key: editor.baseline.appId, state: { phase: 'bound', appId: editor.baseline.appId },
-        recheck: () => setReload(value => value + 1),
-        boundActions: {
-          disabled: busy || stale,
-          replace: (appId, appSecret) => save({ appId, appSecret, revision: editor.baseline.revision }, false),
-          unbind: () => { setRemoveError(''); setRemoving(current ?? editor.baseline); },
-        },
-      }),
-      h(AccessSettings, {
-        key: `access-${editor.baseline.appId}`, appId: editor.baseline.appId, access: editor.draft, busy,
-        enabled: current?.enabled ?? editor.baseline.enabled, onMode: setField,
-        onMembershipChange: () => setReload(value => value + 1),
-      }),
-    ),
-    footer,
   ) : null;
+  const credentials = editor?.kind === 'edit' ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
+    key: editor.baseline.appId, state: { phase: 'bound', appId: editor.baseline.appId },
+    recheck: () => setReload(value => value + 1),
+    boundActions: {
+      disabled: busy || stale,
+      ...(editor.baseline.primary ? {} : {
+        replace: (appId: string, appSecret: string) => save({ appId, appSecret, revision: editor.baseline.revision }, false),
+      }),
+      unbind: () => openRemove(current ?? editor.baseline),
+    },
+  }) : null;
+  const accountSettings = editor?.kind === 'add'
+    ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
+        key: bindId, state: bindState?.phase === 'bound' ? { phase: 'saving' } : bindState ?? null,
+        actions: { refresh: startBinding, submit: submitBinding } })
+    : editor && h('section', { className: 'imqr-inline' },
+      editor.baseline.primary
+        ? h<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, {
+            key: editor.baseline.appId, bindPhase: 'bound', accountOnly: true,
+            account: {
+              appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
+              enabled, formId, controls: accountControls,
+              credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
+                h('h3', null, '凭据与访问'), credentials),
+              onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
+            },
+          })
+        : h(Fragment, null, accountControls, form, credentials,
+            h(AccessSettings, {
+              key: `access-${editor.baseline.appId}`, appId: editor.baseline.appId, access: editor.draft, busy,
+              enabled, onMode: setField, onMembershipChange: () => setReload(value => value + 1),
+            }), footer),
+    );
   if (unavailable || (robots === null && !loadError)) {
     return workbench.render({ robots, unavailable, rail: null, accountSettings: null, cancelAdd, busy: bindingBusy });
   }
 
   const activeRobot = robots?.find(robot => robot.appId === selectedAppId) ?? robots?.[0];
+  const retryClear = removing !== undefined && removeMode === 'clear' && removeError !== ''
+    && robots?.some(robot => robot.appId === removing.appId) === false;
   const rail = h('section', { className: 'imqr-rail', 'aria-label': '机器人账号' },
     h('style', null, STYLES),
     h('div', { className: 'imqr-header' },
@@ -460,7 +483,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
             h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: bindingBusy, onClick: () => openSettings(robot), 'aria-label': `设置${name}`, title: `设置${name}` }, h(IconSettingsOutlineRegular, { size: 16 })),
             h(Button, {
               size: 'sm', variant: 'ghost', type: 'button', className: 'imqr-remove', disabled: bindingBusy,
-              onClick: () => { setRemoveError(''); setRemoving(robot); },
+              onClick: () => openRemove(robot),
               'aria-label': `解绑${name}`, title: `解绑${name}`,
             }, h(IconTrashOutlineRegular, { size: 16 }))),
           h(Switch, { checked: robot.enabled, label: `启用${name}`, disabled: bindingBusy, onChange: enabled => {
@@ -475,14 +498,19 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         }, h(IconSettingsOutlineRegular, { size: 16 })) : null,
     removing ? h(Modal, {
       open: true, title: `解绑「${accountName(removing)}」？`, closeLabel: '关闭',
-      description: '将断开这台机器人并移除本机绑定。QQ 消息记录和 DSH 会话历史会保留。',
+      description: retryClear ? '这台机器人已解绑。重试将继续清除本机 QQ 消息记录和 Session 关联。'
+        : '「仅解绑」会保留本机 QQ 消息记录和 Session 关联。「解绑并清除记录」还会删除这台机器人在本机的 QQ 消息记录，并解除它的 QQ 会话与 DSH Session 的关联。清除无法撤销，原 Session 可在 DSH 工作区打开。',
       onClose: () => { if (!mutation.current) setRemoving(undefined); },
       footer: h(Fragment, null,
         h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setRemoving(undefined) }, '取消'),
         h(Button, {
-          type: 'button', variant: 'outline', size: 'sm', className: 'imqr-remove', disabled: busy,
-          onClick: () => { void remove(removing); },
-        }, busy ? '正在解绑…' : '确认解绑')),
+          type: 'button', variant: 'outline', size: 'sm', disabled: busy || retryClear,
+          onClick: () => { void remove(removing, 'retain'); },
+        }, busy && removeMode === 'retain' ? '正在解绑…' : '仅解绑'),
+        h(Button, {
+          type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger imqr-clear', disabled: busy,
+          onClick: () => { void remove(removing, 'clear'); },
+        }, busy && removeMode === 'clear' ? '正在清除…' : retryClear ? '重试清除记录' : '解绑并清除记录')),
     }, removeError ? h('p', { className: 'imqb-error', role: 'alert' }, removeError) : null) : null,
   );
   return workbench.render({ robots, unavailable, rail, accountSettings, cancelAdd, busy: bindingBusy });
@@ -512,6 +540,7 @@ const STYLES = `
 .imqr-row-actions { justify-content: space-between; }
 .imqr-row-buttons > button { padding-inline: 4px; }
 .imqr-remove:hover, .imqr-remove:focus-visible { color: var(--dsw-alias-state-error-primary); }
+.imqr-clear:not(:disabled) { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
 .imqr-actions, .imqr-footer { display: flex; align-items: center; gap: 8px; }
 .imqr-footer { justify-content: flex-end; }
 .imqr-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }

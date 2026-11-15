@@ -1,6 +1,7 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { WORKBENCH_ROBOTS_PATH } from '../shared/workbench-protocol.ts';
 import { PAIR_ISSUE_PATH, PAIR_STATUS_PATH, type PairChallenge } from '../shared/pairing-protocol.ts';
 import type { ConfigWire } from './config-form-state.ts';
 import { AccessSettings, ConfigPanel } from './config-panel.ts';
@@ -88,7 +89,8 @@ interface TestProps {
   label?: string;
   value?: string;
   onClick?: () => void;
-  onChange?: (value: string) => void;
+  placeholder?: string;
+  onChange?: (event: { target: { value: string } }) => void;
   onSubmit?: (event: { preventDefault(): void }) => void;
   access?: Pick<NonNullable<ConfigWire['access']>, 'groupMode' | 'c2cMode' | 'commandMode'>;
   onMode?: NonNullable<Parameters<typeof AccessSettings>[0]>['onMode'];
@@ -114,6 +116,51 @@ afterEach(() => {
 });
 
 describe('QQ settings recovery', () => {
+  it('submits the name and access changes from one form and retries only the unsaved fields', async () => {
+    vi.useFakeTimers();
+    const writes: { path: string; body: Record<string, unknown> }[] = [];
+    let rejectAccess = true;
+    let robot = { appId: 'test-primary', primary: true, alias: '', revision: 1, enabled: true };
+    let config: ConfigWire = {
+      appId: robot.appId, accessRevision: 'access-one',
+      access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open', c2cAllow: [], groupAllow: [] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
+      if (init?.method !== 'POST') {
+        return Response.json(path === WORKBENCH_ROBOTS_PATH ? { robots: [robot] } : { config });
+      }
+      const body = JSON.parse(String(init.body));
+      writes.push({ path, body });
+      if (path === WORKBENCH_ROBOTS_PATH) {
+        robot = { ...robot, alias: body.alias, revision: 2 };
+        return Response.json({ robot });
+      }
+      if (rejectAccess) return Response.json({ error: 'test conflict' }, { status: 409 });
+      config = { ...config, access: body.access, accessRevision: 'access-two' };
+      return Response.json({ ok: true });
+    }));
+    const render = mount(() => ConfigPanel({
+      bindPhase: 'bound', accountOnly: true,
+      account: { appId: robot.appId, revision: 1, enabled: true, formId: 'qq-account', controls: null, credentials: null, onAliasSaved: vi.fn() },
+    }));
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+    find(render(), props => props.placeholder === '可选，便于区分机器人')!.props.onChange!({ target: { value: '我的机器人' } });
+    find(render(), props => props.onMode !== undefined)!.props.onMode!('groupMode', 'allowlist');
+    const save = () => find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
+    save();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_CONFIG_PATH]);
+    expect(find(render(), props => typeof props.children === 'string' && props.children.startsWith('机器人名称已保存。'))).toBeDefined();
+
+    rejectAccess = false;
+    save();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_CONFIG_PATH, BIND_CONFIG_PATH]);
+    expect(writes[2]?.body).toMatchObject({ expectedAppId: robot.appId, accessRevision: 'access-one', access: { groupMode: 'allowlist' } });
+    expect(find(render(), props => props.children === '保存')?.props.disabled).toBe(true);
+  });
+
   it('saves with the refreshed access revision while keeping an unsaved mode edit', async () => {
     vi.useFakeTimers();
     const writes: ConfigWire[] = [];

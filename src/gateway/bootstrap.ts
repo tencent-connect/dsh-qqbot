@@ -135,7 +135,7 @@ export function bootstrapGateway(
   const reportInbound = history && ((target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => {
     if (canRecord(target)) history.timeline.reportInbound(config.appId, target, outcome, sessionId);
   });
-  const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord);
+  const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord, isActive);
   setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (async messageContext => {
     const { message, replyTarget } = messageContext;
     const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
@@ -348,7 +348,7 @@ export function bootstrapGateway(
     }, 'im-qqbot.lifecycle');
 
   const sendManual = createManualTransport(bot, baseUrl, userAgent, target => resolveReplyTarget(target, replyIds, replyLimiter, false));
-  const manual = new ManualQqSender(config.appId, ledger, sendManual, history?.timeline);
+  const manual = new ManualQqSender(config.appId, ledger, sendManual, history?.timeline, isActive);
   return {
     manual,
     bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,

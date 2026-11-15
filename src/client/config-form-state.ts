@@ -11,6 +11,8 @@ export interface AccessControlWire {
 export interface ConfigWire {
   accessRevision?: string;
   appId?: string;
+  alias?: string;
+  robotRevision?: number;
   requireMention?: boolean;
   streaming?: boolean;
   showToolResults?: boolean;
@@ -24,7 +26,7 @@ export interface ConfigWire {
   cwd?: string;
 }
 
-const EDITABLE_KEYS = ['access', 'requireMention', 'streaming', 'showToolResults', 'debug',
+const EDITABLE_KEYS = ['alias', 'access', 'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset', 'groupPrompt', 'directPrompt'] as const;
 const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
@@ -38,11 +40,13 @@ function equal(a: unknown, b: unknown): boolean {
 
 /** Preserve raw textarea lines while editing; normalize only the submitted snapshot. */
 export function normalizeConfig(form: ConfigWire): ConfigWire {
-  if (form.access === undefined) return { ...form };
+  const value = { ...form };
+  if (value.alias !== undefined) value.alias = value.alias.trim();
+  if (value.access === undefined) return value;
   const lines = (values: string[]): string[] => [...new Set(values.map((value) => value.trim()).filter(Boolean))];
   return {
-    ...form,
-    access: { ...form.access, c2cAllow: lines(form.access.c2cAllow), groupAllow: lines(form.access.groupAllow) },
+    ...value,
+    access: { ...value.access, c2cAllow: lines(value.access.c2cAllow), groupAllow: lines(value.access.groupAllow) },
   };
 }
 
@@ -87,6 +91,7 @@ export function configDraft(baseline: ConfigWire, form: ConfigWire): ConfigDraft
     const value: ConfigWire = {};
     if (source.appId !== undefined) value.appId = source.appId;
     if (source.accessRevision !== undefined) value.accessRevision = source.accessRevision;
+    if (source.robotRevision !== undefined) value.robotRevision = source.robotRevision;
     for (const key of EDITABLE_KEYS) {
       if (source[key] !== undefined) Object.assign(value, { [key]: source[key] });
     }
@@ -100,9 +105,10 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
   const validConfig = (candidate: unknown): candidate is ConfigWire => {
     if (candidate === null || typeof candidate !== 'object') return false;
     const fields = candidate as Record<string, unknown>;
-    for (const key of ['appId', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
+    for (const key of ['appId', 'alias', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'string') return false;
     }
+    if (fields.robotRevision !== undefined && (!Number.isSafeInteger(fields.robotRevision) || Number(fields.robotRevision) < 0)) return false;
     for (const key of ['requireMention', 'streaming', 'showToolResults', 'debug']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'boolean') return false;
     }

@@ -39,7 +39,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   ctx.provide('qqbot', qqbot);
   registerWorkbenchExtensionSettings(ctx, settings, appId => robots.list().some(robot => robot.appId === appId));
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
-  if (profileDir) registerWorkbenchRobotRemoval(ctx, (appId, revision) => robots.remove(appId, revision, profileDir));
+  if (profileDir) registerWorkbenchRobotRemoval(ctx, (appId, revision, mode, binding) => robots.remove(appId, revision, profileDir, mode, binding));
   if (store) registerWorkbenchRobotBinding(ctx, patch => robots.save(patch),
     () => new BindingService({ source: 'dsh-qqbot', logger }));
   registerWorkbenchDefaults(ctx, robots);
@@ -80,8 +80,10 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   // Host readiness must not wait for a QR scan.
-  void ensureCredentials(ctx, { logger, config: { ...config } }).then(async credentials => {
+  const prepareBinding = (appId: string) => robots.prepareBinding(appId);
+  void ensureCredentials(ctx, { logger, config: { ...config }, prepareBinding }).then(async credentials => {
     if (!credentials) return;
+    prepareBinding(credentials.appId);
     if (!persistCredentialsToProfile(credentials, profileDir, logger)) {
       logger.warn('凭据未能持久化，本次进程将直接启动网关（重启后需重新绑定）');
       robots.bindPrimary({ ...config, ...credentials });

@@ -14,7 +14,7 @@ import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
  * 支持 agent-presets 系统：通过 setup hook 在 create/resume 时
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
-import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
+import { mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
 import type { PrefsStore } from '../model/prefs-store.ts';
@@ -499,8 +499,8 @@ export class SessionManager {
   }
 
   /** prefs 命中沿用；miss 返回 0.5.x 派生候选，由 getOrCreate 按 resume 结果迁移或铸造 */
-  private currentSessionId(sessionKey: string): string {
-    return this.modelResolver.getSessionId(sessionKey) ?? legacyDerivedSessionId(sessionKey);
+  private currentSessionId(sessionKey: string): string | undefined {
+    return this.modelResolver.getSessionId(sessionKey) ?? this.modelResolver.legacySessionId(sessionKey);
   }
 
   /** 候选命中后落盘，后续永远走 prefs */
@@ -549,12 +549,12 @@ export class SessionManager {
     if (this.inflight.has(key) || this.switching.has(key) || this.rebuilding.has(key)) throw busy();
 
     const previous = this.currentSessionId(key);
-    const previousAgent = () => this.sessions.get(key)?.agent ?? this.agents.get(previous);
+    const previousAgent = () => this.sessions.get(key)?.agent ?? (previous === undefined ? undefined : this.agents.get(previous));
     if (previousAgent()?.status === 'running') throw busy();
     const conflict = () => new SessionSwitchConflict('当前 Session 已变化，请刷新后重试。');
 
     const task = (async () => {
-      const exists = await this.host.sessionExists(previous);
+      const exists = previous === undefined ? false : await this.host.sessionExists(previous);
       if (exists === undefined) throw new Error('当前宿主无法确认 Session 已保存。');
       if ((exists ? previous : null) !== expected) throw conflict();
       this.assertActive();
@@ -622,7 +622,8 @@ export class SessionManager {
     }
     this.assertActive();
     const existing = this.sessions.get(key);
-    this.assertNotArchived(existing?.sessionId ?? this.currentSessionId(key));
+    const candidate = existing?.sessionId ?? this.currentSessionId(key);
+    if (candidate !== undefined) this.assertNotArchived(candidate);
 
     if (existing) {
       this.assertBindingOwner(key, existing.sessionId);
@@ -689,19 +690,20 @@ export class SessionManager {
     const settings = this.peerSettings?.read(key);
     const route = this.configuredRoute(key, settings);
     // prefs 命中 = 已知存量会话；miss 时取 0.5.x 派生 id 仅作存量探测候选，不用于新建
-    let sessionId = SessionId(binding ?? legacyDerivedSessionId(key));
+    const candidate = binding ?? this.modelResolver.legacySessionId(key);
+    let sessionId = SessionId(candidate ?? mintSessionId());
     this.assertBindingOwner(key, sessionId, binding === undefined);
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
     let handle: DshAgentHandle | undefined;
-    const header = await this.host.sessionHeader(sessionId);
+    const header = candidate === undefined ? undefined : await this.host.sessionHeader(sessionId);
     this.assertActive();
     this.assertBindingOwner(key, sessionId, binding === undefined);
     let agentPreset = header?.agentPreset;
     let cwd = header?.cwd;
 
-    const live = this.agents.get(sessionId);
+    const live = candidate === undefined ? undefined : this.agents.get(sessionId);
     if (live) {
       agent = live;
       this.logger.info(`reusing live agent: key=${key}`);
@@ -711,32 +713,34 @@ export class SessionManager {
       this.assertActive();
       this.assertBindingOwner(key, sessionId, binding === undefined);
       agentPreset = composed.agentPreset;
-      try {
-        const resumeRoute = this.modelResolver.getResumeRoute(key);
-        const resumed = await this.agents.resume({
-          resumeSessionId: sessionId,
-          ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
-          ...(composed.setup || this.peerSettings?.constrain ? { setup: async (ctx: Context, resumedAgent?: DshAgent) => {
-            await composed.setup?.(ctx, resumedAgent);
-            if (resumedAgent) await this.peerSettings?.constrain?.(resumedAgent, key);
-          } } : {}),
-        });
-        agent = resumed.agent;
-        handle = resumed;
-        this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
-      } catch (err) {
-        if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
+      if (candidate !== undefined) {
+        try {
+          const resumeRoute = this.modelResolver.getResumeRoute(key);
+          handle = await this.agents.resume({
+            resumeSessionId: sessionId,
+            ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
+            ...(composed.setup || this.peerSettings?.constrain ? { setup: async (ctx: Context, resumedAgent?: DshAgent) => {
+              await composed.setup?.(ctx, resumedAgent);
+              if (resumedAgent) await this.peerSettings?.constrain?.(resumedAgent, key);
+            } } : {}),
+          });
+          this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
+        } catch (err) {
+          if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
+          if (binding === undefined) sessionId = SessionId(mintSessionId());
+        }
+      }
+      if (!handle) {
         this.assertActive();
         if (this.modelResolver.getSessionId(key) !== binding) return undefined;
-        if (binding === undefined) sessionId = SessionId(mintSessionId());
         this.assertBindingOwner(key, sessionId, binding === undefined);
         const created = await this.createFresh(key, sessionId, settings);
         agentPreset = created.agentPreset;
         cwd = created.cwd;
-        agent = created.handle.agent;
         handle = created.handle;
         this.logger.info(`created new session: key=${key} sessionId=${sessionId} preset=${agentPreset ?? 'none'}`);
       }
+      agent = handle.agent;
     }
 
     // The host and tool-policy setup above can both finish after a reset or reload.
@@ -897,8 +901,9 @@ export class SessionManager {
     assertNotSwitching();
     let previous: string | undefined;
     if (this.modelResolver.getSessionId(key) === undefined) {
-      const legacy = legacyDerivedSessionId(key);
-      if (await this.host.sessionExists(legacy)) previous = legacy;
+      const legacy = this.modelResolver.legacySessionId(key);
+      if (legacy !== undefined && await this.host.sessionExists(legacy)) previous = legacy;
+      this.assertActive();
       assertNotSwitching();
       // A concurrent resume or reset may already have established the mapping.
       if (this.modelResolver.getSessionId(key) !== undefined) previous = undefined;

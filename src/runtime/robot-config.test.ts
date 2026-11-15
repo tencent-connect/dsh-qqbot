@@ -31,7 +31,7 @@ describe('robot account catalog', () => {
     const reopened = new RobotConfigStore(path);
     expect(reopened.list()).toEqual([primaryAfter, other]);
     expect(reopened.get(additional.appId)).toEqual(other);
-    expect(reopened.get(primary.appId)).toEqual({ ...primary, revision: 2, enabled: false });
+    expect(reopened.get(primary.appId)).toEqual({ ...primary, revision: 2, bindingRevision: 0, enabled: false });
     if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 

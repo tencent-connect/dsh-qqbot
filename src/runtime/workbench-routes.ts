@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import type { Context } from '@deepseek-ai/cordis';
-import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOT_REMOVE_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotBinding, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOT_REMOVE_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotBinding, type WorkbenchRobotPatch, type WorkbenchRobotRemoval, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 import { BindingService } from '../setup/binding-service.ts';
 import type { SetupCredentials } from '../setup/persist.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
@@ -43,9 +43,11 @@ export class WorkbenchRequestError extends Error {
   }
 }
 
-function publicRobot({ appId, state, primary, enabled, alias, revision, access }: WorkbenchRobot): WorkbenchRobot {
+function publicRobot({ appId, state, primary, enabled, alias, revision, bindingRevision, access }: WorkbenchRobot): WorkbenchRobot {
   const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = access;
-  return { appId, state, primary, enabled, alias, revision, access: { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } };
+  return { appId, state, primary, enabled, alias, revision,
+    ...(bindingRevision === undefined ? {} : { bindingRevision }),
+    access: { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } };
 }
 
 async function readPatch(request: Request): Promise<WorkbenchRobotPatch> {
@@ -240,22 +242,28 @@ export function registerWorkbenchRoutes(
 
 export function registerWorkbenchRobotRemoval(
   ctx: Context,
-  remove: (appId: string, revision: number) => void | Promise<void>,
+  remove: (appId: string, revision: number, mode?: WorkbenchRobotRemoval, bindingRevision?: number) => void | Promise<void>,
 ): void {
   registerWorkbenchFetch(ctx, WORKBENCH_ROBOT_REMOVE_PATH, ['POST'], async (request, assertWritable) => {
     let appId: string;
     let revision: number;
+    let mode: WorkbenchRobotRemoval | undefined;
+    let bindingRevision: number | undefined;
     try {
       const text = await request.text();
       if (Buffer.byteLength(text) > 4096) throw new Error();
-      const fields = robotObject(JSON.parse(text), ['appId', 'revision']);
+      const fields = robotObject(JSON.parse(text), ['appId', 'revision', 'mode', 'bindingRevision']);
       appId = robotAppId(fields.appId);
       revision = robotRevision(fields.revision);
+      if (fields.mode !== undefined && fields.mode !== 'retain' && fields.mode !== 'clear') throw new Error();
+      mode = fields.mode;
+      if (fields.bindingRevision !== undefined) bindingRevision = robotRevision(fields.bindingRevision);
     } catch {
       throw new WorkbenchRequestError(400, '请指定有效的机器人和配置版本。');
     }
     assertWritable();
-    await remove(appId, revision);
+    if (mode === undefined && bindingRevision === undefined) await remove(appId, revision);
+    else await remove(appId, revision, mode, bindingRevision);
     return workbenchJson({ ok: true });
   });
 }

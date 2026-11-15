@@ -191,11 +191,7 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
             onChange: setRobotPage,
           }),
           h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-account-panel`, 'aria-labelledby': `${robotTabsId}-account`, hidden: robotPage !== 'account' },
-            accountSettings,
-            robot.primary ? h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
-              h('h3', null, '凭据与访问'),
-              primaryAccountSettings,
-            ) : null),
+            accountSettings),
           h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-defaults-panel`, 'aria-labelledby': `${robotTabsId}-defaults`, hidden: robotPage !== 'defaults' },
             h(WorkbenchDefaultsForm, { key: robot.appId, appId: robot.appId, source: agentSource })),
         ) : primaryUnbound ? primaryAccountSettings : accountSettings;

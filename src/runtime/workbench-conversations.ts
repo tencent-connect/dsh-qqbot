@@ -1,7 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AccessControlConfig } from '../config.ts';
-import { legacyDerivedSessionId } from '../session/session-id.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import {
   WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, type WorkbenchConversation, type WorkbenchConversationPatch,
@@ -212,8 +211,9 @@ async function projectConversations(
   for (let offset = 0; offset < peers.length; offset += 12) {
     conversations.push(...await Promise.all(peers.slice(offset, offset + 12).map(async ({ key, scope, openId }) => {
       const binding = bindings.get(key);
-      const current = account.liveSessionId(scope, openId) ?? binding?.current ?? legacyDerivedSessionId(key);
-      const ids = new Set([current, ...(binding?.history ?? [])]);
+      const current = account.liveSessionId(scope, openId) ?? binding?.current ?? robots.prefs.legacySessionId(key);
+      const ids = new Set(binding?.history ?? []);
+      if (current !== undefined) ids.add(current);
       const sessions: WorkbenchSession[] = [];
       for (const id of ids) {
         const session = await readSession(id);

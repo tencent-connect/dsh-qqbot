@@ -11,6 +11,8 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirS
 import { randomBytes } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
+import { atomicWrite } from '../shared/atomic-file.ts';
+import { legacyDerivedSessionId } from '../session/session-id.ts';
 import type { ModelRoute } from './types.ts';
 
 /** 日志回调（可选） */
@@ -25,6 +27,7 @@ interface PrefsFile {
   sessionIds: Record<string, string>;
   /** Previously current native sessions, grouped by the same peer key. */
   sessionHistory?: Record<string, string[]>;
+  clearedAccounts?: Record<string, number>;
   /** sessionKey → preset id（per-peer preset 覆盖） */
   presets: Record<string, string>;
 }
@@ -37,9 +40,10 @@ export class PrefsStore {
   /** sessionIds 的反向索引（sessionId → sessionKey），与 sessionIds 同步维护 */
   private sessionKeys = new Map<string, string>();
   private readonly sessionHistory = new Map<string, string[]>();
+  private readonly clearedAccounts = new Map<string, number>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
-  private readonly pending: Record<Exclude<keyof PrefsFile, 'sessionHistory'>, Set<string>> = {
+  private readonly pending: Record<'overrides' | 'sessionIds' | 'presets', Set<string>> = {
     overrides: new Set(),
     sessionIds: new Set(),
     presets: new Set(),
@@ -81,6 +85,37 @@ export class PrefsStore {
 
   getSessionId(sessionKey: string): string | undefined {
     return this.sessionIds.get(sessionKey);
+  }
+
+  legacySessionId(sessionKey: string): string | undefined {
+    const [, appId] = sessionKey.split(':', 2);
+    return appId !== undefined && this.clearedAccounts.has(appId) ? undefined : legacyDerivedSessionId(sessionKey);
+  }
+
+  clearedRevision(appId: string): number | undefined {
+    return this.clearedAccounts.get(appId);
+  }
+
+  clearAccountSessions(appId: string, revision: number): void {
+    const prefix = `qqbot:${appId}:`;
+    const next = this.mergeDisk(this.readDiskState(true));
+    const keys = new Set([...Object.keys(next.sessionIds), ...Object.keys(next.sessionHistory ?? {}),
+      ...this.sessionIds.keys(), ...this.sessionHistory.keys()]);
+    for (const key of keys) {
+      if (!key.startsWith(prefix)) continue;
+      delete next.sessionIds[key];
+      if (next.sessionHistory) delete next.sessionHistory[key];
+    }
+    next.clearedAccounts = { ...next.clearedAccounts, [appId]: revision };
+    atomicWrite(this.prefsPath, [JSON.stringify(next, null, 2)]);
+    this.clearedAccounts.set(appId, revision);
+    for (const key of keys) {
+      if (!key.startsWith(prefix)) continue;
+      this.unindexSessionId(key);
+      this.sessionIds.delete(key);
+      this.sessionHistory.delete(key);
+      this.pending.sessionIds.delete(key);
+    }
   }
 
   /**
@@ -198,6 +233,11 @@ export class PrefsStore {
       if (!existsSync(this.prefsPath)) return;
       const content = readFileSync(this.prefsPath, 'utf8');
       const data = JSON.parse(content) as PrefsFile;
+      if (data.clearedAccounts && typeof data.clearedAccounts === 'object') {
+        for (const [appId, revision] of Object.entries(data.clearedAccounts)) {
+          if (typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0) this.clearedAccounts.set(appId, revision);
+        }
+      }
       if (data.overrides && typeof data.overrides === 'object') {
         for (const [key, route] of Object.entries(data.overrides)) {
           if (route.provider && route.model) {
@@ -242,7 +282,7 @@ export class PrefsStore {
    * 损坏文件通常只是尾部截断，前面的映射条目往往完好，直接覆盖会把它们一并
    * 丢掉（用户表现为「QQ 里丢上下文」且无从恢复）。备份保留一份人工可救的证据。
    */
-  private readDiskState(): PrefsFile | null {
+  private readDiskState(strict = false): PrefsFile | null {
     let raw: string;
     try {
       raw = readFileSync(this.prefsPath, 'utf8');
@@ -255,6 +295,7 @@ export class PrefsStore {
       if (typeof data !== 'object' || data === null) throw new Error('not an object');
       return data;
     } catch {
+      if (strict) throw new Error('无法读取 QQ 会话关联，请重试清除记录。');
       this.backupCorrupted(raw);
       return null;
     }
@@ -297,10 +338,12 @@ export class PrefsStore {
       if (ids.size) history.set(key, [...ids]);
       else history.delete(key);
     }
+    const clearedAccounts = disk?.clearedAccounts ?? Object.fromEntries(this.clearedAccounts);
     return {
       overrides: merge('overrides', this.overrides, disk?.overrides),
       sessionIds: merge('sessionIds', this.sessionIds, disk?.sessionIds),
       ...(history.size > 0 ? { sessionHistory: Object.fromEntries(history) } : {}),
+      ...(Object.keys(clearedAccounts).length ? { clearedAccounts } : {}),
       presets: merge('presets', this.presets, disk?.presets),
     };
   }

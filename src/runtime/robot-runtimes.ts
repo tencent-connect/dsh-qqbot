@@ -21,7 +21,8 @@ import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-se
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
 import type { WorkbenchConversation, WorkbenchNewSession } from '../shared/workbench-conversation-protocol.ts';
 import { SessionSwitchConflict } from '../session/session-manager.ts';
-import { legacyDerivedSessionId } from '../session/session-id.ts';
+import { clearAccountHistory } from '../features/history-store.ts';
+import type { WorkbenchRobotRemoval } from '../shared/workbench-protocol.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
 import { ManualQqSender, ManualSendConflict, type ManualAttachment } from '../transport/manual-send.ts';
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
@@ -92,11 +93,21 @@ export class RobotRuntimes {
 
   bindPrimary(config: ImQQBotConfig): void {
     if (this.closed || this.primary) return;
+    this.store?.activatePrimary(config.appId);
     const access = new AccountAccessService(config, this.logger);
     this.primary = { config, access };
   }
 
   async start(): Promise<void> {
+    for (const [appId, revision] of this.store?.pendingClears() ?? []) {
+      try {
+        // An interrupted request may have persisted its intent before removing the credentials.
+        if (this.records().some(robot => robot.appId === appId)) this.store?.setPendingClear(appId);
+        else this.finishClear(appId, revision);
+      } catch {
+        this.logger.warn('QQ 消息记录清理尚未完成。');
+      }
+    }
     for (const robot of this.records()) for (const binding of this.prefs.listSessionBindings(robot.appId)) {
       for (const id of [...binding.history, ...(binding.current ? [binding.current] : [])]) {
         const agent = this.agents.get(id);
@@ -295,6 +306,7 @@ export class RobotRuntimes {
       throw new WorkbenchRequestError(400, '请在原账号设置中修改绑定凭据和名单');
     }
     if (!record && !patch.appSecret) throw new WorkbenchRequestError(400, '添加机器人需要 AppSecret');
+    if (!record) this.prepareBinding(patch.appId);
     const detached = !record ? this.store.get(patch.appId) : undefined;
     const bindingChanges = record && ((record.enabled && patch.enabled === false)
       || (record.kind === 'additional' && patch.appSecret !== undefined && patch.appSecret !== record.appSecret));
@@ -335,32 +347,62 @@ export class RobotRuntimes {
     return this.view(current);
   }
 
-  remove(appId: string, revision: number, profileDir: string): void {
+  remove(appId: string, revision: number, profileDir: string, mode: WorkbenchRobotRemoval = 'retain', bindingRevision?: number): void {
     if (this.closed || !this.store) throw new WorkbenchRequestError(503, 'QQ 账号配置当前不可写。');
     const record = this.records().find(item => item.appId === appId);
-    if (!record) return;
-    if (record.revision !== revision) {
+    if (!record) {
+      if (mode === 'clear') {
+        if (this.store.pendingClears().get(appId) === revision) this.finishClear(appId, revision);
+        else if (this.prefs.clearedRevision(appId) !== revision) {
+          throw new WorkbenchRequestError(409, '这里的绑定已结束，清除记录尚未执行。');
+        }
+      }
+      return;
+    }
+    if (bindingRevision === undefined ? record.revision !== revision : (record.bindingRevision ?? record.revision) !== bindingRevision) {
       throw new WorkbenchRequestError(409, '机器人配置已变化，请重新确认后再解绑。');
     }
-    this.accountAccess(record).pairing.endAll();
-    if (record.kind === 'primary') {
-      // Fence old requests before removing the binding from the profile. The
-      // metadata row can outlive the credentials across a host reload.
-      const access = this.accountAccess(record).currentAccess();
-      this.store.save({ ...record, unboundAccess: { ...access, commandMode: access.commandMode ?? 'open' } });
-      if (!unbindProfileCredentials(profileDir, this.logger, appId)) {
-        throw new WorkbenchRequestError(409, '无法解绑主机器人，请检查当前 profile 的凭据配置。');
+    if (mode === 'clear') this.store.setPendingClear(appId, revision);
+    try {
+      this.accountAccess(record).pairing.endAll();
+      if (record.kind === 'primary') {
+        // Fence old requests before removing the binding from the profile.
+        const access = this.accountAccess(record).currentAccess();
+        this.store.save({ ...record, unboundAccess: { ...access, commandMode: access.commandMode ?? 'open' } });
+        if (!unbindProfileCredentials(profileDir, this.logger, appId)) {
+          throw new WorkbenchRequestError(409, '无法解绑主机器人，请检查当前 profile 的凭据配置。');
+        }
+        this.primary = undefined;
+      } else {
+        this.store.removeAdditional(appId, record.revision);
+        this.additionalAccess.delete(appId);
       }
-      this.primary = undefined;
-    } else {
-      this.store.removeAdditional(appId, revision);
-      this.additionalAccess.delete(appId);
+    } catch (error) {
+      if (mode === 'clear') this.store.setPendingClear(appId);
+      throw error;
     }
     const slot = this.slots.get(appId);
     if (slot) this.deactivate(slot);
     // Admission stops synchronously. Fiber disposal (including a profile
     // reload for the primary) can wait for work unrelated to this request.
     void this.sync(appId).catch(() => this.logger.warn(`无法完成 QQ 网关清理（AppID ${appId}）。`));
+    if (mode === 'clear') this.finishClear(appId, revision);
+  }
+
+  prepareBinding(appId: string): void {
+    const revision = this.store?.pendingClears().get(appId);
+    if (revision !== undefined) this.finishClear(appId, revision);
+  }
+
+  private finishClear(appId: string, revision: number): void {
+    try {
+      this.prefs.clearAccountSessions(appId, revision);
+      this.timeline.clearAccount(appId);
+      clearAccountHistory(appId);
+      this.store?.setPendingClear(appId);
+    } catch {
+      throw new WorkbenchRequestError(503, '机器人已解绑，清除记录尚未完成，请重试。');
+    }
   }
 
   private records(): BoundRobotConfig[] {
@@ -381,6 +423,7 @@ export class RobotRuntimes {
       alias: record.alias,
       enabled: record.enabled,
       revision: record.revision,
+      bindingRevision: record.bindingRevision ?? record.revision,
       state: record.enabled ? this.slots.get(record.appId)?.runtime?.state ?? 'failed' : 'disabled',
       access,
     };
@@ -482,8 +525,9 @@ export class RobotRuntimes {
               return;
             }
             const persistence = this.ctx.get('sessionPersistence') as { stat(id: string): Promise<unknown> } | undefined;
+            const legacy = this.prefs.legacySessionId(key);
             const existing = this.prefs.getSessionId(key) || this.prefs.getPreset(key) || this.prefs.getOverride(key)
-              || !persistence || await persistence.stat(legacyDerivedSessionId(key));
+              || (legacy !== undefined && (!persistence || await persistence.stat(legacy)));
             if (!receiving({ scope, targetId }) || !access.allowsConversation(scope, targetId) || slot.stopped) return;
             this.conversationSettings.initialize(key, existing ? this.legacySettings(config, key) : this.defaults(config.appId).settings);
           },

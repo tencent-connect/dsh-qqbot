@@ -69,6 +69,21 @@ it('does not report a pending request as successful after restart', async () => 
   expect(new QqTimeline(dir, logger).page('A', target)?.entries).toMatchObject([{ id, status: 'accepted', platformId: 'qq-receipt' }]);
 });
 
+it('ignores an old receipt after clearing or reopening the same account', async () => {
+  const log = new QqTimeline(dir, logger);
+  const receipt = Promise.withResolvers<string>();
+  const id = 'shared-stream';
+  const pending = log.observe('A', target, { id, at: 1, direction: 'outbound', text: 'old', status: 'sending' },
+    () => receipt.promise, result => ({ status: 'accepted', platformId: result }));
+  log.clearAccount('A');
+  expect(log.page('A', target)?.entries).toEqual([]);
+  const fresh = { id, at: 2, direction: 'outbound', text: 'new', status: 'rejected' } as const;
+  log.record('A', target, fresh);
+  receipt.resolve('obsolete-receipt');
+  await pending;
+  expect(new QqTimeline(dir, logger).page('A', target)?.entries).toEqual([fresh]);
+});
+
 it('preserves the real SDK outcome when the display store is unwritable', async () => {
   const path = join(dir, 'file');
   writeFileSync(path, 'invalid root');

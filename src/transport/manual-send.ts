@@ -26,6 +26,7 @@ export class ManualQqSender {
     private readonly ledger: DeliveryLedger,
     private readonly send: Send,
     private readonly timeline?: QqTimeline,
+    private readonly active?: () => boolean,
   ) {}
 
   static status(ledger: DeliveryLedger, appId: string, target: ReplyTarget, operation: string, pending = false): WorkbenchSendResult | undefined {
@@ -89,7 +90,8 @@ export class ManualQqSender {
     try {
       let outcome: Outcome;
       if (this.timeline && recording()) {
-        outcome = await this.timeline.observe(this.appId, target, { ...entry, status: 'sending' }, transmit, result => result ?? { status: 'unknown' });
+        outcome = await this.timeline.observe(this.appId, target, { ...entry, status: 'sending' }, transmit,
+          result => result ?? { status: 'unknown' }, this.active);
       } else {
         outcome = await transmit();
       }

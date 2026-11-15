@@ -357,7 +357,7 @@ function QqBotIcon({ size = 28 }: { size?: number }): ReactNode {
 }
 /** 已绑定视图：回显 appId + 更换凭据 / 解绑入口 */
 interface BoundActions {
-  replace: BindActions['submit'];
+  replace?: BindActions['submit'];
   unbind: () => void;
   disabled: boolean;
 }

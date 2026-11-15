@@ -5,6 +5,7 @@ import { atomicWrite } from '../shared/atomic-file.ts';
 interface RobotConfigBase {
   appId: string;
   revision: number;
+  bindingRevision?: number;
   enabled: boolean;
   alias: string;
 }
@@ -15,6 +16,11 @@ export type BoundRobotConfig = RobotConfigBase & (
 );
 
 type RobotConfigRecord = BoundRobotConfig | (RobotConfigBase & { kind: 'unbound'; access: AccessControlConfig });
+interface RobotConfigFile {
+  records: RobotConfigRecord[];
+  lastRevision: number;
+  pendingClears: Map<string, number>;
+}
 
 export class RobotConfigConflictError extends Error {
   constructor() {
@@ -82,11 +88,12 @@ function parseAccess(input: unknown): AccessControlConfig {
 }
 
 function parseRecord(input: unknown): RobotConfigRecord {
-  const fields = ['appId', 'revision', 'enabled', 'alias', 'kind'] as const;
+  const fields = ['appId', 'revision', 'bindingRevision', 'enabled', 'alias', 'kind'] as const;
   if (input && typeof input === 'object' && 'kind' in input && input.kind === 'primary') {
     const value = robotObject(input, [...fields, 'unboundAccess']);
     return { kind: 'primary', appId: robotAppId(value.appId), revision: robotRevision(value.revision),
       enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias),
+      ...(value.bindingRevision === undefined ? {} : { bindingRevision: robotRevision(value.bindingRevision) }),
       ...(value.unboundAccess === undefined ? {} : { unboundAccess: parseAccess(value.unboundAccess) }),
     };
   }
@@ -96,6 +103,7 @@ function parseRecord(input: unknown): RobotConfigRecord {
   const config = {
     appId: robotAppId(value.appId), revision: robotRevision(value.revision),
     enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias),
+    ...(value.bindingRevision === undefined ? {} : { bindingRevision: robotRevision(value.bindingRevision) }),
     access: parseAccess(value.access),
   };
   return value.kind === 'unbound' ? { ...config, kind: 'unbound' }
@@ -105,17 +113,17 @@ function parseRecord(input: unknown): RobotConfigRecord {
 export class RobotConfigStore {
   constructor(private readonly path: string) {}
 
-  private read(): { records: RobotConfigRecord[]; lastRevision: number } {
+  private read(): RobotConfigFile {
     let data: string;
     try {
       data = readFileSync(this.path, 'utf8');
     } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { records: [], lastRevision: 0 };
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { records: [], lastRevision: 0, pendingClears: new Map() };
       throw error;
     }
 
     try {
-      const { version, robots, lastRevision } = robotObject(JSON.parse(data), ['version', 'robots', 'lastRevision']);
+      const { version, robots, lastRevision, pendingClears } = robotObject(JSON.parse(data), ['version', 'robots', 'lastRevision', 'pendingClears']);
       if (version !== 1 || !Array.isArray(robots)) throw new Error();
       const records = robots.map(parseRecord);
       if (new Set(records.map(record => record.appId)).size !== records.length || records.some(record => record.revision === 0)) {
@@ -125,6 +133,7 @@ export class RobotConfigStore {
         records,
         lastRevision: records.reduce((highest, record) => Math.max(highest, record.revision),
           lastRevision === undefined ? 0 : robotRevision(lastRevision)),
+        pendingClears: collectPendingClears(pendingClears),
       };
     } catch {
       throw new Error('机器人配置目录无法读取，请检查保存的数据。');
@@ -135,17 +144,49 @@ export class RobotConfigStore {
     return this.read().records;
   }
 
-  private write(records: RobotConfigRecord[], lastRevision: number): void {
-    atomicWrite(this.path, [JSON.stringify({ version: 1, robots: records, lastRevision })]);
+  private write({ records, lastRevision, pendingClears }: RobotConfigFile): void {
+    atomicWrite(this.path, [JSON.stringify({
+      version: 1, robots: records, lastRevision,
+      ...(pendingClears.size ? { pendingClears: Object.fromEntries(pendingClears) } : {}),
+    })]);
   }
 
   get(appId: string): RobotConfigRecord | undefined {
     return this.list().find(record => record.appId === appId);
   }
 
+  activatePrimary(appId: string): void {
+    const file = this.read();
+    const { records, lastRevision } = file;
+    const current = records.find(record => record.appId === appId);
+    if (!current || (current.kind === 'primary' && current.unboundAccess === undefined)) return;
+    const revision = robotRevision(lastRevision + 1);
+    const primary: BoundRobotConfig = {
+      kind: 'primary', appId, revision, alias: current.alias,
+      enabled: current.kind === 'primary' ? current.enabled : true,
+    };
+    this.write({ ...file, records: records.map(record => record === current ? primary : record), lastRevision: revision });
+  }
+
+  pendingClears(): ReadonlyMap<string, number> {
+    return this.read().pendingClears;
+  }
+
+  setPendingClear(appId: string, revision?: number): void {
+    const file = this.read();
+    if (revision === undefined) {
+      if (!file.pendingClears.delete(appId)) return;
+    } else {
+      if (file.pendingClears.get(appId) === revision) return;
+      file.pendingClears.set(appId, revision);
+    }
+    this.write(file);
+  }
+
   /** CAS prevents an old browser draft from reapplying a list that was changed separately. */
   save(record: BoundRobotConfig, unboundRevision?: number): BoundRobotConfig {
-    const { records, lastRevision } = this.read();
+    const file = this.read();
+    const { records, lastRevision } = file;
     const index = records.findIndex(existing => existing.appId === record.appId);
     const current = records[index];
     const rebind = record.kind === 'additional' && record.revision === 0 && current !== undefined
@@ -154,23 +195,35 @@ export class RobotConfigStore {
       throw new RobotConfigConflictError();
     }
     const access = record.kind === 'additional' ? { ...record.access, commandMode: record.access.commandMode ?? 'open' } : undefined;
+    const revision = record.revision === 0 ? lastRevision + 1 : record.revision + 1;
+    const bindingRevision = rebind ? revision
+      : current ? current.bindingRevision ?? current.revision
+      : record.kind === 'primary' ? 0 : revision;
     const next = parseRecord({
       ...record,
       ...(access ? { access } : {}),
-      revision: record.revision === 0 ? lastRevision + 1 : record.revision + 1,
+      revision,
+      bindingRevision: bindingRevision === revision ? undefined : bindingRevision,
     });
     if (next.kind === 'unbound') throw new RobotConfigConflictError();
     if (index < 0) records.push(next);
     else records[index] = next;
-    this.write(records, Math.max(lastRevision, next.revision));
+    this.write({ ...file, lastRevision: Math.max(lastRevision, next.revision) });
     return next;
   }
 
   removeAdditional(appId: string, revision: number): void {
-    const { records, lastRevision } = this.read();
+    const file = this.read();
+    const { records } = file;
     const current = records.find(record => record.appId === appId);
     if (current?.kind !== 'additional' || current.revision !== revision) throw new RobotConfigConflictError();
     const { appSecret: _secret, ...settings } = current;
-    this.write(records.map(record => record === current ? { ...settings, kind: 'unbound' } : record), lastRevision);
+    this.write({ ...file, records: records.map(record => record === current ? { ...settings, kind: 'unbound' } : record) });
   }
+}
+
+function collectPendingClears(value: unknown): Map<string, number> {
+  if (value === undefined) return new Map();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('清除记录状态无效。');
+  return new Map(Object.entries(value).map(([appId, revision]) => [robotAppId(appId), robotRevision(revision)]));
 }

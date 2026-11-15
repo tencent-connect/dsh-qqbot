@@ -9,9 +9,10 @@
  *
  * 保留上游的回复、模型与提示词设置，并管理账号访问范围。
  */
-import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { createElement, Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 
 import { fetchJson, HttpError } from './http.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
@@ -171,9 +172,9 @@ export function AccessSettings({
 
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
 
-function storedDraft(): ConfigDraft | undefined {
+function storedDraft(key: string): ConfigDraft | undefined {
   try {
-    const text = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+    const text = sessionStorage.getItem(key);
     return text === null ? undefined : parseConfigDraft(JSON.parse(text));
   } catch (_error) {
     // Storage may be unavailable or contain an interrupted older draft.
@@ -182,12 +183,12 @@ function storedDraft(): ConfigDraft | undefined {
 }
 
 /** Keep an edited form through a client reload without storing credential fields. */
-function storeDraft(draft: ConfigDraft): void {
+function storeDraft(key: string, draft: ConfigDraft): void {
   try {
     if (isConfigDirty(draft.baseline, draft.form)) {
-      sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(configDraft(draft.baseline, draft.form)));
+      sessionStorage.setItem(key, JSON.stringify(configDraft(draft.baseline, draft.form)));
     } else {
-      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+      sessionStorage.removeItem(key);
     }
   } catch (_error) {
     // In-memory draft protection still works when tab storage is disabled.
@@ -236,10 +237,22 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
   return undefined;
 }
 
-export interface ConfigPanelProps { bindPhase?: string; accountOnly?: boolean }
+export interface ConfigPanelProps {
+  bindPhase?: string;
+  accountOnly?: boolean;
+  account?: {
+    appId: string;
+    revision: number;
+    enabled: boolean;
+    formId: string;
+    controls: ReactNode;
+    credentials: ReactNode;
+    onAliasSaved: (robot: WorkbenchRobot) => void;
+  };
+}
 
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
-export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps = {}): ReactNode {
+export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigPanelProps = {}): ReactNode {
   useConfigPanelStyles();
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const draftRef = useRef<ConfigDraft | null>(null);
@@ -252,12 +265,15 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
   const [result, setResult] = useState<SaveResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const appId = account?.appId;
+  const robotRevision = account?.revision;
+  const storageKey = appId === undefined ? DRAFT_STORAGE_KEY : `${DRAFT_STORAGE_KEY}:${appId}`;
 
   const replaceDraft = useCallback((next: ConfigDraft): void => {
     draftRef.current = next;
-    storeDraft(next);
+    storeDraft(storageKey, next);
     setDraft(next);
-  }, []);
+  }, [storageKey]);
 
   useEffect(() => {
     mounted.current = true;
@@ -270,12 +286,18 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
     setLoading(true);
     setLoadError(null);
     void fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH, { cache: 'no-store', signal: controller.signal })
-      .then(({ config }) => {
+      .then(async ({ config }) => {
+        if (appId !== undefined) {
+          const { robots } = await fetchJson<WorkbenchRobotsResponse>(WORKBENCH_ROBOTS_PATH, { cache: 'no-store', signal: controller.signal });
+          const robot = robots.find(robot => robot.appId === appId && robot.primary);
+          if (!robot || config.appId !== appId) throw new Error('主机器人绑定已更新，请重新打开设置。');
+          config = { ...config, alias: robot.alias, robotRevision: robot.revision };
+        }
         if (stopped || saveController.current !== null) return;
         const expected = pendingConfirmation.current;
         const confirmed = expected !== null && matchesSavedConfig(config, expected);
         if (confirmed || expected?.appId !== config.appId) pendingConfirmation.current = null;
-        const current = draftRef.current ?? storedDraft();
+        const current = draftRef.current ?? storedDraft(storageKey);
         const sameAccount = current?.baseline.appId === config.appId;
         const hadDraft = current !== undefined && current !== null && sameAccount && isConfigDirty(current.baseline, current.form);
         const form = hadDraft ? rebaseConfig(current.baseline, current.form, config) : config;
@@ -294,7 +316,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
       })
       .finally(() => { if (!stopped) setLoading(false); });
     return () => { stopped = true; controller.abort(); };
-  }, [bindPhase, reload, replaceDraft]);
+  }, [appId, bindPhase, reload, replaceDraft, storageKey, robotRevision]);
 
   const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
     const current = draftRef.current;
@@ -306,10 +328,11 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
   const submit = useCallback((event: FormEvent): void => {
     event.preventDefault();
     const current = draftRef.current;
-    if (busy || current === null) return;
-    const submitted = normalizeConfig(current.form);
-    const changed = configPatch(current.baseline, submitted);
-    if (Object.keys(changed).length === 0) {
+    if (saveController.current !== null || busy || current === null) return;
+    let submitted = normalizeConfig(current.form);
+    const { alias, ...changed } = configPatch(current.baseline, submitted);
+    const configChanged = Object.keys(changed).length > 0;
+    if (alias === undefined && !configChanged) {
       replaceDraft({ baseline: current.baseline, form: submitted });
       return;
     }
@@ -318,32 +341,57 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
     saveController.current = controller;
     setBusy(true);
     setResult(null);
-    void fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...changed, ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }) }), signal: controller.signal,
-    })
-      .then(async (body) => {
-        if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
-        // The write is confirmed. A read from the old fiber during HMR must not undo it.
+    let aliasSaved = false;
+    void (async () => {
+      if (alias !== undefined && appId !== undefined) {
+        const { robot } = await fetchJson<{ robot: WorkbenchRobot }>(WORKBENCH_ROBOTS_PATH, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
+          body: JSON.stringify({ appId, revision: current.baseline.robotRevision, alias }),
+        });
         if (!mounted.current || controller.signal.aborted) return;
-        const expected = { appId: submitted.appId, changed };
-        pendingConfirmation.current = expected;
-        replaceDraft({ baseline: submitted, form: submitted });
-        setDraftNotice(null);
-        const config = await confirmSavedConfig(expected, controller.signal);
-        if (!mounted.current || controller.signal.aborted) return;
-        if (config !== undefined) {
-          pendingConfirmation.current = null;
-          replaceDraft({ baseline: config, form: config });
-          setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
-        } else {
-          setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
-        }
-      })
+        aliasSaved = true;
+        const identity = { alias: robot.alias, robotRevision: robot.revision };
+        submitted = { ...submitted, ...identity };
+        replaceDraft({ baseline: { ...current.baseline, ...identity }, form: submitted });
+        account?.onAliasSaved(robot);
+      }
+      if (!configChanged) {
+        setResult({ kind: 'confirmed', message: '配置已保存。' });
+        return;
+      }
+      const body = await fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({
+          ...changed,
+          ...(appId === undefined ? {} : { expectedAppId: appId }),
+          ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }),
+        }),
+      });
+      if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
+      // The write is confirmed. A read from the old fiber during HMR must not undo it.
+      if (!mounted.current || controller.signal.aborted) return;
+      const expected = { appId: submitted.appId, changed };
+      pendingConfirmation.current = expected;
+      replaceDraft({ baseline: submitted, form: submitted });
+      setDraftNotice(null);
+      const config = await confirmSavedConfig(expected, controller.signal);
+      if (!mounted.current || controller.signal.aborted) return;
+      if (config !== undefined) {
+        pendingConfirmation.current = null;
+        const baseline = appId === undefined ? config
+          : { ...config, alias: submitted.alias, robotRevision: submitted.robotRevision };
+        replaceDraft({ baseline, form: baseline });
+        setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
+      } else {
+        setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
+      }
+    })()
       .catch((error: unknown) => {
-        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: error instanceof HttpError && error.status === 409
+        if (!mounted.current || controller.signal.aborted) return;
+        const detail = error instanceof HttpError && error.status === 409
           ? `${error.message}草稿已保留，请先刷新配置。`
-          : `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。` });
+          : `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。`;
+        setResult({ kind: 'failed', message: aliasSaved ? `机器人名称已保存。${detail}` : detail });
       })
       .finally(() => {
         if (saveController.current === controller) {
@@ -351,15 +399,24 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
           if (mounted.current) setBusy(false);
         }
       });
-  }, [busy, replaceDraft]);
+  }, [account, appId, busy, replaceDraft]);
 
   const retry = (): void => { setReload((value) => value + 1); };
   const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb2-feedback', role: 'alert' },
     createElement('p', { className: 'imqb2-note imqb2-note--error' }, `配置加载失败：${loadError}`),
     createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? '重试中…' : '重试'),
   );
+  const accountFields = account && createElement(Fragment, null,
+    account.controls,
+    draft && createElement('label', { className: 'imqb-field imqr-field' }, '机器人名称', createElement(Input, {
+      form: account.formId, value: draft.form.alias ?? '', disabled: busy || loading,
+      placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120,
+      onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch('alias', event.target.value),
+    })),
+    account.credentials,
+  );
   if (draft === null) {
-    return createElement('div', { 'aria-busy': loading }, loadFeedback,
+    return createElement('div', { 'aria-busy': loading }, accountFields, loadFeedback,
       loading ? createElement('p', { className: 'imqb2-hint', role: 'status', style: { padding: '12px 0' } }, '正在加载配置…') : null,
     );
   }
@@ -371,10 +428,10 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
     ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
     : '没有未保存的修改。');
 
-  return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
+  const settingsForm = createElement('form', { id: account?.formId, className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
     createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
-      createElement(AccessSettings, { access, busy, bound: bindPhase === 'bound', onMembershipChange: retry,
+      createElement(AccessSettings, { access, busy, bound: bindPhase === 'bound', appId, enabled: account?.enabled, onMembershipChange: retry,
         onMode: (key, value) => patch('access', { ...access, [key]: value }),
       }),
       createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
@@ -416,4 +473,5 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
       ),
     ),
   );
+  return createElement(Fragment, null, accountFields, settingsForm);
 }

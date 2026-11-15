@@ -129,6 +129,10 @@ export class ModelResolver {
     this.prefs.clearSessionId(sessionKey);
   }
 
+  legacySessionId(sessionKey: string): string | undefined {
+    return this.prefs.legacySessionId(sessionKey);
+  }
+
   /**
    * 获取指定 sessionKey 的 per-peer preset 覆盖
    */

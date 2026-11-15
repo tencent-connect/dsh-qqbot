@@ -17,6 +17,7 @@ function object(value: unknown): Record<string, unknown> {
 /** Observe actual SDK HTTP submissions, including commands. Typing and uploads are not messages. */
 export function observeTimelineRequests(
   bot: QQBot, appId: string, timeline: QqTimeline, canRecord: (target: ReplyTarget) => boolean,
+  active?: () => boolean,
 ): TimelineRequest {
   const request = bot.apiClient.request.bind(bot.apiClient);
   const observe = (source?: ReplyTarget): ApiClient['request'] => async <T>(
@@ -61,7 +62,7 @@ export function observeTimelineRequests(
         status: streaming && body.input_state !== StreamInputState.DONE ? 'partial' : 'accepted',
         platformId: typeof platformId === 'string' ? platformId : undefined,
       };
-    });
+    }, active);
   };
   bot.apiClient.request = observe();
   return observe;

@@ -13,6 +13,8 @@ import type { DshAgentRegistry } from '../session/index.ts';
 import { persistCredentialsToProfile } from '../setup/persist.ts';
 import { RobotConfigStore } from './robot-config.ts';
 import { RobotRuntimes } from './robot-runtimes.ts';
+import { PrefsStore } from '../model/prefs-store.ts';
+import { QqTimeline } from './qq-timeline.ts';
 
 const sandbox = vi.hoisted(() => ({ dir: '' }));
 vi.mock('../shared/dirs.ts', async original => {
@@ -22,6 +24,40 @@ vi.mock('../shared/dirs.ts', async original => {
     get PLUGIN_HOME() { return sandbox.dir || actual.PLUGIN_HOME; },
     resolveRobotWorkspace: (appId: string) => join(sandbox.dir || actual.PLUGIN_HOME, 'robots', appId, 'workspace'),
   };
+});
+
+it('unbinds an AppID that was previously removed as an additional robot and then bound as primary', async () => {
+  sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-robot-primary-after-unbind-'));
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  const store = new RobotConfigStore(join(sandbox.dir, 'qqbot-robots.json'));
+  const credentials = { appId: 'fixture-main', appSecret: 'fixture-secret' };
+  const config = ConfigSchema({ ...credentials, media: { enabled: false } } as ImQQBotConfig);
+  const prior = store.save({
+    ...credentials, kind: 'additional', alias: '已有名称', enabled: true, revision: 0, access: config.access,
+  });
+  store.removeAdditional(prior.appId, prior.revision);
+  vi.stubEnv('QQBOT_APPID', undefined);
+  vi.stubEnv('QQBOT_SECRET', undefined);
+  let runtime!: RobotRuntimes;
+  const plugin = new Context().plugin(scope => {
+    runtime = new RobotRuntimes(scope, { get: vi.fn() } as unknown as DshAgentRegistry, logger, store);
+    runtime.bindPrimary(config);
+  });
+  try {
+    expect(persistCredentialsToProfile(credentials, sandbox.dir, logger)).toBe(true);
+    await plugin.await();
+    const [primary] = runtime.list();
+    expect(primary.primary).toBe(true);
+    expect(() => runtime.remove(primary.appId, primary.revision, sandbox.dir)).not.toThrow();
+    expect(primary.revision).toBeGreaterThan(prior.revision);
+    expect(runtime.list()).toEqual([]);
+    expect(readFileSync(join(sandbox.dir, 'cordis.patch.yml'), 'utf8')).not.toContain('appSecret:');
+  } finally {
+    await plugin.dispose();
+    vi.unstubAllEnvs();
+    rmSync(sandbox.dir, { recursive: true, force: true });
+    sandbox.dir = '';
+  }
 });
 
 it('deletes the primary without waiting for disposal and rebinds the same AppID after reload', async () => {
@@ -80,6 +116,65 @@ it('deletes the primary without waiting for disposal and rebinds the same AppID 
     await plugin?.dispose();
     start.mockRestore();
     vi.unstubAllEnvs();
+    rmSync(sandbox.dir, { recursive: true, force: true });
+    sandbox.dir = '';
+  }
+});
+
+it('clears only the confirmed binding, letting a later retry finish safely', async () => {
+  sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-robot-clear-'));
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  const store = new RobotConfigStore(join(sandbox.dir, 'qqbot-robots.json'));
+  let runtime!: RobotRuntimes;
+  const plugin = new Context().plugin(scope => {
+    runtime = new RobotRuntimes(scope, { get: vi.fn() } as unknown as DshAgentRegistry, logger, store);
+  });
+  try {
+    await plugin.await();
+    const add = (appId: string) => runtime.save({ appId, appSecret: 'fixture', revision: null, enabled: false });
+    const target = await add('target');
+    const other = await add('target-other');
+    const key = 'qqbot:target:group:same';
+    const otherKey = 'qqbot:target-other:group:same';
+    const peer = { scope: 'group', targetId: 'same' } as const;
+    const entry = { id: 'message', at: 1, direction: 'inbound', text: 'saved QQ message', status: 'received' } as const;
+    runtime.prefs.setSessionId(key, 'old-session');
+    runtime.prefs.setSessionId(key, 'current-session');
+    runtime.prefs.setSessionId(otherKey, 'other-session');
+    runtime.timeline.record(target.appId, peer, entry);
+    runtime.timeline.record(other.appId, peer, entry);
+    runtime.remove(target.appId, target.revision, sandbox.dir, 'retain', target.bindingRevision);
+    expect(runtime.prefs.getSessionId(key)).toBe('current-session');
+    expect(runtime.timeline.page(target.appId, peer)?.entries).toEqual([entry]);
+    expect(() => runtime.remove(target.appId, target.revision, sandbox.dir, 'clear', target.bindingRevision))
+      .toThrow('清除记录尚未执行');
+
+    const rebound = await add(target.appId);
+    expect(() => runtime.remove(target.appId, target.revision, sandbox.dir, 'clear', target.bindingRevision)).toThrow('重新确认');
+    await runtime.save({ appId: rebound.appId, revision: rebound.revision, alias: 'renamed' });
+    const failFirst = vi.spyOn(runtime.timeline, 'clearAccount').mockImplementationOnce(() => { throw new Error('unwritable'); });
+    const clear = () => runtime.remove(rebound.appId, rebound.revision, sandbox.dir, 'clear', rebound.bindingRevision);
+    expect(clear).toThrow('清除记录尚未完成');
+    expect(new RobotConfigStore(join(sandbox.dir, 'qqbot-robots.json')).pendingClears().get(target.appId)).toBe(rebound.revision);
+    expect(runtime.list()).toEqual([other]);
+    expect(clear()).toBeUndefined();
+    expect(failFirst).toHaveBeenCalledTimes(2);
+    expect(clear()).toBeUndefined();
+    expect(failFirst).toHaveBeenCalledTimes(2);
+
+    const prefs = new PrefsStore();
+    expect(prefs.listSessionBindings(target.appId)).toEqual([]);
+    expect(prefs.findKnownSessionKey('old-session')).toBeUndefined();
+    expect(prefs.findKnownSessionKey('current-session')).toBeUndefined();
+    expect(prefs.legacySessionId(key)).toBeUndefined();
+    expect(prefs.getSessionId(otherKey)).toBe('other-session');
+    const timeline = new QqTimeline(join(sandbox.dir, 'timeline'), logger);
+    expect(timeline.page(target.appId, peer)?.entries).toEqual([]);
+    expect(timeline.page(other.appId, peer)?.entries).toEqual([entry]);
+    await add(target.appId);
+    expect(clear).toThrow('重新确认');
+  } finally {
+    await plugin.dispose();
     rmSync(sandbox.dir, { recursive: true, force: true });
     sandbox.dir = '';
   }

@@ -316,6 +316,21 @@ describe('deliveryAddress', () => {
 });
 
 describe('getOrCreate — 对照组（迁移主路径行为正确）', () => {
+  it('starts a fresh Session after clearing even though the legacy native Session still exists', async () => {
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, LEGACY_ID);
+    prefs.setSessionId(KEY, 'current-session');
+    prefs.clearAccountSessions(APP_ID, 1);
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const ctx = onDiskCtx(LEGACY_ID, 'current-session');
+    const manager = createManagerWithCtx(registry, ctx, createLogger(), new PrefsStore());
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(record.sessionId).toMatch(MINTED);
+    expect(record.sessionId).not.toBe(LEGACY_ID);
+    expect(createdIds(registry)).toEqual([record.sessionId]);
+  });
+
   it('全新用户：legacy 不存在 → 铸造 session- 前缀 id 创建并落盘', async () => {
     const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
 

@@ -3,6 +3,7 @@ import type { BindStateWire } from './bind-protocol.ts';
 
 export const WORKBENCH_ROBOTS_PATH = '/api/qqbot/workbench/robots';
 export const WORKBENCH_ROBOT_REMOVE_PATH = '/api/qqbot/workbench/robots/remove';
+export type WorkbenchRobotRemoval = 'retain' | 'clear';
 export const WORKBENCH_ROBOT_BIND_PATH = '/api/qqbot/workbench/robots/bind';
 export const WORKBENCH_GROUP_GUIDE_IMAGES = {
   'message-scope.png': '/api/qqbot/workbench/group-permissions/message-scope.png',
@@ -20,6 +21,7 @@ export interface WorkbenchRobot {
   readonly enabled: boolean;
   readonly alias: string;
   readonly revision: number;
+  readonly bindingRevision?: number;
   readonly access: AccessControlConfig;
 }
 

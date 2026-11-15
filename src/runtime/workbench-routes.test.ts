@@ -74,10 +74,13 @@ describe('workbench robot account route', () => {
       expect(removal.methods).toEqual(['POST']);
       expect((await send({ appId: '../other', revision: 1 })).status).toBe(400);
       expect((await send({ appId: robot.appId, revision: null })).status).toBe(400);
+      expect((await send({ appId: robot.appId, revision: 1, mode: 'delete-all' })).status).toBe(400);
       expect(remove).not.toHaveBeenCalled();
       expect((await send({ appId: robot.appId, revision: 0 })).status).toBe(409);
       expect(await (await send({ appId: robot.appId, revision: 1 })).json()).toEqual({ ok: true });
       expect(remove).toHaveBeenLastCalledWith(robot.appId, 1);
+      expect(await (await send({ appId: robot.appId, revision: 1, mode: 'clear', bindingRevision: 0 })).json()).toEqual({ ok: true });
+      expect(remove).toHaveBeenLastCalledWith(robot.appId, 1, 'clear', 0);
     } finally {
       await dispose();
     }

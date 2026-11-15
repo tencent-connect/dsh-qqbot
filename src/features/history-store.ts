@@ -7,12 +7,13 @@
 import { MemoryHistoryStore } from '@tencent-connect/qqbot-nodejs';
 import type { HistoryStore } from '@tencent-connect/qqbot-nodejs';
 
-let _store: HistoryStore | null = null;
+const stores = new Map<string, HistoryStore>();
 
 /** 获取共享历史存储（单例） */
-export function getHistoryStore(): HistoryStore {
-  if (!_store) _store = new MemoryHistoryStore();
-  return _store;
+export function getHistoryStore(appId: string): HistoryStore {
+  const store = stores.get(appId) ?? new MemoryHistoryStore();
+  stores.set(appId, store);
+  return store;
 }
 
 /** 用 appId 前缀隔离群历史（单账号下等价于 groupOpenid，保留多账号扩展） */
@@ -22,5 +23,9 @@ export function historyGroupKey(appId: string, groupId: string): string {
 
 /** 清空群历史（回复后调用，避免下次 @ 时重复组包） */
 export function clearGroupHistory(appId: string, groupId: string): void {
-  _store?.clear?.(historyGroupKey(appId, groupId));
+  stores.get(appId)?.clear?.(historyGroupKey(appId, groupId));
+}
+
+export function clearAccountHistory(appId: string): void {
+  stores.delete(appId);
 }

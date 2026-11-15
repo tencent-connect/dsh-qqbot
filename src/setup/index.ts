@@ -34,6 +34,7 @@ export interface EnsureCredentialsOptions {
   source?: string;
   /** 当前生效配置（apply 时 loader 合并值；config 路由 GET 回显用） */
   config: Record<string, unknown>;
+  prepareBinding?: (appId: string) => void;
 }
 
 /**
@@ -91,6 +92,8 @@ export async function ensureCredentials(
     const disposeRoutes = registerBindRoutes(webServer, service, logger, {
       // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
       onManualCredentials: (credentials) => {
+        try { options.prepareBinding?.(credentials.appId); }
+        catch (error) { return { persisted: false, error: error instanceof Error ? error.message : '清除记录尚未完成。' }; }
         service.dispose();
         return persistCredentials(credentials, logger);
       },

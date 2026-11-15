@@ -1,5 +1,5 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync } from 'node:fs';
+import { basename, dirname, join, sep } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import { MAX_TIMELINE_IMAGES, TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
@@ -34,8 +34,19 @@ export class QqTimeline {
   private readonly journals = new Map<string, Journal>();
   private readonly incomplete = new Set<string>();
   private readonly pending = new Set<string>();
+  private readonly generations = new Map<string, number>();
 
   constructor(private readonly root: string, private readonly logger: Logger) {}
+
+  clearAccount(appId: string): void {
+    const path = this.accountDir(appId);
+    this.generations.set(appId, (this.generations.get(appId) ?? 0) + 1);
+    for (const key of this.journals.keys()) if (key.startsWith(path + sep)) this.journals.delete(key);
+    for (const set of [this.incomplete, this.pending]) {
+      for (const key of set) if (key.startsWith(path + sep)) set.delete(key);
+    }
+    rmSync(path, { force: true, recursive: true });
+  }
 
   peers(appId: string): Peer[] {
     const root = this.accountDir(appId);
@@ -92,19 +103,26 @@ export class QqTimeline {
   }
 
   async observe<T>(appId: string, target: ReplyTarget, entry: TimelineEntry,
-    send: () => Promise<T>, finish: (result?: T, error?: unknown) => Partial<TimelineEntry>): Promise<T> {
+    send: () => Promise<T>, finish: (result?: T, error?: unknown) => Partial<TimelineEntry>,
+    stillOwned?: () => boolean): Promise<T> {
     const key = join(this.peerDir(appId, target), entry.id);
+    const generation = this.generations.get(appId);
+    const current = () => this.generations.get(appId) === generation;
     this.pending.add(key);
     this.update(appId, target, entry.id, previous => ({ ...entry, at: previous?.at ?? entry.at }));
     try {
       const result = await send();
-      this.update(appId, target, entry.id, previous => previous && ({ ...previous, ...finish(result) }));
+      if (current() && stillOwned?.() !== false) {
+        this.update(appId, target, entry.id, previous => previous && ({ ...previous, ...finish(result) }));
+      }
       return result;
     } catch (error) {
-      this.update(appId, target, entry.id, previous => previous && ({ ...previous, ...finish(undefined, error) }));
+      if (current() && stillOwned?.() !== false) {
+        this.update(appId, target, entry.id, previous => previous && ({ ...previous, ...finish(undefined, error) }));
+      }
       throw error;
     } finally {
-      this.pending.delete(key);
+      if (current()) this.pending.delete(key);
     }
   }
 

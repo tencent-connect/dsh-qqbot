@@ -262,7 +262,7 @@ it('does not append group context if the gateway stops between reading and recor
   const f = fixture();
   const group = 'team-stopping';
   expect(f.service.addManualMember('allow-group', group).ok).toBe(true);
-  const history = getHistoryStore();
+  const history = getHistoryStore(f.service.config.appId);
   const list = vi.spyOn(history, 'list').mockImplementationOnce(() => {
     f.deactivate();
     return [];
