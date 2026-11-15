@@ -1,5 +1,5 @@
 import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode, type SyntheticEvent } from 'react';
-import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
   WORKBENCH_NEW_SESSION_PATH,
@@ -262,6 +262,8 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
   const [openViewId, setOpenViewId] = useState<string>();
   const selectedView = views.find(view => view.id === openViewId);
   const activeView = selectedView ?? views.find(view => view.id === QQ_HISTORY_VIEW_ID);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [viewRefreshKey, setViewRefreshKey] = useState(0);
   useEffect(() => {
     if (!selectedView) setOpenViewId(undefined);
   }, [selectedView]);
@@ -467,6 +469,7 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     const key = conversationKey(item);
     peerSelections.set(appId, key);
     setSelection(key);
+    setSessionMenuOpen(false);
     setOpenError('');
     onSmallPage('conversation');
   };
@@ -475,6 +478,20 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     return (filter === 'all' || filter === item.scope)
       && [peerName(item), item.name, item.openId].some(value => value.toLowerCase().includes(needle));
   });
+  const sessionMenu: MenuEntry[] = [];
+  if (currentArchived) {
+    sessionMenu.push({ id: 'restore', label: restoring === current?.id ? '恢复中…' : '恢复原会话',
+      disabled: !restoreSession || !!busyKey || !!restoring });
+  } else if (current) {
+    sessionMenu.push({ id: 'open', label: '打开当前 Session', disabled: !openSession });
+  }
+  sessionMenu.push({ id: 'new', label: '新建 Session',
+    disabled: !peer?.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey || !!restoring });
+  if (activeView?.refreshable) {
+    sessionMenu.push({ type: 'separator', id: 'message-actions' }, { id: 'refresh', label: '刷新消息' });
+  }
+  const sessionCaption = current && [sessionTitle?.(current.id),
+    workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ');
 
   return h(Fragment, null,
     h('aside', { className: 'imqw-tree', 'aria-label': 'QQ 会话列表' },
@@ -553,7 +570,7 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     treeDivider,
     h('section', { className: 'imqw-conversation', 'aria-label': '当前 QQ 会话' },
       h('header', { className: 'imqw-column-head imqw-main-head' },
-        h('div', null,
+        h('div', { className: 'imqw-main-title' },
           h('h2', { title: peer && peerName(peer) }, peer ? peerName(peer) : accountName(robot)),
           h('p', { className: 'imqw-muted' }, peer ? `${peer.scope === 'group' ? '群聊' : '私聊'} · ${label}` : '请从会话列表选择对话')),
         h('div', { className: 'imqw-actions' },
@@ -562,20 +579,27 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
             'aria-expanded': activeView === view,
             onClick: () => setOpenViewId(activeView === view ? undefined : view.id),
           }, `${activeView === view ? '收起' : '查看'} ${view.title}`)) : null,
-          currentArchived
-            ? h(Button, { size: 'sm', variant: 'outline', disabled: !restoreSession || !!busyKey || !!restoring,
-              onClick: () => { void restoreCurrent(); } }, restoring === current?.id ? '恢复中…' : '恢复原会话')
-            : current && peer ? h(Button, { size: 'sm', variant: 'outline', disabled: !openSession, onClick: () => openNative(current.id, peer) }, '打开当前 Session') : null,
-          peer ? h(Button, {
-            size: 'sm', variant: 'outline', type: 'button',
-            disabled: !peer.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey || !!restoring,
-            onClick: openNewSession,
-          }, '新建 Session') : null,
+          peer ? h(Menu, {
+            items: sessionMenu, open: sessionMenuOpen, align: 'end', portal: true, autoFocus: true,
+            listClassName: 'imqw-session-menu',
+            footer: sessionCaption ? [{ type: 'label', id: 'session-caption', text: sessionCaption }] : undefined,
+            onClose: () => setSessionMenuOpen(false),
+            onSelect: id => {
+              setSessionMenuOpen(false);
+              if (id === 'open' && current) void openNative(current.id, peer);
+              if (id === 'restore') void restoreCurrent();
+              if (id === 'new') openNewSession();
+              if (id === 'refresh') setViewRefreshKey(value => value + 1);
+            },
+            anchor: h(Button, { type: 'button', size: 'sm', variant: 'outline',
+              'aria-haspopup': 'menu', 'aria-expanded': sessionMenuOpen, onClick: () => setSessionMenuOpen(open => !open),
+            }, current ? '当前 Session' : 'Session', h(IconChevronDownOutlineRegular, { size: 12 })),
+          }) : null,
           peer ? h(Button, {
             ref: settingsTrigger, size: 'sm', variant: 'outline',
             className: 'imqw-settings-trigger', 'aria-controls': settingsId,
-            'aria-expanded': settingsVisible, onClick: toggleSettings,
-          }, h(IconSettingsOutlineRegular, { size: 14 }), '会话设置') : null,
+            'aria-label': '会话设置', title: '会话设置', 'aria-expanded': settingsVisible, onClick: toggleSettings,
+          }, h(IconSettingsOutlineRegular, { size: 14 })) : null,
         ),
       ),
       currentArchived ? h('p', { className: 'imqw-muted', role: 'status' },
@@ -584,12 +608,8 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
       current && restoreError?.id === current.id ? h('p', { className: 'imqb-error', role: 'alert' }, restoreError.message) : null,
       openError ? h('p', { className: 'imqb-error', role: 'alert' }, openError) : null,
       sessionNotice && sessionNotice.key === peerKey ? h('p', { className: 'imqw-muted', role: 'status' }, sessionNotice.text) : null,
-      current ? h('p', { className: 'imqw-muted imqw-session-caption' }, [
-        sessionTitle?.(current.id),
-        workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd),
-        current.preset,
-      ].filter(Boolean).join(' · ')) : null,
       peer && activeView ? h(activeView.component, { key: `${activeView.id}:${peerKey}`, appId, peer, robotName: accountName(robot), openSession: openSession && ((id: string) => openNative(id, peer)),
+        refreshKey: activeView.refreshable ? viewRefreshKey : undefined,
         disabledReason: !robot.enabled || robot.state !== 'connected' ? '机器人未连接'
           : !peer.admitted ? '此会话未获准接入' : !peer.receiving ? '此会话已暂停' : undefined }) : null,
     ),

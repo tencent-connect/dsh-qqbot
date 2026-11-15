@@ -50,12 +50,14 @@ export interface QqWorkbenchViewProps {
   robotName: string;
   disabledReason?: string;
   openSession?: (id: string) => boolean | void | Promise<boolean | void>;
+  refreshKey?: number;
 }
 
 export interface QqWorkbenchView {
   id: string;
   title: string;
   component: ComponentType<QqWorkbenchViewProps>;
+  refreshable?: boolean;
 }
 
 export interface QqWorkbenchSettingsProps {

@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import { resolveAgentCwd } from '../shared/dirs.ts';
-import { WORKBENCH_BASE_PERMISSIONS, type WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import { WORKBENCH_BASE_PERMISSIONS, WORKBENCH_TOOL_LIMIT, type WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { robotObject } from './robot-config.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
 import { EXTRA_MAX_CHARS } from '../prompt/extra.ts';
@@ -39,7 +39,7 @@ export function parseAgentSettings(raw: unknown): WorkbenchAgentSettings {
   let tools: string[] | undefined;
   if (row.tools !== undefined) {
     if (!WORKBENCH_BASE_PERMISSIONS.some(value => value === permission)) throw new Error('自定义工具需要明确的基础权限。');
-    if (!Array.isArray(row.tools) || row.tools.length > 512) throw new Error('工具名单无效。');
+    if (!Array.isArray(row.tools) || row.tools.length > WORKBENCH_TOOL_LIMIT) throw new Error('工具名单无效。');
     tools = [...new Set(row.tools.map((value: unknown) => {
       const name = string(value, '工具名称', 256).trim();
       if (!/^[a-zA-Z0-9_.:-]+$/.test(name)) throw new Error('工具名称无效。');

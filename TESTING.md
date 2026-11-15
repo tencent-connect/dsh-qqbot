@@ -50,6 +50,8 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
 
 脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后，分别通过 QQ 设置撤权、通过 DSH 原生 `/permission` 将权限调到上限之外。释放等待后，预期工具本体不会执行。恢复原生权限后，新一轮应能正常写入。脚本另启动真实的宿主内子 Agent，检查旧请求和 PTC 的授权。用同时缺少 QQ 撤权和原生权限修复的旧包跑正对照时追加 `baseline`。证据写入运行目录的 `report.json`，Host 结束后自动停止。
 
+在命令末尾加 `fixed --browser` 可在同一 Host 回放 QQ 消息列和工具弹窗。浏览器使用 Host Web 工作区的 Playwright。已安装 Chrome 时可设 `QQBOT_BROWSER_CHANNEL=chrome`。用例覆盖引用、消息刷新失败后重试、返回 QQ 对话、旧工具组合、分类批量勾选，以及浏览器确认和服务端保存的边界。
+
 ## 本地协议夹具
 
 验证入口要求 Node 22.19+ 或 Node 24+（不支持 Node 23）及 Python 3.10+。请先确认当前终端使用的版本。

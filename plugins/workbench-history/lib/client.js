@@ -207,7 +207,7 @@ window.__ModuleLoader__.load({
 					...draft,
 					quote: {
 						id: row.id,
-						text: row.text.slice(0, 400),
+						text: (row.displayText ?? row.text).slice(0, 400),
 						attachments: row.attachments,
 						sender
 					}
@@ -215,8 +215,10 @@ window.__ModuleLoader__.load({
 				setStatus("");
 				input.current?.focus();
 			} }));
+			const feedback = status || disabledReason || "";
 			return (0, react.createElement)("form", {
 				className: "imqw-composer",
+				"aria-label": "发送到 QQ",
 				onSubmit: (event) => {
 					event.preventDefault();
 					send();
@@ -260,22 +262,15 @@ window.__ModuleLoader__.load({
 					setStatus("");
 					input.current?.focus();
 				}
-			}, "取消引用")) : null, (0, react.createElement)("div", { className: "imqw-composer-input" }, (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-				type: "button",
-				size: "sm",
-				variant: "outline",
-				disabled: editLocked || !!draft.quote,
-				onClick: () => fileInput.current?.click(),
-				title: draft.quote ? "取消引用后可添加附件" : "每次可发送一个附件，最多 4 MiB"
-			}, "附件"), (0, react.createElement)("textarea", {
+			}, "取消引用")) : null, (0, react.createElement)("textarea", {
 				ref: input,
 				"aria-label": "发送到 QQ 的消息",
-				rows: 1,
+				rows: 2,
 				maxLength: QQ_MANUAL_MESSAGE_LIMIT,
 				value: draft.text,
 				readOnly: !!operation,
 				disabled: !!disabledReason,
-				placeholder: disabledReason || `以 ${robotName} 的身份发送到 QQ`,
+				placeholder: "输入消息",
 				onChange: (event) => {
 					edit({
 						...draft,
@@ -284,15 +279,29 @@ window.__ModuleLoader__.load({
 					setStatus("");
 				},
 				onKeyDown
-			}), (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+			}), (0, react.createElement)("div", { className: "imqw-composer-toolbar" }, (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+				type: "button",
+				size: "sm",
+				variant: "ghost",
+				disabled: editLocked || !!draft.quote,
+				onClick: () => fileInput.current?.click(),
+				title: draft.quote ? "取消引用后可添加附件" : "每次可发送一个附件，最多 4 MiB"
+			}, (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.IconPaperclipOutlineRegular, { size: 15 }), "附件"), (0, react.createElement)("span", {
+				className: "imqw-compose-as imqw-muted",
+				title: robotName
+			}, robotName), (0, react.createElement)("span", { className: "imqw-compose-shortcut imqw-muted" }, "Shift + Enter 换行"), (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				type: "submit",
 				size: "sm",
 				variant: "primary",
+				className: "imqw-send",
 				disabled: editLocked || !draft.text.trim() && !draft.attachment
-			}, "发送")), (0, react.createElement)("div", { className: "imqw-composer-footer" }, (0, react.createElement)("span", {
+			}, "发送到 QQ")), (0, react.createElement)("div", {
+				className: "imqw-composer-feedback",
+				hidden: !feedback && (!operation || busy)
+			}, (0, react.createElement)("span", {
 				className: "imqw-muted",
 				role: "status"
-			}, status || (disabledReason ? "" : "直接发到 QQ · Shift + Enter 换行")), operation && !busy ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+			}, feedback), operation && !busy ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				type: "button",
 				variant: "outline",
 				size: "sm",
@@ -339,6 +348,20 @@ window.__ModuleLoader__.load({
 		};
 		const dateFormat = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium" });
 		const timeFormat = new Intl.DateTimeFormat("zh-CN", { timeStyle: "short" });
+		const readingPositions = /* @__PURE__ */ new Map();
+		function rowOffset(list, row) {
+			return row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+		}
+		function visiblePosition(list) {
+			const top = list.getBoundingClientRect().top;
+			for (const row of list.querySelectorAll("[data-entry-id]")) {
+				const entryId = row.dataset.entryId;
+				if (entryId && row.getBoundingClientRect().bottom > top) return {
+					entryId,
+					offset: rowOffset(list, row)
+				};
+			}
+		}
 		function grouped(previous, row) {
 			return !!previous && previous.direction === row.direction && (row.direction === "outbound" || !!row.senderId && previous.senderId === row.senderId) && row.at >= previous.at && row.at - previous.at < 18e4;
 		}
@@ -352,7 +375,14 @@ window.__ModuleLoader__.load({
 				incomplete: latest.incomplete
 			};
 		}
-		function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }) {
+		function QqTimelineView({ appId, peer, robotName, disabledReason, openSession, refreshKey }) {
+			const { scope, openId, recording } = peer;
+			const key = JSON.stringify([
+				appId,
+				scope,
+				openId
+			]);
+			const [resume] = (0, react.useState)(() => readingPositions.get(key));
 			const [page, setPage] = (0, react.useState)();
 			const [error, setError] = (0, react.useState)("");
 			const [readingOlder, setReadingOlder] = (0, react.useState)(false);
@@ -362,9 +392,23 @@ window.__ModuleLoader__.load({
 			const list = (0, react.useRef)(null);
 			const composer = (0, react.useRef)(null);
 			const lifetime = (0, react.useRef)(null);
-			const follow = (0, react.useRef)(true);
+			const follow = (0, react.useRef)(!resume);
 			const olderHeight = (0, react.useRef)(void 0);
-			const { scope, openId, recording } = peer;
+			const pendingPosition = (0, react.useRef)(resume);
+			const openedFrom = (0, react.useRef)();
+			(0, react.useLayoutEffect)(() => {
+				const node = list.current;
+				return () => {
+					readingPositions.delete(key);
+					const position = openedFrom.current ?? pendingPosition.current ?? (node && node.clientHeight > 0 && !follow.current ? visiblePosition(node) : void 0);
+					if (!position) return;
+					readingPositions.set(key, position);
+					if (readingPositions.size > 100) {
+						const oldest = readingPositions.keys().next();
+						if (!oldest.done) readingPositions.delete(oldest.value);
+					}
+				};
+			}, [key]);
 			const params = (before) => {
 				const query = new URLSearchParams({
 					appId,
@@ -380,15 +424,31 @@ window.__ModuleLoader__.load({
 				let timer;
 				const read = async () => {
 					try {
-						const latest = await fetchJson(params(), {
+						const options = {
 							signal: controller.signal,
 							cache: "no-store"
-						});
+						};
+						const latest = await fetchJson(params(), options);
+						let visible = latest;
+						const position = pendingPosition.current;
+						if (position && latest.before && !latest.entries.some((row) => row.id === position.entryId)) {
+							const target = `${params()}&${new URLSearchParams({ entryId: position.entryId })}`;
+							const exists = await fetch(target, options);
+							exists.body?.cancel();
+							if (exists.ok) while (visible.before && !visible.entries.some((row) => row.id === position.entryId)) {
+								const older = await fetchJson(params(visible.before), options);
+								visible = {
+									entries: [...older.entries, ...visible.entries],
+									before: older.before,
+									incomplete: older.incomplete || visible.incomplete
+								};
+							}
+						}
 						if (controller.signal.aborted) return;
 						const tail = latest.entries.at(-1)?.id;
 						if (!follow.current && latestId.current && tail !== latestId.current) setNewMessages(true);
 						latestId.current = tail;
-						setPage((previous) => updateLatest(previous, latest));
+						setPage((previous) => position ? visible : updateLatest(previous, latest));
 						setError("");
 					} catch (cause) {
 						if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "无法读取 QQ 流水");
@@ -407,16 +467,35 @@ window.__ModuleLoader__.load({
 				appId,
 				scope,
 				openId,
-				refresh
+				refresh,
+				refreshKey
 			]);
 			(0, react.useLayoutEffect)(() => {
 				const node = list.current;
 				if (!node) return;
-				if (olderHeight.current !== void 0) {
+				const position = pendingPosition.current;
+				if (position && page) {
+					pendingPosition.current = void 0;
+					const row = node.querySelector(`[data-entry-id="${CSS.escape(position.entryId)}"]`);
+					if (row) node.scrollTop += rowOffset(node, row) - position.offset;
+					else follow.current = true;
+					if (follow.current) node.scrollTop = node.scrollHeight;
+				} else if (olderHeight.current !== void 0) {
 					node.scrollTop += node.scrollHeight - olderHeight.current;
 					olderHeight.current = void 0;
 				} else if (follow.current) node.scrollTop = node.scrollHeight;
 			}, [page]);
+			const openLinked = async (row, element) => {
+				if (!openSession || !row.sessionId) return;
+				const node = list.current;
+				const message = element.closest("[data-entry-id]");
+				const position = node && message ? {
+					entryId: row.id,
+					offset: rowOffset(node, message)
+				} : void 0;
+				openedFrom.current = position;
+				if (await openSession(row.sessionId) === false && openedFrom.current === position) openedFrom.current = void 0;
+			};
 			const loadOlder = async () => {
 				const before = page?.before;
 				const signal = lifetime.current?.signal;
@@ -471,15 +550,20 @@ window.__ModuleLoader__.load({
 			return (0, react.createElement)("section", {
 				className: "imqw-timeline",
 				"aria-label": "QQ 消息"
-			}, (0, react.createElement)("div", { className: "imqw-timeline-header" }, (0, react.createElement)("span", { className: "imqw-muted" }, !recording ? "消息保存已关闭" : "QQ 消息"), (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+			}, !recording || refreshKey === void 0 ? (0, react.createElement)("div", { className: "imqw-timeline-notice" }, !recording ? (0, react.createElement)("span", { className: "imqw-muted" }, "消息保存已关闭") : null, refreshKey === void 0 ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				variant: "ghost",
 				size: "sm",
 				disabled: readingOlder,
 				onClick: reload
-			}, "刷新消息")), error || page?.incomplete ? (0, react.createElement)("p", {
+			}, "刷新消息") : null) : null, error || page?.incomplete ? (0, react.createElement)("div", { className: "imqw-timeline-notice" }, (0, react.createElement)("p", {
 				role: "alert",
 				className: "imqb-error"
-			}, error || "消息记录可能不完整。") : null, (0, react.createElement)("div", {
+			}, error || "消息记录可能不完整。"), (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+				variant: "ghost",
+				size: "sm",
+				disabled: readingOlder,
+				onClick: reload
+			}, "重试")) : null, (0, react.createElement)("div", {
 				className: "imqw-timeline-scroll",
 				ref: list,
 				onScroll: () => {
@@ -508,7 +592,7 @@ window.__ModuleLoader__.load({
 					scope,
 					openId,
 					robotName,
-					openSession,
+					openLinked: openSession && openLinked,
 					refreshEntry,
 					peerName: scope === "c2c" ? peer.alias || peer.name : void 0,
 					onReply: !disabledReason && canQuoteTimelineEntry(row) ? (sender) => composer.current?.replyTo(row, sender) : void 0,
@@ -531,13 +615,29 @@ window.__ModuleLoader__.load({
 				onUpdate: reload
 			}));
 		}
-		function MessageRow({ row, appId, scope, openId, robotName, peerName, openSession, refreshEntry, onReply, compact }) {
+		function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked, refreshEntry, onReply, compact }) {
+			const [menuOpen, setMenuOpen] = (0, react.useState)(false);
+			const [detailsOpen, setDetailsOpen] = (0, react.useState)(false);
 			const [checking, setChecking] = (0, react.useState)(false);
 			const [receiptNote, setReceiptNote] = (0, react.useState)("");
+			const menuButton = (0, react.useRef)(null);
 			const outbound = row.direction === "outbound";
 			const sender = outbound ? robotName : peerName || row.senderName || (scope === "c2c" ? `私聊 ${openId.slice(-8)}` : row.senderId ? `成员 ${row.senderId.slice(-8)}` : "QQ 成员");
 			const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(" · ");
 			const linkedSession = row.sessionId;
+			const actions = [];
+			if (onReply) actions.push({
+				id: "quote",
+				label: "引用回复"
+			});
+			if (linkedSession && openLinked) actions.push({
+				id: "session",
+				label: "打开关联 Session"
+			});
+			actions.push({
+				id: "details",
+				label: detailsOpen ? "收起响应详情" : "响应详情"
+			});
 			const queryReceipt = async () => {
 				setChecking(true);
 				setReceiptNote("");
@@ -550,16 +650,20 @@ window.__ModuleLoader__.load({
 				}
 			};
 			const detail = row.inboundOutcome ? inboundLabel[row.inboundOutcome] : statusLabel.received;
+			const pendingReceipt = outbound && (row.status === "unknown" || row.status === "sending");
+			const showStatus = outbound && row.status !== "accepted";
+			const submissionFailed = !outbound && row.inboundOutcome === "submit-failed";
 			const imageCount = row.imageCount ?? 0;
 			const remaining = (row.attachments ?? 0) - imageCount;
 			return (0, react.createElement)("li", {
 				className: "imqw-timeline-row",
 				"data-direction": row.direction,
-				"data-compact": compact
+				"data-compact": compact,
+				"data-entry-id": row.id
 			}, (0, react.createElement)("span", {
 				className: "imqw-message-avatar",
 				"aria-hidden": true
-			}, !compact && [...sender][0]?.toUpperCase()), (0, react.createElement)("div", { className: "imqw-message-body" }, compact ? null : (0, react.createElement)("div", { className: "imqw-timeline-meta" }, (0, react.createElement)("strong", { title: sender }, sender), (0, react.createElement)("time", { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))), (0, react.createElement)("div", { className: "imqw-timeline-bubble" }, row.quote ? (0, react.createElement)("blockquote", null, row.quote.senderName ? (0, react.createElement)("strong", null, row.quote.senderName) : null, row.quote.text ? (0, react.createElement)("div", null, row.quote.text) : null, row.quote.attachments ? (0, react.createElement)("span", { className: "imqw-muted" }, `引用附件 · ${row.quote.attachments} 项`) : null) : null, row.text ? (0, react.createElement)("div", { className: "imqw-timeline-text" }, row.text) : null, imageCount > 0 ? (0, react.createElement)("div", { className: "imqw-message-images" }, Array.from({ length: imageCount }, (_, index) => {
+			}, !compact && [...sender][0]?.toUpperCase()), (0, react.createElement)("div", { className: "imqw-message-body" }, compact ? null : (0, react.createElement)("div", { className: "imqw-timeline-meta" }, (0, react.createElement)("strong", { title: sender }, sender), (0, react.createElement)("time", { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))), (0, react.createElement)("div", { className: "imqw-message-line" }, (0, react.createElement)("div", { className: "imqw-timeline-bubble" }, row.quote ? (0, react.createElement)("blockquote", null, row.quote.senderName ? (0, react.createElement)("strong", null, row.quote.senderName) : null, row.quote.text ? (0, react.createElement)("div", null, row.quote.displayText ?? row.quote.text) : null, row.quote.attachments ? (0, react.createElement)("span", { className: "imqw-muted" }, `引用附件 · ${row.quote.attachments} 项`) : null) : null, row.text ? (0, react.createElement)("div", { className: "imqw-timeline-text" }, row.displayText ?? row.text) : null, imageCount > 0 ? (0, react.createElement)("div", { className: "imqw-message-images" }, Array.from({ length: imageCount }, (_, index) => {
 				const query = new URLSearchParams({
 					appId,
 					scope,
@@ -572,25 +676,48 @@ window.__ModuleLoader__.load({
 					url: `${WORKBENCH_TIMELINE_PATH}?${query}`,
 					number: index + 1
 				});
-			})) : null, remaining > 0 ? (0, react.createElement)("div", { className: "imqw-muted" }, row.attachmentName ? `附件 · ${row.attachmentName}` : `附件 · ${remaining} 项`) : null), (0, react.createElement)("div", { className: "imqw-timeline-meta imqw-message-details" }, outbound ? (0, react.createElement)("span", { "data-status": row.status }, statusLabel[row.status]) : null, row.source ? (0, react.createElement)("span", null, sourceLabel[row.source]) : null, onReply ? (0, react.createElement)("button", {
+			})) : null, remaining > 0 ? (0, react.createElement)("div", { className: "imqw-muted" }, row.attachmentName ? `附件 · ${row.attachmentName}` : `附件 · ${remaining} 项`) : null), (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Menu, {
+				open: menuOpen,
+				items: actions,
+				portal: true,
+				align: outbound ? "end" : "start",
+				compact: true,
+				autoFocus: true,
+				onClose: () => setMenuOpen(false),
+				onSelect: (id) => {
+					setMenuOpen(false);
+					if (id === "quote") onReply?.(sender);
+					if (id === "session" && menuButton.current) openLinked?.(row, menuButton.current);
+					if (id === "details") setDetailsOpen((value) => !value);
+				},
+				anchor: (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+					ref: menuButton,
+					type: "button",
+					size: "sm",
+					variant: "ghost",
+					className: "imqw-message-action",
+					"aria-label": `${sender}的消息操作`,
+					title: "消息操作",
+					"aria-haspopup": "menu",
+					"aria-expanded": menuOpen,
+					onClick: () => setMenuOpen((open) => !open)
+				}, (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.IconEllipsisOutlineRegular, { size: 14 }))
+			})), showStatus || submissionFailed ? (0, react.createElement)("div", { className: "imqw-timeline-meta" }, (0, react.createElement)("span", { "data-status": submissionFailed ? "rejected" : row.status }, submissionFailed ? detail : statusLabel[row.status]), pendingReceipt ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				type: "button",
-				className: "imqw-message-action",
-				onClick: () => onReply(sender)
-			}, "引用回复") : null, linkedSession && openSession ? (0, react.createElement)("button", {
-				type: "button",
-				className: "imqw-message-action",
-				"aria-label": "打开关联 Session",
-				title: "打开关联 Session",
-				onClick: () => openSession(linkedSession)
-			}, "↗") : null), (0, react.createElement)("details", { className: "imqw-response-detail" }, (0, react.createElement)("summary", null, "响应详情"), outbound ? (0, react.createElement)("p", null, row.source ? `来源 · ${sourceLabel[row.source]}` : "来源未记录", (0, react.createElement)("br"), statusLabel[row.status], errorCode ? ` · ${errorCode}` : "") : (0, react.createElement)("p", null, detail), outbound && (row.status === "unknown" || row.status === "sending") ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-				type: "button",
-				variant: "outline",
+				variant: "ghost",
 				size: "sm",
 				disabled: checking,
 				onClick: () => {
 					queryReceipt();
 				}
-			}, checking ? "查询中…" : "查询回执") : null, receiptNote ? (0, react.createElement)("p", { role: "status" }, receiptNote) : null)));
+			}, checking ? "查询中…" : "查询回执") : null) : null, detailsOpen ? (0, react.createElement)("div", {
+				className: "imqw-response-detail",
+				role: "region",
+				"aria-label": "响应详情"
+			}, outbound ? (0, react.createElement)("p", null, row.source ? `来源 · ${sourceLabel[row.source]}` : "来源未记录", (0, react.createElement)("br"), statusLabel[row.status], errorCode ? ` · ${errorCode}` : "") : (0, react.createElement)("p", null, detail)) : null, receiptNote ? (0, react.createElement)("p", {
+				className: "imqw-response-detail",
+				role: "status"
+			}, receiptNote) : null));
 		}
 		function MessageImage({ url, number }) {
 			const [unavailable, setUnavailable] = (0, react.useState)(false);
@@ -610,14 +737,18 @@ window.__ModuleLoader__.load({
 			}));
 		}
 		//#endregion
+		//#region src/shared/workbench-extension.ts
+		const QQ_HISTORY_VIEW_ID = "qq-history";
+		//#endregion
 		//#region src/client/history-extension.ts
 		const name = "im-qqbot-workbench-history-client";
 		const inject = ["qqbotWorkbench"];
 		function apply(ctx) {
 			ctx.effect(() => ctx.qqbotWorkbench.registerView({
-				id: "qq-history",
+				id: QQ_HISTORY_VIEW_ID,
 				title: "QQ 记录",
-				component: QqTimelineView
+				component: QqTimelineView,
+				refreshable: true
 			}));
 		}
 		//#endregion

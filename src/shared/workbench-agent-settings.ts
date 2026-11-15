@@ -9,6 +9,7 @@ export interface WorkbenchToolChoice {
 }
 
 export const WORKBENCH_BASE_PERMISSIONS = ['read-only', 'workspace-write', 'danger-full-access'] as const;
+export const WORKBENCH_TOOL_LIMIT = 512;
 
 export interface WorkbenchAgentSettings {
   model: ModelRoute | null;

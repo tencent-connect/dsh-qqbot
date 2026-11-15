@@ -9,10 +9,12 @@ import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost }
 import { createQQFixture } from './qq-fixture.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
 
-const [source, corePackage, historyPackage, dir, expected = 'fixed'] = process.argv.slice(2);
+const [source, corePackage, historyPackage, dir, expected = 'fixed', browser] = process.argv.slice(2);
 assertNodeVersion();
 assert([source, corePackage, historyPackage, dir].every(value => value && isAbsolute(value))
-  && ['baseline', 'fixed'].includes(expected), 'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed]');
+  && ['baseline', 'fixed'].includes(expected)
+  && (browser === undefined || expected === 'fixed' && browser === '--browser'),
+'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed [--browser]]');
 await mkdir(dir, { mode: 0o700 });
 const home = join(dir, 'home');
 const workspace = join(dir, 'workspace');
@@ -266,6 +268,10 @@ try {
   assert.equal(await readFile(join(workspace, 'native-restored.txt'), 'utf8'), 'fixture only\n');
   report.cases.nativeSwitchRestored = 'A fresh turn can write after the native permission returns within the cap';
   report.sessions = { group, direct, child };
+  if (browser === '--browser') {
+    const { verifyWorkbenchBrowser } = await import('./workbench-browser.mjs');
+    report.browser = await verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until });
+  }
   assert.equal(qq.state.unexpectedRequests, 0);
 } finally {
   for (const gate of controls) gate.resolve([]);

@@ -1,5 +1,5 @@
 import { createElement as h, forwardRef, useEffect, useImperativeHandle, useRef, useState, type ChangeEvent, type FormEvent, type KeyboardEvent, type ReactNode } from 'react';
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconPaperclipOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import { QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, type TimelineEntry, type WorkbenchSendResult } from '../shared/workbench-timeline-protocol.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
@@ -139,7 +139,8 @@ export const QqComposer = forwardRef<QqComposerHandle, {
       input.current?.focus();
     },
   }));
-  return h('form', { className: 'imqw-composer', onSubmit: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); send(); } },
+  const feedback = status || disabledReason || '';
+  return h('form', { className: 'imqw-composer', 'aria-label': '发送到 QQ', onSubmit: (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); send(); } },
     h('input', {
       ref: fileInput, type: 'file', hidden: true, 'aria-label': '选择 QQ 附件', disabled: editLocked,
       onChange: (event: ChangeEvent<HTMLInputElement>) => {
@@ -166,19 +167,21 @@ export const QqComposer = forwardRef<QqComposerHandle, {
         edit({ text: draft.text }); setStatus(''); input.current?.focus();
       } }, '取消引用'),
     ) : null,
-    h('div', { className: 'imqw-composer-input' },
-      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: editLocked || !!draft.quote,
-        onClick: () => fileInput.current?.click(), title: draft.quote ? '取消引用后可添加附件' : '每次可发送一个附件，最多 4 MiB' }, '附件'),
-      h('textarea', {
-        ref: input, 'aria-label': '发送到 QQ 的消息', rows: 1, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
-        value: draft.text, readOnly: !!operation, disabled: !!disabledReason,
-        placeholder: disabledReason || `以 ${robotName} 的身份发送到 QQ`,
-        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit({ ...draft, text: event.currentTarget.value }); setStatus(''); }, onKeyDown,
-      }),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: editLocked || (!draft.text.trim() && !draft.attachment) }, '发送'),
+    h('textarea', {
+      ref: input, 'aria-label': '发送到 QQ 的消息', rows: 2, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
+      value: draft.text, readOnly: !!operation, disabled: !!disabledReason, placeholder: '输入消息',
+      onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit({ ...draft, text: event.currentTarget.value }); setStatus(''); }, onKeyDown,
+    }),
+    h('div', { className: 'imqw-composer-toolbar' },
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: editLocked || !!draft.quote,
+        onClick: () => fileInput.current?.click(), title: draft.quote ? '取消引用后可添加附件' : '每次可发送一个附件，最多 4 MiB',
+      }, h(IconPaperclipOutlineRegular, { size: 15 }), '附件'),
+      h('span', { className: 'imqw-compose-as imqw-muted', title: robotName }, robotName),
+      h('span', { className: 'imqw-compose-shortcut imqw-muted' }, 'Shift + Enter 换行'),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', className: 'imqw-send', disabled: editLocked || (!draft.text.trim() && !draft.attachment) }, '发送到 QQ'),
     ),
-    h('div', { className: 'imqw-composer-footer' },
-      h('span', { className: 'imqw-muted', role: 'status' }, status || (disabledReason ? '' : '直接发到 QQ · Shift + Enter 换行')),
+    h('div', { className: 'imqw-composer-feedback', hidden: !feedback && (!operation || busy) },
+      h('span', { className: 'imqw-muted', role: 'status' }, feedback),
       operation && !busy ? h(Button, { type: 'button', variant: 'outline', size: 'sm', onClick: () => { void run(operation); } }, '查询回执') : null,
       operation && !busy && uncertain ? h(Button, {
         type: 'button', variant: 'ghost', size: 'sm', onClick: () => {

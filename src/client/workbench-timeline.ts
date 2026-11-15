@@ -1,5 +1,5 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { Button, IconEllipsisOutlineRegular, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
@@ -57,7 +57,7 @@ function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): 
   };
 }
 
-export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }: QqWorkbenchViewProps): ReactNode {
+export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession, refreshKey }: QqWorkbenchViewProps): ReactNode {
   const { scope, openId, recording } = peer;
   const key = JSON.stringify([appId, scope, openId]);
   const [resume] = useState(() => readingPositions.get(key));
@@ -135,7 +135,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
     };
     void read();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [appId, scope, openId, refresh]);
+  }, [appId, scope, openId, refresh, refreshKey]);
 
   useLayoutEffect(() => {
     const node = list.current;
@@ -203,10 +203,14 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   };
   const entries = page?.entries ?? [];
   return h('section', { className: 'imqw-timeline', 'aria-label': 'QQ 消息' },
-    h('div', { className: 'imqw-timeline-header' },
-      h('span', { className: 'imqw-muted' }, !recording ? '消息保存已关闭' : 'QQ 消息'),
-      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '刷新消息')),
-    error || page?.incomplete ? h('p', { role: 'alert', className: 'imqb-error' }, error || '消息记录可能不完整。') : null,
+    !recording || refreshKey === undefined ? h('div', { className: 'imqw-timeline-notice' },
+      !recording ? h('span', { className: 'imqw-muted' }, '消息保存已关闭') : null,
+      refreshKey === undefined ? h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '刷新消息') : null,
+    ) : null,
+    error || page?.incomplete ? h('div', { className: 'imqw-timeline-notice' },
+      h('p', { role: 'alert', className: 'imqb-error' }, error || '消息记录可能不完整。'),
+      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '重试'),
+    ) : null,
     h('div', { className: 'imqw-timeline-scroll', ref: list, onScroll: () => {
       const node = list.current;
       if (!node) return;
@@ -245,13 +249,20 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
   onReply?: (sender: string) => void;
   compact: boolean;
 }): ReactNode {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [checking, setChecking] = useState(false);
   const [receiptNote, setReceiptNote] = useState('');
+  const menuButton = useRef<HTMLButtonElement>(null);
   const outbound = row.direction === 'outbound';
   const sender = outbound ? robotName : peerName || row.senderName
     || (scope === 'c2c' ? `私聊 ${openId.slice(-8)}` : row.senderId ? `成员 ${row.senderId.slice(-8)}` : 'QQ 成员');
   const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(' · ');
   const linkedSession = row.sessionId;
+  const actions: MenuEntry[] = [];
+  if (onReply) actions.push({ id: 'quote', label: '引用回复' });
+  if (linkedSession && openLinked) actions.push({ id: 'session', label: '打开关联 Session' });
+  actions.push({ id: 'details', label: detailsOpen ? '收起响应详情' : '响应详情' });
   const queryReceipt = async (): Promise<void> => {
     setChecking(true);
     setReceiptNote('');
@@ -265,6 +276,9 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
     }
   };
   const detail = row.inboundOutcome ? inboundLabel[row.inboundOutcome] : statusLabel.received;
+  const pendingReceipt = outbound && (row.status === 'unknown' || row.status === 'sending');
+  const showStatus = outbound && row.status !== 'accepted';
+  const submissionFailed = !outbound && row.inboundOutcome === 'submit-failed';
   const imageCount = row.imageCount ?? 0;
   const remaining = (row.attachments ?? 0) - imageCount;
   return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction, 'data-compact': compact, 'data-entry-id': row.id },
@@ -272,7 +286,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
     h('div', { className: 'imqw-message-body' },
       compact ? null : h('div', { className: 'imqw-timeline-meta' },
         h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))),
-      h('div', { className: 'imqw-timeline-bubble' },
+      h('div', { className: 'imqw-message-line' }, h('div', { className: 'imqw-timeline-bubble' },
         row.quote ? h('blockquote', null,
           row.quote.senderName ? h('strong', null, row.quote.senderName) : null,
           row.quote.text ? h('div', null, row.quote.displayText ?? row.quote.text) : null,
@@ -284,22 +298,33 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
             return h(MessageImage, { key: index, url: `${WORKBENCH_TIMELINE_PATH}?${query}`, number: index + 1 });
           })) : null,
         remaining > 0 ? h('div', { className: 'imqw-muted' }, row.attachmentName ? `附件 · ${row.attachmentName}` : `附件 · ${remaining} 项`) : null),
-      h('div', { className: 'imqw-timeline-meta imqw-message-details' },
-        outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status]) : null,
-        row.source ? h('span', null, sourceLabel[row.source]) : null,
-        onReply ? h('button', { type: 'button', className: 'imqw-message-action', onClick: () => onReply(sender) }, '引用回复') : null,
-        linkedSession && openLinked ? h('button', { type: 'button', className: 'imqw-message-action',
-          'aria-label': '打开关联 Session', title: '打开关联 Session', onClick: (event: MouseEvent<HTMLButtonElement>) => { void openLinked(row, event.currentTarget); } }, '↗') : null),
-      h('details', { className: 'imqw-response-detail' },
-        h('summary', null, '响应详情'),
+        h(Menu, {
+          open: menuOpen, items: actions, portal: true, align: outbound ? 'end' : 'start', compact: true, autoFocus: true,
+          onClose: () => setMenuOpen(false),
+          onSelect: id => {
+            setMenuOpen(false);
+            if (id === 'quote') onReply?.(sender);
+            if (id === 'session' && menuButton.current) void openLinked?.(row, menuButton.current);
+            if (id === 'details') setDetailsOpen(value => !value);
+          },
+          anchor: h(Button, { ref: menuButton, type: 'button', size: 'sm', variant: 'ghost', className: 'imqw-message-action',
+            'aria-label': `${sender}的消息操作`, title: '消息操作', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen,
+            onClick: () => setMenuOpen(open => !open),
+          }, h(IconEllipsisOutlineRegular, { size: 14 })),
+        }),
+      ),
+      showStatus || submissionFailed ? h('div', { className: 'imqw-timeline-meta' },
+        h('span', { 'data-status': submissionFailed ? 'rejected' : row.status }, submissionFailed ? detail : statusLabel[row.status]),
+        pendingReceipt ? h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: checking,
+          onClick: () => { void queryReceipt(); } }, checking ? '查询中…' : '查询回执') : null,
+      ) : null,
+      detailsOpen ? h('div', { className: 'imqw-response-detail', role: 'region', 'aria-label': '响应详情' },
         outbound
           ? h('p', null, row.source ? `来源 · ${sourceLabel[row.source]}` : '来源未记录',
             h('br'), statusLabel[row.status], errorCode ? ` · ${errorCode}` : '')
           : h('p', null, detail),
-        outbound && (row.status === 'unknown' || row.status === 'sending')
-          ? h(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: checking,
-            onClick: () => { void queryReceipt(); } }, checking ? '查询中…' : '查询回执') : null,
-        receiptNote ? h('p', { role: 'status' }, receiptNote) : null),
+      ) : null,
+      receiptNote ? h('p', { className: 'imqw-response-detail', role: 'status' }, receiptNote) : null,
     ),
   );
 }

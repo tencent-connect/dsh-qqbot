@@ -7,6 +7,6 @@ export const inject = ['qqbotWorkbench'];
 
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.qqbotWorkbench.registerView({
-    id: QQ_HISTORY_VIEW_ID, title: 'QQ 记录', component: QqTimelineView,
+    id: QQ_HISTORY_VIEW_ID, title: 'QQ 记录', component: QqTimelineView, refreshable: true,
   }));
 }
