@@ -32,14 +32,6 @@ interface SavedSidebarTabs {
   closeIn(sessionId: string, tabId: string): void;
 }
 
-function OpenWorkbenchSettings({ close, onOpen }: { close: () => void; onOpen: () => void }): null {
-  useEffect(() => {
-    onOpen();
-    close();
-  }, [close, onOpen]);
-  return null;
-}
-
 interface ProfileSettingsRemote {
   describe(): Promise<{ ok: boolean; value?: { hasDocument: boolean } }>;
   openSettingsDocument(): Promise<{ ok: boolean }>;
@@ -321,10 +313,6 @@ export function apply(ctx: Context): void {
         { name: 'main', key: IM_MAIN_PANEL_ID },
         QQBotPage,
       ));
-      const stopSettings = pageSlots.inject('settings.section', () => pageSlots.register({
-        name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人',
-        inject: () => ({ onOpen: openRobotSettings }),
-      }, OpenWorkbenchSettings));
       const stopActions = pageSlots.inject('plugins.detail.actions', () => pageSlots.register(
         {
           name: 'plugins.detail.actions', id: 'im-qqbot-open', order: 20,
@@ -355,7 +343,6 @@ export function apply(ctx: Context): void {
         for (const stop of stopReturn) stop();
         stopActions();
         stopSidebar();
-        stopSettings();
         stopMain();
       };
     });
