@@ -2,13 +2,13 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { RobotConfigConflictError, RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
+import { RobotConfigConflictError, RobotConfigStore, type BoundRobotConfig } from './robot-config.ts';
 
 const primary = { appId: 'fixture-primary', enabled: true, alias: '老绑定', kind: 'primary', revision: 0 } as const;
 const additional = {
   appId: 'fixture-additional', enabled: false, alias: '第二台', revision: 0, kind: 'additional', appSecret: 'fixture-secret',
   access: { c2cMode: 'allowlist', groupMode: 'disabled', commandMode: 'open', c2cAllow: ['same-peer'], groupAllow: [] },
-} satisfies RobotConfigRecord;
+} satisfies BoundRobotConfig;
 
 describe('robot account catalog', () => {
   let root: string;
@@ -44,6 +44,25 @@ describe('robot account catalog', () => {
     expect(() => store.save({ ...saved, alias: 'stale draft' })).toThrow(RobotConfigConflictError);
     expect(store.get(saved.appId)).toMatchObject({ revision: 2, access: { c2cAllow: [] } });
     expect(() => store.save({ ...primary, appId: saved.appId, revision: 2 })).toThrow(RobotConfigConflictError);
+  });
+
+  it('removes only the selected account and rejects stale requests after it is re-added', () => {
+    const kept = store.save(primary);
+    const original = store.save(additional);
+    expect(() => store.removeAdditional(kept.appId, kept.revision)).toThrow(RobotConfigConflictError);
+    expect(() => store.removeAdditional(original.appId, original.revision + 1)).toThrow(RobotConfigConflictError);
+    store.removeAdditional(original.appId, original.revision);
+    const reopened = new RobotConfigStore(path);
+    expect(reopened.list()).toEqual([kept, {
+      kind: 'unbound', appId: additional.appId, alias: additional.alias, enabled: false,
+      access: additional.access, revision: original.revision,
+    }]);
+    expect(readFileSync(path, 'utf8')).not.toContain('fixture-secret');
+    const rebound = reopened.save(additional, original.revision);
+    expect(rebound.revision).toBeGreaterThan(original.revision);
+    expect(() => store.removeAdditional(original.appId, original.revision)).toThrow(RobotConfigConflictError);
+    expect(() => store.save(original)).toThrow(RobotConfigConflictError);
+    expect(store.list()).toEqual([kept, rebound]);
   });
 
   it.each([

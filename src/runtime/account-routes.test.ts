@@ -27,7 +27,11 @@ function service(): AccountAccessService {
 }
 
 describe('pairing routes during reload', () => {
-  it.each([PAIR_RENAME_PATH, PAIR_MANUAL_PATH])('rejects an already dispatched %s request after route disposal without restoring a revoked member', async path => {
+  it.each([
+    [PAIR_RENAME_PATH, true, 503],
+    [PAIR_MANUAL_PATH, true, 503],
+    [PAIR_MANUAL_PATH, false, 409],
+  ] as const)('rejects a stale %s request after revocation (route disposed: %s)', async (path, disposeRoute, expected) => {
     const old = service(); old.addManualMember('owner', 'alice:Alice');
     const routes = new Map<string, WebRoute>();
     let dispose = (): void => {};
@@ -36,7 +40,7 @@ describe('pairing routes during reload', () => {
       effect: (effect: () => () => void) => { dispose = effect(); },
     };
     const context = { inject: (_dependencies: string[], callback: (scope: typeof scoped) => void) => callback(scoped) };
-    registerAccountRoutes(context as unknown as Context, old, () => []);
+    registerAccountRoutes(context as unknown as Context, () => ({ service: old, enabled: true, revision: 0 }), () => []);
     let arrived = (): void => {};
     const dispatched = new Promise<void>(resolve => { arrived = resolve; });
     const requests = new Set<Promise<void>>();
@@ -61,10 +65,10 @@ describe('pairing routes during reload', () => {
     try {
       req.write(body.slice(0, 1));
       await dispatched;
-      dispose();
+      if (disposeRoute) dispose();
       const current = service(); current.revokePair('alice', 'owner');
       req.end(body.slice(1));
-      expect(await response).toBe(503);
+      expect(await response).toBe(expected);
       expect(service().isOwner('alice')).toBe(false);
     } finally {
       req.destroy(); dispose();

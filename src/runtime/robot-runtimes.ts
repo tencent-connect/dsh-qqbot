@@ -11,10 +11,11 @@ import type { WorkbenchRobot, WorkbenchRobotPatch } from '../shared/workbench-pr
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { registerAccountRoutes } from './account-routes.ts';
 import { AccountAccessService } from './account-service.ts';
-import { RobotConfigStore, type RobotConfigRecord } from './robot-config.ts';
+import { RobotConfigStore, type BoundRobotConfig } from './robot-config.ts';
 import { WorkbenchRequestError } from './workbench-routes.ts';
 import { QqTimeline } from './qq-timeline.ts';
 import { QqDisplayNames } from './qq-display-names.ts';
+import { unbindProfileCredentials } from '../setup/persist.ts';
 import { ConversationSettingsStore, peerKey } from './workbench-conversations.ts';
 import { legacyAgentSettings, validateAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -26,7 +27,7 @@ import { ManualQqSender, ManualSendConflict, type ManualAttachment } from '../tr
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
 
-function robotMediaRoot(appId: string, kind: RobotConfigRecord['kind']): string {
+function robotMediaRoot(appId: string, kind: BoundRobotConfig['kind']): string {
   return kind === 'primary' ? MEDIA_ROOT : join(PLUGIN_HOME, 'robots', appId, 'media');
 }
 
@@ -43,6 +44,7 @@ export class RobotRuntimes {
   readonly timeline: QqTimeline;
   readonly toolPolicies: WorkbenchToolPolicies;
   private readonly names: QqDisplayNames;
+  private readonly additionalAccess = new Map<string, AccountAccessService>();
   private readonly slots = new Map<string, GatewaySlot>();
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
@@ -64,6 +66,16 @@ export class RobotRuntimes {
       this.closed = true;
       for (const slot of this.slots.values()) this.deactivate(slot);
     });
+    registerAccountRoutes(ctx, requested => {
+      const appId = requested ?? this.primary?.config.appId;
+      if (this.closed || appId === undefined) return undefined;
+      const record = this.records().find(entry => entry.appId === appId);
+      if (!record) return undefined;
+      return { service: this.accountAccess(record), enabled: record.enabled, revision: record.revision };
+    }, ({ service }) => {
+      const manager = this.slots.get(service.config.appId)?.runtime?.manager;
+      return manager ? describeCommands({ manager, config: service.config, logger: this.logger }) : [];
+    });
     registerSendFileTool(ctx, {
       runtimes: () => [...this.slots.values()].flatMap(slot => slot.runtime ? [slot.runtime] : []),
       ownerOf: sessionId => {
@@ -82,10 +94,6 @@ export class RobotRuntimes {
     if (this.closed || this.primary) return;
     const access = new AccountAccessService(config, this.logger);
     this.primary = { config, access };
-    registerAccountRoutes(this.ctx, access, () => {
-      const manager = this.slots.get(config.appId)?.runtime?.manager;
-      return manager ? describeCommands({ manager, config, logger: this.logger }) : [];
-    });
   }
 
   async start(): Promise<void> {
@@ -133,8 +141,8 @@ export class RobotRuntimes {
     const record = this.records().find(item => item.appId === appId);
     if (!record) return undefined;
     const manager = this.slots.get(appId)?.runtime?.manager;
-    const members = (record.kind === 'primary' ? this.primary?.access : manager?.accountAccess)?.store;
-    const profiles = members?.memberProfiles();
+    const members = this.accountAccess(record).store;
+    const profiles = members.memberProfiles();
     const config = this.configFor(appId);
     return {
       mediaRoot: robotMediaRoot(appId, record.kind),
@@ -148,10 +156,18 @@ export class RobotRuntimes {
       },
       validateAgent: (next: WorkbenchAgentSettings, current: WorkbenchAgentSettings) => validateAgentSettings(this.ctx, config, next, current),
       peerName: (scope: ChatScope, openId: string) => {
+        const legacy = members?.peerName(scope, openId);
+        if (legacy?.alias) return legacy.alias;
         const profile = profiles && Object.hasOwn(profiles, openId) ? profiles[openId] : undefined;
         if (profile?.scene === scope && profile.nickname) return profile.nickname.slice(0, 300);
-        const legacy = members?.peerName(scope, openId);
-        return legacy?.alias || this.names.peer(appId, scope, openId) || legacy?.name || '';
+        return this.names.peer(appId, scope, openId) || legacy?.name || '';
+      },
+      mentionName: (groupId: string, openId: string) => {
+        const botName = this.names.botMention(appId, groupId, openId);
+        if (openId === appId || botName) {
+          return record.alias || (botName !== '机器人' && botName) || (record.kind === 'primary' ? '主机器人' : `机器人 ${appId}`);
+        }
+        return this.names.peer(appId, 'c2c', openId);
       },
     };
   }
@@ -269,6 +285,9 @@ export class RobotRuntimes {
   async save(patch: WorkbenchRobotPatch): Promise<WorkbenchRobot> {
     if (this.closed || !this.store) throw new WorkbenchRequestError(503, 'QQ 账号配置当前不可写');
     const record = this.records().find(item => item.appId === patch.appId);
+    if (record && patch.revision === null) {
+      throw new WorkbenchRequestError(409, '这个机器人已添加，请在机器人列表中选择它。');
+    }
     if ((record?.revision ?? null) !== patch.revision) {
       throw new WorkbenchRequestError(409, 'QQ 账号配置已更新，请重新加载后保存');
     }
@@ -276,10 +295,16 @@ export class RobotRuntimes {
       throw new WorkbenchRequestError(400, '请在原账号设置中修改绑定凭据和名单');
     }
     if (!record && !patch.appSecret) throw new WorkbenchRequestError(400, '添加机器人需要 AppSecret');
+    const detached = !record ? this.store.get(patch.appId) : undefined;
+    const bindingChanges = record && ((record.enabled && patch.enabled === false)
+      || (record.kind === 'additional' && patch.appSecret !== undefined && patch.appSecret !== record.appSecret));
+    if (bindingChanges) this.accountAccess(record).pairing.endAll();
 
+    const unboundAccess = detached?.kind === 'primary' ? detached.unboundAccess : detached?.kind === 'unbound' ? detached.access : undefined;
+    const savedAccess = record?.kind === 'additional' ? record.access : unboundAccess;
     const common = {
       appId: patch.appId,
-      alias: patch.alias ?? record?.alias ?? '',
+      alias: patch.alias ?? record?.alias ?? detached?.alias ?? '',
       enabled: patch.enabled ?? record?.enabled ?? true,
       revision: record?.revision ?? 0,
     };
@@ -290,30 +315,65 @@ export class RobotRuntimes {
           kind: 'additional',
           appSecret: patch.appSecret ?? (record?.kind === 'additional' ? record.appSecret : ''),
           access: {
-            ...(record?.kind === 'additional' ? record.access : {
-              c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'open',
-            } as const),
+            c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'open',
+            ...savedAccess,
             ...patch.access,
+            ...(unboundAccess && patch.access?.c2cAllow ? {
+              c2cMode: unboundAccess.c2cMode,
+              c2cAllow: [...new Set([...unboundAccess.c2cAllow, ...patch.access.c2cAllow])],
+            } : {}),
           },
-        });
+        }, detached?.revision);
+    if (bindingChanges) this.additionalAccess.delete(saved.appId);
     const slot = this.slots.get(saved.appId);
     if (slot && !this.matches(slot, saved)) this.deactivate(slot);
-    await this.sync(saved.appId);
+    const sync = this.sync(saved.appId);
+    if (saved.enabled) await sync;
+    else void sync.catch(() => this.logger.warn(`无法完成 QQ 网关清理（AppID ${saved.appId}）。`));
     const current = this.records().find(item => item.appId === saved.appId);
     if (!current) throw new WorkbenchRequestError(409, 'QQ 账号配置已更新');
     return this.view(current);
   }
 
-  private records(): RobotConfigRecord[] {
-    const entries = this.store?.list() ?? [];
-    const primary = this.primary?.config.appId;
-    const extras = entries.filter(entry => entry.kind === 'additional' && entry.appId !== primary);
-    if (primary === undefined) return extras;
-    const entry = entries.find(row => row.appId === primary && row.kind === 'primary');
-    return [entry ?? { kind: 'primary', appId: primary, alias: '', enabled: true, revision: 0 }, ...extras];
+  remove(appId: string, revision: number, profileDir: string): void {
+    if (this.closed || !this.store) throw new WorkbenchRequestError(503, 'QQ 账号配置当前不可写。');
+    const record = this.records().find(item => item.appId === appId);
+    if (!record) return;
+    if (record.revision !== revision) {
+      throw new WorkbenchRequestError(409, '机器人配置已变化，请重新确认后再解绑。');
+    }
+    this.accountAccess(record).pairing.endAll();
+    if (record.kind === 'primary') {
+      // Fence old requests before removing the binding from the profile. The
+      // metadata row can outlive the credentials across a host reload.
+      const access = this.accountAccess(record).currentAccess();
+      this.store.save({ ...record, unboundAccess: { ...access, commandMode: access.commandMode ?? 'open' } });
+      if (!unbindProfileCredentials(profileDir, this.logger, appId)) {
+        throw new WorkbenchRequestError(409, '无法解绑主机器人，请检查当前 profile 的凭据配置。');
+      }
+      this.primary = undefined;
+    } else {
+      this.store.removeAdditional(appId, revision);
+      this.additionalAccess.delete(appId);
+    }
+    const slot = this.slots.get(appId);
+    if (slot) this.deactivate(slot);
+    // Admission stops synchronously. Fiber disposal (including a profile
+    // reload for the primary) can wait for work unrelated to this request.
+    void this.sync(appId).catch(() => this.logger.warn(`无法完成 QQ 网关清理（AppID ${appId}）。`));
   }
 
-  private view(record: RobotConfigRecord): WorkbenchRobot {
+  private records(): BoundRobotConfig[] {
+    const entries = this.store?.list() ?? [];
+    const primary = this.primary?.config.appId;
+    const extras = entries.filter(entry => entry.kind === 'additional').filter(entry => entry.appId !== primary);
+    if (primary === undefined) return extras;
+    const entry = entries.find(row => row.kind === 'primary' && row.appId === primary);
+    if (entry?.kind === 'primary') return [entry, ...extras];
+    return [{ kind: 'primary', appId: primary, alias: '', enabled: true, revision: 0 }, ...extras];
+  }
+
+  private view(record: BoundRobotConfig): WorkbenchRobot {
     const access = record.kind === 'additional' ? record.access : this.primary!.access.currentAccess();
     return {
       appId: record.appId,
@@ -331,7 +391,7 @@ export class RobotRuntimes {
     slot.runtime?.deactivate();
   }
 
-  private matches(slot: GatewaySlot, record: RobotConfigRecord): boolean {
+  private matches(slot: GatewaySlot, record: BoundRobotConfig): boolean {
     return record.enabled && !slot.stopped
       && (record.kind === 'primary' || slot.config.appSecret === record.appSecret);
   }
@@ -365,23 +425,33 @@ export class RobotRuntimes {
         await this.mount(primary.config, primary.access);
         return;
       }
-      const config = this.configFor(appId);
-      const read = () => {
-        const current = this.store?.get(appId);
-        if (current?.kind !== 'additional') throw new Error('QQ 账号配置已变更');
-        return current;
-      };
-      const access = new AccountAccessService(config, this.logger, { access: {
-        read: () => read().access,
-        update: update => {
-          const current = read();
-          this.store!.save({ ...current, access: update(current.access) });
-        },
-      } });
-      await this.mount(config, access, robotMediaRoot(appId, record.kind));
+      await this.mount(this.configFor(appId), this.accountAccess(record), robotMediaRoot(appId, record.kind));
     } catch {
       this.logger.error(`QQ 网关初始化失败（AppID ${appId}）`);
     }
+  }
+
+  private accountAccess(record: BoundRobotConfig): AccountAccessService {
+    if (record.kind === 'primary') return this.primary!.access;
+    const { appId } = record;
+    const cached = this.additionalAccess.get(appId);
+    if (cached) return cached;
+    const read = () => {
+      const current = this.store?.get(appId);
+      if (current?.kind !== 'additional' || current.appSecret !== record.appSecret) {
+        throw new Error('QQ 账号配置已变更');
+      }
+      return current;
+    };
+    const service = new AccountAccessService(this.configFor(appId), this.logger, { access: {
+      read: () => read().access,
+      update: change => {
+        const current = read();
+        this.store!.save({ ...current, access: change(current.access) });
+      },
+    } });
+    this.additionalAccess.set(appId, service);
+    return service;
   }
 
   private async mount(config: ImQQBotConfig, access: AccountAccessService, mediaRoot?: string): Promise<void> {

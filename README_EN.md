@@ -43,9 +43,7 @@ No command line needed — everything happens inside the app:
 
 <img src="./assets/docs/install.png" alt="In-app plugin install" width="560" />
 
-2. **Connect**: avatar at the bottom-left → Settings → "QQ Bots" → scan the QR code with mobile QQ
-
-<img src="./assets/docs/setting.png" alt="Settings QR binding" width="560" />
+2. **Connect**: open "QQ Bots" in the left sidebar and scan the QR code with mobile QQ. To add another bot, click the plus button above the bot list.
 
 Credentials are saved automatically after the scan; later launches need no re-scan.
 

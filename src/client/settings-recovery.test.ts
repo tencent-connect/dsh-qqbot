@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 import { PAIR_ISSUE_PATH, PAIR_STATUS_PATH, type PairChallenge } from '../shared/pairing-protocol.ts';
 import type { ConfigWire } from './config-form-state.ts';
-import { ConfigPanel } from './config-panel.ts';
+import { AccessSettings, ConfigPanel } from './config-panel.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
 
 type Dependencies = readonly unknown[];
@@ -90,6 +90,8 @@ interface TestProps {
   onClick?: () => void;
   onChange?: (value: string) => void;
   onSubmit?: (event: { preventDefault(): void }) => void;
+  access?: Pick<NonNullable<ConfigWire['access']>, 'groupMode' | 'c2cMode' | 'commandMode'>;
+  onMode?: NonNullable<Parameters<typeof AccessSettings>[0]>['onMode'];
 }
 
 function find(tree: ReactNode, predicate: (props: TestProps) => boolean): ReactElement<TestProps> | undefined {
@@ -134,20 +136,20 @@ describe('QQ settings recovery', () => {
     }));
 
     const render = mount(() => ConfigPanel({ bindPhase: 'starting' }));
-    const mode = (label: string) => find(render(), props => props.label === label && !!props.onChange)!.props;
+    const accessSettings = () => find(render(), props => props.onMode !== undefined)!.props;
     const save = () => find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
     const refresh = () => find(render(), props => props.children === '刷新配置' && !!props.onClick)!.props.onClick!();
     render();
     await vi.advanceTimersByTimeAsync(0);
 
-    mode('斜杠命令').onChange!('disabled');
+    accessSettings().onMode!('commandMode', 'disabled');
     save();
     await vi.advanceTimersByTimeAsync(3000);
-    mode('群聊').onChange!('disabled');
+    accessSettings().onMode!('groupMode', 'disabled');
     refresh();
     render();
     await vi.advanceTimersByTimeAsync(0);
-    expect(mode('群聊').value).toBe('disabled');
+    expect(accessSettings().access?.groupMode).toBe('disabled');
 
     save();
     await vi.advanceTimersByTimeAsync(0);

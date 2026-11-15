@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type ReactNode } from 'react';
 import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { ChatScope } from '../types.ts';
 import {
@@ -7,17 +7,26 @@ import {
 import { fetchJson } from './http.ts';
 import {
   defaultModelLabel, defaultPresetLabel, findModel, modelChoiceId,
-  parseAgentPresets, parseModelCatalog, parsePermissionCatalog,
+  parseAgentPresets, parseModelCatalog, parsePermissionCatalog, sessionModelLabel,
   type ModelDirectory, type PermissionDirectory, type PresetChoice, type SelectorSource,
 } from './host-selectors.ts';
 import { QQSelect, type QQSelectOption } from './qq-select.ts';
 
 export interface AgentFormSource extends SelectorSource {
+  sessionModels?: SessionModelSource;
   workspaces(): readonly { path: string; title: string }[];
   addWorkspace?(): Promise<string | null>;
   localizePreset?(id: string): string | undefined;
   localizePermission?(id: string, name: string): string | undefined;
 }
+
+export interface SessionModelSource {
+  subscribe(listener: () => void): () => void;
+  read(id: string): unknown;
+  refresh(id: string): Promise<void> | undefined;
+}
+
+const noModelSubscription = () => () => {};
 
 interface Catalog {
   models: ModelDirectory | null;
@@ -123,11 +132,22 @@ function WorkbenchToolPicker({ tools, preset, disabled, onChange }: {
   );
 }
 
-export function WorkbenchAgentFields({ settings, source, disabled, onChange, placementOnly = false }: AgentFieldsProps & {
+export function WorkbenchAgentFields({ settings, source, disabled, onChange, placementOnly = false, conversationDefaults = false, currentSession }: AgentFieldsProps & {
   source?: AgentFormSource;
   placementOnly?: boolean;
+  conversationDefaults?: boolean;
+  currentSession?: { id: string; placement: string; archived: boolean; open?: () => void };
 }): ReactNode {
   const [catalog, retry] = useCatalog(source, placementOnly);
+  const modelSource = source?.sessionModels;
+  const sessionId = currentSession?.id;
+  const projection = useSyncExternalStore(
+    modelSource && sessionId ? modelSource.subscribe : noModelSubscription,
+    () => sessionId ? modelSource?.read(sessionId) : undefined,
+  );
+  useEffect(() => {
+    if (sessionId) void modelSource?.refresh(sessionId)?.catch(() => {});
+  }, [modelSource, sessionId]);
   const [adding, setAdding] = useState(false);
   const [workspaceError, setWorkspaceError] = useState('');
   const workspaceChange = useRef<typeof onChange | undefined>(undefined);
@@ -169,6 +189,16 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange, pla
     h('div', { className: 'imqw-field' }, h('span', null, label),
       h(QQSelect, { label, value, options, disabled: disabled || pending, onChange: onSelect }));
   return h('div', { className: 'imqw-agent-fields' },
+    currentSession ? h('div', { className: 'imqw-current-session' },
+      h('strong', null, currentSession.archived ? '当前 Session（已归档）' : '当前 Session'),
+      h('p', { className: 'imqw-muted' }, sessionModelLabel(projection, catalog.models) ?? '模型与推理强度请在原生会话查看'),
+      currentSession.placement ? h('p', { className: 'imqw-muted' }, currentSession.placement) : null,
+      currentSession.open ? h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: currentSession.open }, '在原生会话中调整') : null,
+    ) : null,
+    conversationDefaults ? h('div', { className: 'imqw-agent-default-heading' },
+      h('strong', null, '新建 Session 默认值'),
+      h('p', { className: 'imqw-muted' }, '模型、推理强度、预设、工作区和原生权限在新建时应用。自定义工具限制保存后生效。'),
+    ) : null,
     catalog.loading ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取 DSH 目录…') : null,
     catalog.errors.length ? h('div', { className: 'imqw-actions' }, h('p', { className: 'imqb-error', role: 'alert' }, catalog.errors.join(' · ')),
       h(Button, { type: 'button', variant: 'outline', size: 'sm', onClick: retry }, '重试目录')) : null,
@@ -207,7 +237,7 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange, pla
     !placementOnly && settings.tools !== undefined ? h('div', { className: 'imqw-agent-fields' },
       select('基础权限', settings.permission, baseOptions, permission => onChange({ permission })),
       h(WorkbenchToolPicker, { tools: settings.tools, preset: settings.preset, disabled, onChange: tools => onChange({ tools }) }),
-      h('p', { className: 'imqw-muted' }, '只开放已选工具，仍须遵守原生权限和审批。若当前原生权限高于基础权限，工具暂停使用。'),
+      h('p', { className: 'imqw-muted' }, '限制也适用于当前 Session。若原生权限高于基础权限，工具暂停使用。'),
     ) : null,
   );
 }
@@ -220,14 +250,14 @@ export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: Ag
         h('span', null, kind === 'group' ? '群聊补充提示词' : '私聊补充提示词'),
         h('textarea', { value: settings[key], rows: 3, maxLength: 80_000, disabled,
           onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ [key]: event.currentTarget.value }),
-        }));
+        }), scope ? h('small', { className: 'imqw-muted' }, '下次组装模型请求时读取。') : null);
     }),
     ...([
-      ['streaming', '私聊流式输出', '仅被动回复支持流式'],
+      ['streaming', '私聊流式输出', '下一轮开始生效，仅限被动回复。'],
       ['showToolResults', '显示工具成功结果', '仅在整轮失败时向 QQ 发送简短提示。'],
     ] as const).filter(([key]) => key !== 'streaming' || scope !== 'group').map(([key, label, hint]) =>
       h('div', { className: 'imqw-receiving', key },
-        h('span', { title: hint }, label),
+        h('div', null, h('span', null, label), h('p', { className: 'imqw-muted' }, hint)),
         h(Switch, { label, checked: settings[key], disabled, onChange: value => onChange({ [key]: value }) }),
       )),
   );

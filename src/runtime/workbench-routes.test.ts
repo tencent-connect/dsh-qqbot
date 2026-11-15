@@ -1,9 +1,9 @@
 import { Context } from '@deepseek-ai/cordis';
 import { describe, expect, it, vi } from 'vitest';
-import { WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOT_REMOVE_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
 import { BindingService, type ConnectFn } from '../setup/binding-service.ts';
 import { RobotConfigConflictError } from './robot-config.ts';
-import { registerWorkbenchRobotBinding, registerWorkbenchRoutes, WorkbenchRequestError } from './workbench-routes.ts';
+import { registerWorkbenchRobotBinding, registerWorkbenchRobotRemoval, registerWorkbenchRoutes, WorkbenchRequestError } from './workbench-routes.ts';
 
 interface TestRoute {
   path: string;
@@ -26,6 +26,7 @@ async function install(
   list: () => readonly WorkbenchRobot[],
   save?: (patch: WorkbenchRobotPatch) => WorkbenchRobot | Promise<WorkbenchRobot>,
   createBinding?: () => BindingService,
+  remove?: (appId: string, revision: number) => Promise<void>,
 ) {
   const ctx = new Context();
   const routes = new Map<string, TestRoute>();
@@ -39,15 +40,17 @@ async function install(
 
   const plugin = ctx.plugin(scope => {
     registerWorkbenchRoutes(scope, list, save);
+    if (remove) registerWorkbenchRobotRemoval(scope, remove);
     if (createBinding && save) registerWorkbenchRobotBinding(scope, async patch => save(patch), createBinding);
   });
   await plugin.await();
-  expect(routes.size).toBe(createBinding ? 2 : 1);
+  expect(routes.size).toBe(1 + Number(!!createBinding) + Number(!!remove));
   const route = routes.get(WORKBENCH_ROBOTS_PATH);
   if (!route) throw new Error('Robot route was not registered');
   return {
     route,
     binding: routes.get(WORKBENCH_ROBOT_BIND_PATH),
+    removal: routes.get(WORKBENCH_ROBOT_REMOVE_PATH),
     async dispose() {
       await plugin.dispose();
       await host.dispose();
@@ -57,6 +60,29 @@ async function install(
 }
 
 describe('workbench robot account route', () => {
+  it('accepts only valid, current account removal requests through the owner route', async () => {
+    const remove = vi.fn(async (_appId: string, revision: number) => {
+      if (revision !== robot.revision) throw new RobotConfigConflictError();
+    });
+    const { removal, dispose } = await install(() => [robot], undefined, undefined, remove);
+    if (!removal) throw new Error('Robot removal route was not registered');
+    const send = (body: unknown) => removal.fetch(new Request(
+      `http://dsh.internal${WORKBENCH_ROBOT_REMOVE_PATH}`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ));
+    try {
+      expect(removal.methods).toEqual(['POST']);
+      expect((await send({ appId: '../other', revision: 1 })).status).toBe(400);
+      expect((await send({ appId: robot.appId, revision: null })).status).toBe(400);
+      expect(remove).not.toHaveBeenCalled();
+      expect((await send({ appId: robot.appId, revision: 0 })).status).toBe(409);
+      expect(await (await send({ appId: robot.appId, revision: 1 })).json()).toEqual({ ok: true });
+      expect(remove).toHaveBeenLastCalledWith(robot.appId, 1);
+    } finally {
+      await dispose();
+    }
+    expect((await send({ appId: robot.appId, revision: 1 })).status).toBe(503);
+  });
   it('uses the owner-only exact registry and projects public fields even when the source carries credentials', async () => {
     const raw = { ...robot, appSecret: 'fixture-secret', access: { ...robot.access, appSecret: 'nested-secret' } };
     const save = vi.fn(() => raw);
@@ -200,7 +226,7 @@ describe('binding another workbench robot', () => {
   it('uses the same create-only write for manual binding and reports duplicate AppIDs', async () => {
     const { calls, createBinding } = connector();
     const save = vi.fn((patch: WorkbenchRobotPatch) => {
-      if (patch.appId === robot.appId) throw new WorkbenchRequestError(409, 'already exists');
+      if (patch.appId === robot.appId) throw new WorkbenchRequestError(409, '这个机器人已添加，请在机器人列表中选择它。');
       return { ...robot, primary: false, appId: patch.appId };
     });
     const { binding, dispose } = await install(() => [robot], save, createBinding);

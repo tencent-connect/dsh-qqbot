@@ -11,7 +11,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
 import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
-import { MAX_TIMELINE_IMAGES, QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { MAX_TIMELINE_IMAGES, QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH, type TimelineEntry } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -159,6 +159,7 @@ interface ConversationAccount {
   agentSettings?(scope: ChatScope, openId: string, existing: boolean): WorkbenchAgentSettings;
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
+  mentionName?(groupId: string, openId: string): string | undefined;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
   sessionChangePending?(scope: ChatScope, openId: string): boolean;
 }
@@ -248,14 +249,29 @@ async function parsePatch(request: Request): Promise<WorkbenchConversationPatch>
 }
 
 export function workbenchTimelineService(robots: Pick<RuntimeReader, 'conversationAccount' | 'timeline'>): QqbotTimelineService {
+  const displayMentions = (row: TimelineEntry, account: ConversationAccount, groupId: string): TimelineEntry => {
+    const format = (text: string) => text.replace(/<@!?([A-Za-z0-9_-]{1,256})>/g, (_, id: string) =>
+      `@${account.mentionName?.(groupId, id) || `成员 ${id.slice(-8)}`}`);
+    const displayText = format(row.text);
+    const quoteText = row.quote && format(row.quote.text);
+    return {
+      ...row,
+      ...(displayText === row.text ? {} : { displayText }),
+      ...(row.quote && quoteText !== row.quote.text ? { quote: { ...row.quote, displayText: quoteText } } : {}),
+    };
+  };
   return {
     timelinePage({ appId, scope, openId }, before) {
-      if (!robots.conversationAccount(appId)) return undefined;
-      return robots.timeline.page(appId, { scope, targetId: openId }, before);
+      const account = robots.conversationAccount(appId);
+      if (!account) return undefined;
+      const page = robots.timeline.page(appId, { scope, targetId: openId }, before);
+      return page && scope === 'group' ? { ...page, entries: page.entries.map(row => displayMentions(row, account, openId)) } : page;
     },
     timelineEntry({ appId, scope, openId }, entryId) {
-      if (!robots.conversationAccount(appId)) return undefined;
-      return robots.timeline.entry(appId, { scope, targetId: openId }, entryId);
+      const account = robots.conversationAccount(appId);
+      if (!account) return undefined;
+      const row = robots.timeline.entry(appId, { scope, targetId: openId }, entryId);
+      return row && scope === 'group' ? displayMentions(row, account, openId) : row;
     },
     async timelineImage({ appId, scope, openId }, entryId, index) {
       const account = robots.conversationAccount(appId);

@@ -363,6 +363,7 @@ export function persistCredentialsToProfile(
 export function removeCredentialsFromProfile(
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
+  expectedAppId?: string,
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) return false;
@@ -371,6 +372,7 @@ export function removeCredentialsFromProfile(
     const ok = editProfilePatch(
       profileDir,
       ({ config }) => {
+        checkedAppId(config, expectedAppId);
         if (config.has('appId')) config.delete('appId');
         if (config.has('appSecret')) config.delete('appSecret');
         return true;
@@ -393,6 +395,17 @@ export function removeCredentialsFromProfile(
     log.warn(`移除凭据失败: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+}
+
+export function unbindProfileCredentials(
+  profileDir?: string,
+  logger?: Logger,
+  expectedAppId?: string,
+): boolean {
+  if (!removeCredentialsFromProfile(profileDir, logger, expectedAppId)) return false;
+  delete process.env.QQBOT_APPID;
+  delete process.env.QQBOT_SECRET;
+  return true;
 }
 
 /**

@@ -28,11 +28,28 @@ export class QqDisplayNames {
   }
 
   peer(appId: string, scope: ChatScope, openId: string): string | undefined {
-    return this.names.get(JSON.stringify([appId, scope, openId]));
+    return this.names.get(JSON.stringify([appId, scope, openId]))
+      ?? (scope === 'c2c' ? this.names.get(JSON.stringify([appId, 'group-member', openId])) : undefined);
   }
 
   savePeer(appId: string, scope: ChatScope, openId: string, name: unknown): void {
     this.save(JSON.stringify([appId, scope, openId]), name);
+  }
+
+  saveGroupMember(appId: string, openId: string, value: unknown): void {
+    const name = displayName(value);
+    if (openId && name && name !== openId) this.save(JSON.stringify([appId, 'group-member', openId]), name);
+  }
+
+  saveBotIdentity(appId: string, openId: unknown, value: unknown, groupId?: string): void {
+    if (typeof openId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(openId)) return;
+    const key = JSON.stringify([appId, 'bot-mention', openId, groupId ?? '']);
+    this.save(key, displayName(value) ?? this.names.get(key) ?? '机器人');
+  }
+
+  botMention(appId: string, groupId: string, openId: string): string | undefined {
+    return this.names.get(JSON.stringify([appId, 'bot-mention', openId, '']))
+      ?? this.names.get(JSON.stringify([appId, 'bot-mention', openId, groupId]));
   }
 
   private save(key: string, value: unknown): void {

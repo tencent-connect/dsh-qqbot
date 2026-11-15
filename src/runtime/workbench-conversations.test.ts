@@ -7,7 +7,7 @@ import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
 import { WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
-import { ConversationSettingsStore, peerKey, registerWorkbenchConversations, registerWorkbenchSend } from './workbench-conversations.ts';
+import { ConversationSettingsStore, peerKey, registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './workbench-conversations.ts';
 import { legacyAgentSettings } from './workbench-agent-settings.ts';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
@@ -22,6 +22,28 @@ afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 const url = `http://dsh.internal${WORKBENCH_CONVERSATIONS_PATH}`;
 type TestRoute = { path: string; methods: string[]; fetch(request: Request): Promise<Response> };
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+it('projects mentions in old QQ rows and quotes without rewriting the recorded text', () => {
+  const timeline = new QqTimeline(join(dir, 'mentions'), logger);
+  const target = { scope: 'group', targetId: 'room' } as const;
+  const row = {
+    id: 'mention', at: 1, direction: 'inbound', status: 'received',
+    text: '<@!bot-openid> <@person-openid> <@unknown-openid>', quote: { text: '<@bot-openid> 你好' },
+  } as const;
+  const service = workbenchTimelineService({ timeline, conversationAccount: appId => ({
+    access: ConfigSchema({} as ImQQBotConfig).access, peerName: () => '', liveSessionId: () => undefined,
+    mentionName: (group, id) => appId === 'A' && group === 'room'
+      ? id === 'bot-openid' ? '主机器人' : id === 'person-openid' ? '小明' : undefined
+      : undefined,
+  }) });
+  for (const appId of ['A', 'B']) timeline.record(appId, target, row);
+  const a = { appId: 'A', scope: 'group', openId: 'room' } as const;
+  const expected = { ...row, displayText: '@主机器人 @小明 @成员 n-openid', quote: { ...row.quote, displayText: '@主机器人 你好' } };
+  expect(service.timelinePage(a)?.entries).toEqual([expected]);
+  expect(service.timelineEntry(a, row.id)).toEqual(expected);
+  expect(service.timelinePage({ ...a, appId: 'B' })?.entries[0]?.displayText).not.toContain('小明');
+  expect(timeline.entry('A', target, row.id)).toEqual(row);
+});
 
 it('copies per-robot defaults once and freezes legacy peers in the same commit as a template change', () => {
   const path = join(dir, 'defaults.json');

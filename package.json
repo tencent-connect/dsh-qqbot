@@ -68,7 +68,7 @@
         "0.1.0-rc.8": "compatible",
         "0.2.0-rc.2": "compatible"
       },
-      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛。客户端依赖 settings.section / sidebarRightTabs / sidebar.right.pane.tab 席位契约与 dsh.client 模块系统，宿主大版本升级后请重新验收席位行为。"
+      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码、手动绑定、解绑及终端二维码。0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定和 HMR。当前客户端通过 QQ 工作台与设置页提供绑定入口，宿主大版本升级后请重新验收。"
     }
   },
   "dependencies": {

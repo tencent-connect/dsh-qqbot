@@ -118,6 +118,57 @@ const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'disabled', label: '关闭' },
 ];
 
+type AccessModeKey = 'c2cMode' | 'groupMode' | 'commandMode';
+
+export function AccessSettings({
+  access, busy, bound = true, enabled = true, appId, onMode, onMembershipChange,
+}: {
+  access: Pick<AccessControlWire, AccessModeKey>; busy: boolean; bound?: boolean; enabled?: boolean; appId?: string;
+  onMode: (key: AccessModeKey, value: AccessMode) => void; onMembershipChange: () => void;
+}): ReactNode {
+  useConfigPanelStyles();
+  const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
+  const [commandsError, setCommandsError] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    if (!bound || !enabled) return;
+    void fetchJson<{ commands: SlashCommandDescriptor[] }>(appId === undefined ? COMMANDS_PATH : `${COMMANDS_PATH}?appId=${encodeURIComponent(appId)}`, { signal: controller.signal })
+      .then(result => { if (!controller.signal.aborted) { setCommands(result.commands); setCommandsError(null); } })
+      .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
+    return () => controller.abort();
+  }, [appId, bound, enabled, access.commandMode]);
+  return createElement('div', { className: 'imqb2-form' },
+    createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
+    createElement(SegmentedRow, {
+      disabled: busy, label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
+      onChange: value => onMode('c2cMode', value),
+    }),
+    access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, {
+      purpose: 'allow-c2c', title: '私聊白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。',
+    }) : null,
+    createElement(SegmentedRow, {
+      disabled: busy, label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
+      onChange: value => onMode('groupMode', value),
+    }),
+    access.groupMode === 'allowlist' ? createElement(PairClaimPanel, {
+      purpose: 'allow-group', title: '群白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。',
+    }) : null,
+    createElement(SegmentedRow, {
+      disabled: busy, label: '斜杠命令', value: access.commandMode ?? 'open', options: MODE_OPTIONS,
+      help: '仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。',
+      onChange: value => onMode('commandMode', value),
+    }),
+    (access.commandMode ?? 'open') === 'allowlist' ? createElement(PairClaimPanel, {
+      purpose: 'owner', title: '命令白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
+    }) : null,
+    commandsError && bound && enabled ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
+    commands.length ? createElement(SlashCommandList, { commands }) : null,
+  );
+}
+
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
 
 function storedDraft(): ConfigDraft | undefined {
@@ -190,16 +241,6 @@ export interface ConfigPanelProps { bindPhase?: string; accountOnly?: boolean }
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
 export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps = {}): ReactNode {
   useConfigPanelStyles();
-  const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
-  const [commandsError, setCommandsError] = useState<string | null>(null);
-  useEffect(() => {
-    const controller = new AbortController();
-    if (bindPhase !== 'bound') return;
-    void fetchJson<{ commands: SlashCommandDescriptor[] }>(COMMANDS_PATH, { signal: controller.signal })
-      .then(result => { setCommands(result.commands); setCommandsError(null); })
-      .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
-    return () => controller.abort();
-  }, [bindPhase]);
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const draftRef = useRef<ConfigDraft | null>(null);
   const mounted = useRef(true);
@@ -333,28 +374,9 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
   return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
     createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
-      createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
-      createElement(SegmentedRow, { disabled: busy,
-        label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
-        onChange: (value) => { patch('access', { ...access, c2cMode: value }); },
+      createElement(AccessSettings, { access, busy, bound: bindPhase === 'bound', onMembershipChange: retry,
+        onMode: (key, value) => patch('access', { ...access, [key]: value }),
       }),
-      access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-c2c', title: '私聊白名单', enabled: bindPhase === 'bound', onChange: retry, hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。' }) : null,
-      createElement(SegmentedRow, { disabled: busy,
-        label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
-        onChange: (value) => { patch('access', { ...access, groupMode: value }); },
-      }),
-      access.groupMode === 'allowlist' ? createElement(PairClaimPanel, { purpose: 'allow-group', title: '群白名单', enabled: bindPhase === 'bound', onChange: retry, hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。' }) : null,
-      createElement(SegmentedRow, { disabled: busy,
-        label: '斜杠命令', value: access.commandMode ?? 'open', options: MODE_OPTIONS,
-        help: '仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。',
-        onChange: value => { patch('access', { ...access, commandMode: value }); },
-      }),
-      (access.commandMode ?? 'open') === 'allowlist' ? createElement(PairClaimPanel, {
-        purpose: 'owner', title: '命令白名单', enabled: bindPhase === 'bound', onChange: retry,
-        hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
-      }) : null,
-      commandsError ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
-      createElement(SlashCommandList, { commands }),
       createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
       ...([
         ['requireMention', '群聊仅回复 @机器人的消息'],
@@ -364,7 +386,8 @@ export function ConfigPanel({ bindPhase, accountOnly = false }: ConfigPanelProps
         createElement('div', { className: 'imqb2-head' },
           createElement('span', { className: 'imqb2-label' }, label),
           createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
-            onChange: (value: boolean) => patch(key, value) })))),
+            onChange: (value: boolean) => patch(key, value) })),
+        key === 'showToolResults' ? createElement('p', { className: 'imqb2-hint' }, '仅在整轮失败时向 QQ 发送简短提示。') : null)),
       accountOnly ? null : createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
       ...([
         ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],

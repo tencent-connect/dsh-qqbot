@@ -65,9 +65,10 @@ async function gateway(
   const callback = on.mock.calls.find(([event]) => event === 'interaction')?.[1] as
     ((ctx: unknown, event: InteractionEvent) => Promise<void>);
   const message = on.mock.calls.find(([event]) => event === 'message')?.[1] as (ctx: MiddlewareContext) => Promise<void>;
+  const ready = on.mock.calls.find(([event]) => event === 'ready')?.[1] as (event: unknown) => void;
 
   return {
-    stop, ack, dispatch, cache, dispose, ask, questions, runtime, bot: start.mock.contexts[0]!, message,
+    stop, ack, dispatch, cache, dispose, ask, questions, runtime, bot: start.mock.contexts[0]!, message, ready,
     unload: () => effects.get('im-qqbot.lifecycle')!(),
     click: (input: Partial<InteractionEvent>) => callback({}, {
       id: 'button', type: 1, version: 1,
@@ -91,24 +92,29 @@ async function loopback(listener: RequestListener) {
   };
 }
 
-it('learns admitted private nicknames even when recording is off and keeps them when later events omit the name', async () => {
-  const f = await gateway({ c2cMode: 'allowlist', c2cAllow: ['allowed'] }, undefined, (dir, logger) => ({
+it('learns names for the same private OpenID from admitted group events even when recording is off', async () => {
+  const f = await gateway({
+    c2cMode: 'allowlist', c2cAllow: ['allowed', 'direct-name'], groupMode: 'allowlist', groupAllow: ['room'],
+  }, undefined, (dir, logger) => ({
     names: new QqDisplayNames(join(dir, 'names.json'), logger),
     timeline: new QqTimeline(join(dir, 'timeline'), logger),
     recording: () => false,
   }));
-  const send = async (id: string, openId: string, senderName?: string) => {
+  const send = async (id: string, openId: string, senderName?: string, groupOpenid?: string,
+    mentions?: MiddlewareContext['message']['mentions']) => {
     const timestamp = new Date().toISOString();
-    const replyTarget = { scope: 'c2c', targetId: openId, msgId: id } as const;
+    const replyTarget = { scope: groupOpenid ? 'group' : 'c2c', targetId: groupOpenid ?? openId, msgId: id } as const;
+    const message = { senderId: openId, messageId: id, content: 'hello', timestamp, replyTarget };
+    const raw = { id, content: 'hello', timestamp };
     const controller = new AbortController();
     let stopReason: string | undefined;
     const context: MiddlewareContext = {
       bot: f.bot, replyTarget, receivedAt: Date.now(), state: {}, signal: controller.signal,
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-      message: {
-        kind: 'c2c', senderId: openId, senderName, messageId: id, content: 'hello', timestamp, replyTarget,
-        rawEventType: 'C2C_MESSAGE_CREATE', raw: { id, content: 'hello', timestamp, author: { user_openid: openId } },
-      },
+      message: groupOpenid
+        ? { ...message, kind: 'group', groupOpenid, mentions, rawEventType: 'GROUP_MESSAGE_CREATE',
+          raw: { ...raw, group_openid: groupOpenid, author: { member_openid: openId, username: senderName } } }
+        : { ...message, kind: 'c2c', senderName, rawEventType: 'C2C_MESSAGE_CREATE', raw: { ...raw, author: { user_openid: openId } } },
       stop(reason) { stopReason = reason; },
       get stopped() { return stopReason !== undefined; },
       get stopReason() { return stopReason; },
@@ -118,13 +124,33 @@ it('learns admitted private nicknames even when recording is off and keeps them 
     await runMiddlewareChain(f.bot.getMiddlewares(), context);
   };
   try {
-    await send('named', 'allowed', '小明');
+    f.ready({ user: { id: 'ready-bot-id', username: '机器人昵称' } });
     await send('unnamed', 'allowed');
+    await send('named-in-group', 'allowed', '小明', 'room');
+    await send('blank-in-group', 'allowed', '  ', 'room');
+    await send('openid-placeholder', 'allowed', 'allowed', 'room');
+    await send('denied-group', 'allowed', '无权限群名片', 'other-room');
     await send('blocked', 'blocked', '无权限');
+    await send('named-in-private', 'direct-name', '私聊昵称');
+    await send('other-group-name', 'direct-name', '群名片', 'room');
+    await send('known-mentions', 'allowed', undefined, 'room', [
+      { id: 'group-bot-id', is_you: true }, { member_openid: 'mentioned-person', nickname: '成员昵称' },
+    ]);
+    await send('blocked-mentions', 'allowed', undefined, 'other-room', [
+      { id: 'not-admitted', is_you: true },
+    ]);
     const names = new QqDisplayNames(join(sandbox.dir!, 'names.json'), { info() {}, warn() {}, error() {}, debug() {} });
     expect(names.peer('gateway-test', 'c2c', 'allowed')).toBe('小明');
+    expect(names.peer('gateway-test', 'c2c', 'direct-name')).toBe('私聊昵称');
+    expect(names.peer('gateway-test', 'group', 'room')).toBeUndefined();
+    expect(names.peer('gateway-test', 'c2c', 'prefix-allowed')).toBeUndefined();
     expect(names.peer('gateway-test', 'c2c', 'blocked')).toBeUndefined();
     expect(names.peer('another-bot', 'c2c', 'allowed')).toBeUndefined();
+    expect(names.botMention('gateway-test', 'room', 'ready-bot-id')).toBe('机器人昵称');
+    expect(names.botMention('gateway-test', 'room', 'group-bot-id')).toBe('机器人');
+    expect(names.botMention('gateway-test', 'other-room', 'group-bot-id')).toBeUndefined();
+    expect(names.botMention('gateway-test', 'other-room', 'not-admitted')).toBeUndefined();
+    expect(names.peer('gateway-test', 'c2c', 'mentioned-person')).toBe('成员昵称');
   } finally {
     await f.unload();
   }

@@ -43,9 +43,7 @@ QQ 用户 → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → L
 
 <img src="./assets/docs/install.png" alt="端内添加插件" width="560" />
 
-2. **连接**：左下角头像 → 设置 →「QQ 机器人」→ 手机 QQ 扫码连接
-
-<img src="./assets/docs/setting.png" alt="设置页扫码连接" width="560" />
+2. **连接**：打开左侧的「QQ 机器人」工作台，用手机 QQ 扫码连接。已有机器人时，点击机器人列表顶部的「＋」继续添加。
 
 扫码成功后凭据自动保存，后续启动无需再次扫码。
 
@@ -109,7 +107,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `maxQueue` | number | `20` | 并发队列最大长度 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
-| `showToolResults` | boolean | `false` | 是否展示工具调用成功结果。整轮失败时发送一条简短提示 |
+| `showToolResults` | boolean | `false` | 是否展示工具调用成功结果。整轮失败时只发送简短提示 |
 | `debug` | boolean | `false` | 调试模式 |
 
 ### 访问控制（access）
@@ -220,7 +218,7 @@ src/
 │   ├── qr-svg.ts               # 二维码 SVG 渲染（宿主侧）
 │   └── persist.ts              # 凭据写入 cordis.patch.yml
 ├── client/                     # 浏览器半边（dsh.client Web Bundle）
-│   ├── index.ts                # 侧栏 Tab 注册 + 待绑定自动引导
+│   ├── index.ts                # QQ 工作台、设置和会话操作入口
 │   └── bind-page.ts             # 端内绑定页（二维码 + 状态轮询）
 ├── gateway/                    # 网关装配
 │   ├── bootstrap.ts            # 启动装配（监听 session/event 等）

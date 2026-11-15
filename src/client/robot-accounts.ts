@@ -1,7 +1,8 @@
-import { createElement as h, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, IconPlusOutlineRegular, IconSettingsOutlineRegular, Input, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { createElement as h, Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { Button, IconPlusOutlineRegular, IconSettingsOutlineRegular, IconTrashOutlineRegular, Input, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_ROBOT_BIND_PATH,
+  WORKBENCH_ROBOT_REMOVE_PATH,
   WORKBENCH_ROBOTS_PATH,
   type WorkbenchRobot,
   type WorkbenchRobotBinding,
@@ -9,6 +10,7 @@ import {
   type WorkbenchRobotsResponse,
 } from '../shared/workbench-protocol.ts';
 import { BindPanelBody, QQ_BOT_LOGO_PATH } from './bind-page.ts';
+import { AccessSettings } from './config-panel.ts';
 import { fetchJson, HttpError } from './http.ts';
 
 export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
@@ -17,22 +19,11 @@ export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
 
 type Access = WorkbenchRobot['access'];
 type Mode = Access['groupMode'];
-type Draft = {
-  alias: string;
-  appSecret: string;
-  groupMode: Mode;
-  c2cMode: Mode;
-  groupAllow: string;
-  c2cAllow: string;
-};
+type ModeKey = 'c2cMode' | 'groupMode' | 'commandMode';
+const MODE_KEYS = ['c2cMode', 'groupMode', 'commandMode'] as const satisfies readonly ModeKey[];
+type Draft = { alias: string; c2cMode: Mode; groupMode: Mode; commandMode: Mode };
 type EditRobot = { kind: 'edit'; baseline: WorkbenchRobot; draft: Draft };
 type Editor = { kind: 'add'; id: string } | EditRobot;
-
-const MODE_OPTIONS: ReadonlyArray<{ value: Mode; label: string }> = [
-  { value: 'open', label: '所有人' },
-  { value: 'allowlist', label: '白名单' },
-  { value: 'disabled', label: '关闭' },
-];
 
 export function accountName(robot: WorkbenchRobot): string {
   return robot.alias || (robot.primary ? '主机器人' : `机器人 ${robot.appId}`);
@@ -41,27 +32,10 @@ export function accountName(robot: WorkbenchRobot): string {
 function editRobot(robot: WorkbenchRobot): EditRobot {
   return {
     kind: 'edit', baseline: robot, draft: {
-      alias: robot.alias, appSecret: '',
-      c2cMode: robot.access.c2cMode, groupMode: robot.access.groupMode,
-      c2cAllow: robot.access.c2cAllow.join('\n'), groupAllow: robot.access.groupAllow.join('\n'),
+      alias: robot.alias, c2cMode: robot.access.c2cMode, groupMode: robot.access.groupMode,
+      commandMode: robot.access.commandMode ?? 'open',
     },
   };
-}
-
-function openIds(value: string): string[] {
-  return [...new Set(value.split(/[\n,，]/).map(id => id.trim()).filter(Boolean))];
-}
-
-function accessPatch(draft: Draft, baseline: Access): Partial<Access> {
-  const patch: Partial<Access> = {};
-  for (const key of ['groupMode', 'c2cMode'] as const) {
-    if (draft[key] !== baseline[key]) patch[key] = draft[key];
-  }
-  for (const key of ['groupAllow', 'c2cAllow'] as const) {
-    const ids = openIds(draft[key]);
-    if (ids.length !== baseline[key].length || ids.some(id => !baseline[key].includes(id))) patch[key] = ids;
-  }
-  return patch;
 }
 
 function makePatch({ draft, baseline }: EditRobot): WorkbenchRobotPatch {
@@ -69,30 +43,22 @@ function makePatch({ draft, baseline }: EditRobot): WorkbenchRobotPatch {
   const alias = draft.alias.trim();
   if (alias !== baseline.alias) patch.alias = alias;
   if (!baseline.primary) {
-    const access = accessPatch(draft, baseline.access);
+    const access: Partial<Access> = {};
+    for (const key of MODE_KEYS) {
+      if (draft[key] !== (baseline.access[key] ?? 'open')) access[key] = draft[key];
+    }
     if (Object.keys(access).length > 0) patch.access = access;
-    if (draft.appSecret.trim()) patch.appSecret = draft.appSecret.trim();
   }
   return patch;
 }
 
 function rebase(editor: EditRobot, latest: WorkbenchRobot): EditRobot {
   const next = editRobot(latest);
-  const { draft } = next;
   const patch = makePatch(editor);
-  if (patch.alias !== undefined) draft.alias = patch.alias;
-  if (patch.appSecret !== undefined) draft.appSecret = patch.appSecret;
-  for (const key of ['groupMode', 'c2cMode'] as const) {
+  if (patch.alias !== undefined) next.draft.alias = patch.alias;
+  for (const key of MODE_KEYS) {
     const mode = patch.access?.[key];
-    if (mode !== undefined) draft[key] = mode;
-  }
-  for (const key of ['groupAllow', 'c2cAllow'] as const) {
-    const edited = patch.access?.[key];
-    if (edited === undefined) continue;
-    const before = new Set(editor.baseline.access[key]);
-    const removed = new Set([...before].filter(id => !edited.includes(id)));
-    const added = edited.filter(id => !before.has(id));
-    draft[key] = [...new Set([...latest.access[key].filter(id => !removed.has(id)), ...added])].join('\n');
+    if (mode !== undefined) next.draft[key] = mode;
   }
   return next;
 }
@@ -102,27 +68,6 @@ function replaceRobot(robots: readonly WorkbenchRobot[] | null, robot: Workbench
   return list.some(item => item.appId === robot.appId)
     ? list.map(item => item.appId === robot.appId ? robot : item)
     : [...list, robot];
-}
-
-function AccessField({ scope, mode, allow, disabled, onMode, onAllow }: {
-  scope: 'c2c' | 'group'; mode: Mode; allow: string; disabled: boolean;
-  onMode: (mode: Mode) => void; onAllow: (allow: string) => void;
-}): ReactNode {
-  const id = useId();
-  const label = scope === 'group' ? '群聊接入' : '私聊接入';
-  const listLabel = scope === 'group' ? '群 OpenID 白名单' : '用户 OpenID 白名单';
-  return h('div', { className: 'imqr-access' },
-    h('div', { className: 'imqr-header' },
-      h('span', null, label),
-      h(SegmentedControl<Mode>, { id, value: mode, options: MODE_OPTIONS, onChange: onMode, label, disabled })),
-    mode === 'allowlist' ? h('label', { className: 'imqb-field imqr-field' },
-      h('span', null, listLabel),
-      h('textarea', {
-        value: allow, disabled, spellCheck: false, rows: 3,
-        onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onAllow(event.currentTarget.value),
-      }),
-      h('span', { className: 'imqb-status-sub' }, '每行一个 OpenID，也可用逗号分隔。QQ 号和群号不能用于添加，空白名单拒绝所有消息。')) : null,
-  );
 }
 
 export interface RobotAccountsProps {
@@ -151,6 +96,8 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   const [unavailable, setUnavailable] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [actionError, setActionError] = useState('');
+  const [removing, setRemoving] = useState<WorkbenchRobot>();
+  const [removeError, setRemoveError] = useState('');
   const [editor, setEditor] = useState<Editor | null>(null);
   const [editError, setEditError] = useState('');
   const [rebased, setRebased] = useState(false);
@@ -192,6 +139,19 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     void refresh();
     return () => { controller.abort(); if (timer !== undefined) clearTimeout(timer); };
   }, [reload]);
+
+  useEffect(() => {
+    if (!removing || !removeError || busy || !robots) return;
+    const latest = robots.find(robot => robot.appId === removing.appId);
+    if (!latest) {
+      setRemoving(undefined);
+      setEditor(current => current?.kind === 'edit' && current.baseline.appId === removing.appId ? null : current);
+      if (selectedAppId === removing.appId && robots[0]) onSelect(robots[0].appId);
+    } else if (latest.revision !== removing.revision) {
+      setRemoving(latest);
+      setRemoveError('机器人配置已更新，请确认当前机器人后再解绑。');
+    }
+  }, [busy, removing, removeError, robots, selectedAppId, onSelect]);
 
   useEffect(() => {
     if (!bindId) return;
@@ -277,8 +237,8 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     }
   };
 
-  const save = async (patch: WorkbenchRobotPatch, editing: boolean): Promise<void> => {
-    if (mutation.current) return;
+  const save = async (patch: WorkbenchRobotPatch, editing: boolean): Promise<{ ok: boolean; error?: string }> => {
+    if (mutation.current) return { ok: false, error: '请等待当前操作完成。' };
     const controller = new AbortController();
     mutation.current = controller;
     generation.current++;
@@ -291,16 +251,17 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify(patch), signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return { ok: false, error: '操作已取消。' };
       setRobots(current => replaceRobot(current, robot));
       if (editing) {
         setEditor(editRobot(robot));
       } else if (editor?.kind === 'edit' && editor.baseline.appId === robot.appId
         && editor.baseline.revision === patch.revision) {
-        setEditor({ ...editor, baseline: robot });
+        setEditor(rebase(editor, robot));
       }
+      return { ok: true };
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return { ok: false, error: '操作已取消。' };
       const conflict = error instanceof HttpError && error.status === 409;
       const message = conflict && patch.revision !== null
         ? '机器人配置已更新，请读取最新配置后再保存。'
@@ -308,11 +269,45 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       if (editing) setEditError(message);
       else setActionError(message);
       if (conflict) setReload(value => value + 1);
+      return { ok: false, error: message };
     } finally {
       if (mutation.current === controller) {
         generation.current++;
         mutation.current = null;
         setBusy(false);
+      }
+    }
+  };
+
+  const remove = async (robot: WorkbenchRobot): Promise<void> => {
+    if (mutation.current) return;
+    const controller = new AbortController();
+    mutation.current = controller;
+    generation.current++;
+    setBusy(true);
+    setRemoveError('');
+    try {
+      await fetchJson(WORKBENCH_ROBOT_REMOVE_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ appId: robot.appId, revision: robot.revision }), signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      setRobots(current => current?.filter(item => item.appId !== robot.appId) ?? null);
+      setEditor(current => current?.kind === 'edit' && current.baseline.appId === robot.appId ? null : current);
+      setRemoving(undefined);
+      if (activeRobot?.appId === robot.appId) {
+        const next = robots?.find(item => item.appId !== robot.appId);
+        if (next) onSelect(next.appId);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setRemoveError(error instanceof HttpError && error.status === 409
+        ? error.message : '暂未确认解绑结果。若刷新后仍显示此机器人，可以重试。');
+    } finally {
+      if (mutation.current === controller) {
+        generation.current++;
+        mutation.current = null;
+        setBusy(false);
+        setReload(value => value + 1);
       }
     }
   };
@@ -327,15 +322,19 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   };
   const current = editor?.kind === 'edit' ? robots?.find(robot => robot.appId === editor.baseline.appId) : undefined;
   const stale = editor?.kind === 'edit' && current !== undefined && current.revision !== editor.baseline.revision;
+  useEffect(() => {
+    if (!stale || !current || editor?.kind !== 'edit' || busy) return;
+    const baseline = editor.baseline;
+    const modesUnchanged = MODE_KEYS.every(key => current.access[key] === baseline.access[key]);
+    if (Object.keys(makePatch(editor)).length === 2 || (
+      current.alias === baseline.alias && current.enabled === baseline.enabled && modesUnchanged
+    )) {
+      setEditor(rebase(editor, current));
+    }
+  }, [busy, current, editor, stale]);
   const patch = editor?.kind === 'edit' ? makePatch(editor) : undefined;
   const adding = editor?.kind === 'add';
   const canSave = !busy && !stale && patch !== undefined && Object.keys(patch).length > 2;
-  const input = (label: string, key: 'alias' | 'appSecret', props: Partial<React.ComponentProps<typeof Input>> = {}): ReactNode => (
-    h('label', { className: 'imqb-field imqr-field' }, h('span', null, label), h(Input, {
-      value: editor?.kind === 'edit' ? editor.draft[key] : '', disabled: busy, onChange: event => setField(key, event.currentTarget.value), ...props,
-    }))
-  );
-
   const cancelAdd = (): void => {
     if (bindingBusy) return;
     setEditor(null);
@@ -360,19 +359,10 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         if (canSave) void save(patch, true);
       },
     },
-      input('机器人名称', 'alias', { placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120 }),
-      editor.baseline.primary ? null : [
-        h('div', { key: 'credential' }, input('AppSecret', 'appSecret', {
-          type: 'password', autoComplete: 'new-password', maxLength: 512,
-          placeholder: '留空则继续使用已保存的凭据',
-        })),
-        h('section', { key: 'access', className: 'imqr-access-settings' },
-          h('h3', null, '服务范围'),
-          h(AccessField, { scope: 'c2c', mode: editor.draft.c2cMode, allow: editor.draft.c2cAllow, disabled: busy,
-            onMode: value => setField('c2cMode', value), onAllow: value => setField('c2cAllow', value) }),
-          h(AccessField, { scope: 'group', mode: editor.draft.groupMode, allow: editor.draft.groupAllow, disabled: busy,
-            onMode: value => setField('groupMode', value), onAllow: value => setField('groupAllow', value) })),
-      ],
+      h('label', { className: 'imqb-field imqr-field' }, '机器人名称', h(Input, {
+        value: editor.draft.alias, disabled: busy, placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120,
+        onChange: event => setField('alias', event.currentTarget.value),
+      })),
       stale ? h('div', { className: 'imqr-header' },
         h('p', { className: 'imqb-error', role: 'alert' }, '配置已变化，草稿仍保留。'),
         h(Button, { size: 'sm', variant: 'outline', type: 'button', disabled: busy, onClick: () => {
@@ -403,6 +393,22 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       }),
     ),
     form,
+    editor.baseline.primary ? null : h(Fragment, null,
+      h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
+        key: editor.baseline.appId, state: { phase: 'bound', appId: editor.baseline.appId },
+        recheck: () => setReload(value => value + 1),
+        boundActions: {
+          disabled: busy || stale,
+          replace: (appId, appSecret) => save({ appId, appSecret, revision: editor.baseline.revision }, false),
+          unbind: () => { setRemoveError(''); setRemoving(current ?? editor.baseline); },
+        },
+      }),
+      h(AccessSettings, {
+        key: `access-${editor.baseline.appId}`, appId: editor.baseline.appId, access: editor.draft, busy,
+        enabled: current?.enabled ?? editor.baseline.enabled, onMode: setField,
+        onMembershipChange: () => setReload(value => value + 1),
+      }),
+    ),
     footer,
   ) : null;
   if (unavailable || (robots === null && !loadError)) {
@@ -449,8 +455,14 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           },
           'aria-label': name, title: `${name} · ${ROBOT_STATE_LABELS[robot.state]}`,
         }, avatar, label),
-        workbench.collapsed ? null : h('div', { className: 'imqr-actions' },
-          h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: bindingBusy, onClick: () => openSettings(robot), 'aria-label': `设置${name}`, title: `设置${name}` }, h(IconSettingsOutlineRegular, { size: 16 })),
+        workbench.collapsed ? null : h('div', { className: 'imqr-row-actions' },
+          h('div', { className: 'imqr-row-buttons' },
+            h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: bindingBusy, onClick: () => openSettings(robot), 'aria-label': `设置${name}`, title: `设置${name}` }, h(IconSettingsOutlineRegular, { size: 16 })),
+            h(Button, {
+              size: 'sm', variant: 'ghost', type: 'button', className: 'imqr-remove', disabled: bindingBusy,
+              onClick: () => { setRemoveError(''); setRemoving(robot); },
+              'aria-label': `解绑${name}`, title: `解绑${name}`,
+            }, h(IconTrashOutlineRegular, { size: 16 }))),
           h(Switch, { checked: robot.enabled, label: `启用${name}`, disabled: bindingBusy, onChange: enabled => {
             void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
           } })),
@@ -461,14 +473,23 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           size: 'sm', variant: 'ghost', type: 'button', title: '当前机器人设置', 'aria-label': '当前机器人设置', disabled: bindingBusy,
           onClick: () => openSettings(activeRobot),
         }, h(IconSettingsOutlineRegular, { size: 16 })) : null,
+    removing ? h(Modal, {
+      open: true, title: `解绑「${accountName(removing)}」？`, closeLabel: '关闭',
+      description: '将断开这台机器人并移除本机绑定。QQ 消息记录和 DSH 会话历史会保留。',
+      onClose: () => { if (!mutation.current) setRemoving(undefined); },
+      footer: h(Fragment, null,
+        h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setRemoving(undefined) }, '取消'),
+        h(Button, {
+          type: 'button', variant: 'outline', size: 'sm', className: 'imqr-remove', disabled: busy,
+          onClick: () => { void remove(removing); },
+        }, busy ? '正在解绑…' : '确认解绑')),
+    }, removeError ? h('p', { className: 'imqb-error', role: 'alert' }, removeError) : null) : null,
   );
   return workbench.render({ robots, unavailable, rail, accountSettings, cancelAdd, busy: bindingBusy });
 }
 
 const STYLES = `
-.imqr-header, .imqr-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
-.imqr-row { padding: 10px 0; border-top: 1px solid var(--dsw-alias-border-l2); margin-top: 8px; }
-.imqr-row[data-selected] { background: var(--dsw-alias-bg-layer-2); }
+.imqr-header { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
 .imqr-name { overflow-wrap: anywhere; }
 .imqr-select { font: inherit; color: inherit; background: none; border: 0; padding: 4px; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; border-radius: 8px; }
 .imqr-avatar { display: grid; place-items: center; position: relative; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 8px; background: var(--dsw-alias-bg-layer-3); }
@@ -477,15 +498,22 @@ const STYLES = `
 .imqr-avatar[data-state='failed']::after { background: var(--dsw-alias-text-red, #ce5260); }
 .imqr-inline { display: flex; flex-direction: column; gap: 14px; }
 .imqr-inline-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.imqr-rail { display: grid; align-content: start; gap: 4px; min-width: 0; }
-.imqr-rail .imqr-row { border-radius: 8px; border: 0; padding: 3px; margin-top: 4px; }
+.imqr-rail { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.imqr-row {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 6px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.imqr-row[data-selected] {
+  background: var(--dsw-alias-bg-module-platform);
+  border-color: var(--dsw-alias-border-l4);
+}
+.imqr-row-actions, .imqr-row-buttons { display: flex; align-items: center; gap: 2px; }
+.imqr-row-actions { justify-content: space-between; }
+.imqr-row-buttons > button { padding-inline: 4px; }
+.imqr-remove:hover, .imqr-remove:focus-visible { color: var(--dsw-alias-state-error-primary); }
 .imqr-actions, .imqr-footer { display: flex; align-items: center; gap: 8px; }
 .imqr-footer { justify-content: flex-end; }
 .imqr-form { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.imqr-field > span { box-sizing: border-box; }
-.imqr-access { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 12px; font-size: 13px; }
-.imqr-access-settings { display: grid; gap: 12px; }
-.imqr-access .imqr-field { margin-top: 8px; }
-.imqr-field textarea { box-sizing: border-box; width: 100%; resize: vertical; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); }
-.imqr-field textarea:focus-visible, .imqr-select:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color); outline-offset: 2px; }
+.imqr-select:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color); outline-offset: 2px; }
 `;

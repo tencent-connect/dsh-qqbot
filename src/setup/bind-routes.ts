@@ -14,7 +14,7 @@ import type { Logger } from '../types.ts';
 import type { BindingService } from './binding-service.ts';
 import {
   persistCredentialsToProfile,
-  removeCredentialsFromProfile,
+  unbindProfileCredentials,
   updateProfileConfig,
   readProfileAccessSnapshot,
   AccessConfigConflict,
@@ -335,21 +335,11 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
     sendJson(res, 409, { ok: false, error: '当前未绑定' });
     return;
   }
-  const result: UnbindResult = options.onUnbind === undefined
-    ? (() => {
-        const removed = removeCredentialsFromProfile(getProfileDir() ?? undefined, undefined);
-        if (removed) {
-          // 清除进程内凭据：扫码绑定成功时会写入 env（供热更新后的下次
-          // apply 兜底读取）；不清则 HMR 重载后新 fiber 仍从 env 读到
-          // 凭据，解绑不生效（状态一直停留在 bound）
-          delete process.env.QQBOT_APPID;
-          delete process.env.QQBOT_SECRET;
-        }
-        return removed
-          ? { persisted: true }
-          : { persisted: false, error: '无法定位 profile 目录或写入失败，请手动编辑 cordis.patch.yml' };
-      })()
-    : options.onUnbind();
+  const result: UnbindResult = options.onUnbind?.() ?? (
+    unbindProfileCredentials(getProfileDir() ?? undefined, undefined, options.boundAppId?.() ?? undefined)
+      ? { persisted: true }
+      : { persisted: false, error: '无法定位 profile 目录或写入失败，请手动编辑 cordis.patch.yml' }
+  );
   if (!result.persisted) {
     sendJson(res, 500, { ok: false, error: result.error ?? '解绑失败' });
     return;

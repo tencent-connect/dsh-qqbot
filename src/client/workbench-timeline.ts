@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
@@ -25,6 +25,21 @@ const sourceLabel: Record<NonNullable<TimelineEntry['source']>, string> = {
 const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
 const timeFormat = new Intl.DateTimeFormat('zh-CN', { timeStyle: 'short' });
 
+interface TimelinePosition { entryId: string; offset: number }
+const readingPositions = new Map<string, TimelinePosition>();
+
+function rowOffset(list: HTMLElement, row: HTMLElement): number {
+  return row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+}
+
+function visiblePosition(list: HTMLElement): TimelinePosition | undefined {
+  const top = list.getBoundingClientRect().top;
+  for (const row of list.querySelectorAll<HTMLElement>('[data-entry-id]')) {
+    const entryId = row.dataset.entryId;
+    if (entryId && row.getBoundingClientRect().bottom > top) return { entryId, offset: rowOffset(list, row) };
+  }
+}
+
 function grouped(previous: TimelineEntry | undefined, row: TimelineEntry): boolean {
   return !!previous && previous.direction === row.direction
     && (row.direction === 'outbound' || (!!row.senderId && previous.senderId === row.senderId))
@@ -43,6 +58,9 @@ function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): 
 }
 
 export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession }: QqWorkbenchViewProps): ReactNode {
+  const { scope, openId, recording } = peer;
+  const key = JSON.stringify([appId, scope, openId]);
+  const [resume] = useState(() => readingPositions.get(key));
   const [page, setPage] = useState<TimelinePage>();
   const [error, setError] = useState('');
   const [readingOlder, setReadingOlder] = useState(false);
@@ -52,9 +70,25 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   const list = useRef<HTMLDivElement>(null);
   const composer = useRef<QqComposerHandle>(null);
   const lifetime = useRef<AbortController | null>(null);
-  const follow = useRef(true);
+  const follow = useRef(!resume);
   const olderHeight = useRef<number | undefined>(undefined);
-  const { scope, openId, recording } = peer;
+  const pendingPosition = useRef(resume);
+  const openedFrom = useRef<TimelinePosition>();
+
+  useLayoutEffect(() => {
+    const node = list.current;
+    return () => {
+      readingPositions.delete(key);
+      const position = openedFrom.current ?? pendingPosition.current
+        ?? (node && node.clientHeight > 0 && !follow.current ? visiblePosition(node) : undefined);
+      if (!position) return;
+      readingPositions.set(key, position);
+      if (readingPositions.size > 100) {
+        const oldest = readingPositions.keys().next();
+        if (!oldest.done) readingPositions.delete(oldest.value);
+      }
+    };
+  }, [key]);
 
   const params = (before?: string): string => {
     const query = new URLSearchParams({ appId, scope, openId });
@@ -68,12 +102,30 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async (): Promise<void> => {
       try {
-        const latest = await fetchJson<TimelinePage>(params(), { signal: controller.signal, cache: 'no-store' });
+        const options = { signal: controller.signal, cache: 'no-store' } as const;
+        const latest = await fetchJson<TimelinePage>(params(), options);
+        let visible = latest;
+        const position = pendingPosition.current;
+        if (position && latest.before && !latest.entries.some(row => row.id === position.entryId)) {
+          const target = `${params()}&${new URLSearchParams({ entryId: position.entryId })}`;
+          const exists = await fetch(target, options);
+          void exists.body?.cancel();
+          if (exists.ok) {
+            while (visible.before && !visible.entries.some(row => row.id === position.entryId)) {
+              const older = await fetchJson<TimelinePage>(params(visible.before), options);
+              visible = {
+                entries: [...older.entries, ...visible.entries],
+                before: older.before,
+                incomplete: older.incomplete || visible.incomplete,
+              };
+            }
+          }
+        }
         if (controller.signal.aborted) return;
         const tail = latest.entries.at(-1)?.id;
         if (!follow.current && latestId.current && tail !== latestId.current) setNewMessages(true);
         latestId.current = tail;
-        setPage(previous => updateLatest(previous, latest));
+        setPage(previous => position ? visible : updateLatest(previous, latest));
         setError('');
       } catch (cause) {
         if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '无法读取 QQ 流水');
@@ -88,13 +140,29 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   useLayoutEffect(() => {
     const node = list.current;
     if (!node) return;
-    if (olderHeight.current !== undefined) {
+    const position = pendingPosition.current;
+    if (position && page) {
+      pendingPosition.current = undefined;
+      const row = node.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(position.entryId)}"]`);
+      if (row) node.scrollTop += rowOffset(node, row) - position.offset;
+      else follow.current = true;
+      if (follow.current) node.scrollTop = node.scrollHeight;
+    } else if (olderHeight.current !== undefined) {
       node.scrollTop += node.scrollHeight - olderHeight.current;
       olderHeight.current = undefined;
     } else if (follow.current) {
       node.scrollTop = node.scrollHeight;
     }
   }, [page]);
+
+  const openLinked = async (row: TimelineEntry, element: HTMLElement): Promise<void> => {
+    if (!openSession || !row.sessionId) return;
+    const node = list.current;
+    const message = element.closest<HTMLElement>('[data-entry-id]');
+    const position = node && message ? { entryId: row.id, offset: rowOffset(node, message) } : undefined;
+    openedFrom.current = position;
+    if (await openSession(row.sessionId) === false && openedFrom.current === position) openedFrom.current = undefined;
+  };
 
   const loadOlder = async (): Promise<void> => {
     const before = page?.before;
@@ -153,7 +221,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
       h('ol', { className: 'imqw-timeline-list' }, entries.flatMap((row, index) => {
         const previous = entries[index - 1];
         const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
-        const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openSession, refreshEntry,
+        const message = h(MessageRow, { key: row.id, row, appId, scope, openId, robotName, openLinked: openSession && openLinked, refreshEntry,
           peerName: scope === 'c2c' ? peer.alias || peer.name : undefined,
           onReply: !disabledReason && canQuoteTimelineEntry(row) ? (sender: string) => composer.current?.replyTo(row, sender) : undefined,
           compact: !newDay && grouped(previous, row) });
@@ -165,14 +233,14 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   );
 }
 
-function MessageRow({ row, appId, scope, openId, robotName, peerName, openSession, refreshEntry, onReply, compact }: {
+function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked, refreshEntry, onReply, compact }: {
   row: TimelineEntry;
   appId: string;
   scope: WorkbenchConversation['scope'];
   openId: string;
   robotName: string;
   peerName?: string;
-  openSession?: (id: string) => void;
+  openLinked?: (row: TimelineEntry, element: HTMLElement) => Promise<void>;
   refreshEntry(id: string): Promise<TimelineEntry | undefined>;
   onReply?: (sender: string) => void;
   compact: boolean;
@@ -199,7 +267,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openSessio
   const detail = row.inboundOutcome ? inboundLabel[row.inboundOutcome] : statusLabel.received;
   const imageCount = row.imageCount ?? 0;
   const remaining = (row.attachments ?? 0) - imageCount;
-  return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction, 'data-compact': compact },
+  return h('li', { className: 'imqw-timeline-row', 'data-direction': row.direction, 'data-compact': compact, 'data-entry-id': row.id },
     h('span', { className: 'imqw-message-avatar', 'aria-hidden': true }, !compact && [...sender][0]?.toUpperCase()),
     h('div', { className: 'imqw-message-body' },
       compact ? null : h('div', { className: 'imqw-timeline-meta' },
@@ -207,9 +275,9 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openSessio
       h('div', { className: 'imqw-timeline-bubble' },
         row.quote ? h('blockquote', null,
           row.quote.senderName ? h('strong', null, row.quote.senderName) : null,
-          row.quote.text ? h('div', null, row.quote.text) : null,
+          row.quote.text ? h('div', null, row.quote.displayText ?? row.quote.text) : null,
           row.quote.attachments ? h('span', { className: 'imqw-muted' }, `引用附件 · ${row.quote.attachments} 项`) : null) : null,
-        row.text ? h('div', { className: 'imqw-timeline-text' }, row.text) : null,
+        row.text ? h('div', { className: 'imqw-timeline-text' }, row.displayText ?? row.text) : null,
         imageCount > 0 ? h('div', { className: 'imqw-message-images' },
           Array.from({ length: imageCount }, (_, index) => {
             const query = new URLSearchParams({ appId, scope, openId, entryId: row.id, image: String(index) });
@@ -220,8 +288,8 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openSessio
         outbound ? h('span', { 'data-status': row.status }, statusLabel[row.status]) : null,
         row.source ? h('span', null, sourceLabel[row.source]) : null,
         onReply ? h('button', { type: 'button', className: 'imqw-message-action', onClick: () => onReply(sender) }, '引用回复') : null,
-        linkedSession && openSession ? h('button', { type: 'button', className: 'imqw-message-action',
-          'aria-label': '打开关联 Session', title: '打开关联 Session', onClick: () => openSession(linkedSession) }, '↗') : null),
+        linkedSession && openLinked ? h('button', { type: 'button', className: 'imqw-message-action',
+          'aria-label': '打开关联 Session', title: '打开关联 Session', onClick: (event: MouseEvent<HTMLButtonElement>) => { void openLinked(row, event.currentTarget); } }, '↗') : null),
       h('details', { className: 'imqw-response-detail' },
         h('summary', null, '响应详情'),
         outbound

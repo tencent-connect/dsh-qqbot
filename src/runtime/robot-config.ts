@@ -9,10 +9,12 @@ interface RobotConfigBase {
   alias: string;
 }
 
-export type RobotConfigRecord = RobotConfigBase & (
-  | { kind: 'primary' }
+export type BoundRobotConfig = RobotConfigBase & (
+  | { kind: 'primary'; unboundAccess?: AccessControlConfig }
   | { kind: 'additional'; appSecret: string; access: AccessControlConfig }
 );
+
+type RobotConfigRecord = BoundRobotConfig | (RobotConfigBase & { kind: 'unbound'; access: AccessControlConfig });
 
 export class RobotConfigConflictError extends Error {
   constructor() {
@@ -73,46 +75,68 @@ export function robotAccessPatch(input: unknown): Partial<AccessControlConfig> {
   return patch;
 }
 
+function parseAccess(input: unknown): AccessControlConfig {
+  const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = robotAccessPatch(input);
+  if (!c2cMode || !groupMode || !commandMode || !c2cAllow || !groupAllow) throw new Error('机器人访问配置不完整。');
+  return { c2cMode, groupMode, commandMode, c2cAllow, groupAllow };
+}
+
 function parseRecord(input: unknown): RobotConfigRecord {
   const fields = ['appId', 'revision', 'enabled', 'alias', 'kind'] as const;
   if (input && typeof input === 'object' && 'kind' in input && input.kind === 'primary') {
-    const value = robotObject(input, fields);
-    return { kind: 'primary', appId: robotAppId(value.appId), revision: robotRevision(value.revision), enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias) };
+    const value = robotObject(input, [...fields, 'unboundAccess']);
+    return { kind: 'primary', appId: robotAppId(value.appId), revision: robotRevision(value.revision),
+      enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias),
+      ...(value.unboundAccess === undefined ? {} : { unboundAccess: parseAccess(value.unboundAccess) }),
+    };
   }
   const value = robotObject(input, [...fields, 'appSecret', 'access']);
-  if (value.kind !== 'additional') throw new Error('机器人配置类型无效。');
-  const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = robotAccessPatch(value.access);
-  if (!c2cMode || !groupMode || !commandMode || !c2cAllow || !groupAllow) throw new Error('机器人访问配置不完整。');
-  return {
-    kind: 'additional', appId: robotAppId(value.appId), revision: robotRevision(value.revision),
-    enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias), appSecret: robotSecret(value.appSecret),
-    access: { c2cMode, groupMode, commandMode, c2cAllow, groupAllow },
+  if (value.kind !== 'additional' && value.kind !== 'unbound') throw new Error('机器人配置类型无效。');
+  if (value.kind === 'unbound' && Object.hasOwn(value, 'appSecret')) throw new Error('解绑记录不能包含凭据。');
+  const config = {
+    appId: robotAppId(value.appId), revision: robotRevision(value.revision),
+    enabled: robotEnabled(value.enabled), alias: robotAlias(value.alias),
+    access: parseAccess(value.access),
   };
+  return value.kind === 'unbound' ? { ...config, kind: 'unbound' }
+    : { ...config, kind: 'additional', appSecret: robotSecret(value.appSecret) };
 }
 
 export class RobotConfigStore {
   constructor(private readonly path: string) {}
 
-  list(): RobotConfigRecord[] {
+  private read(): { records: RobotConfigRecord[]; lastRevision: number } {
     let data: string;
     try {
       data = readFileSync(this.path, 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return { records: [], lastRevision: 0 };
       throw error;
     }
 
     try {
-      const { version, robots } = robotObject(JSON.parse(data), ['version', 'robots']);
+      const { version, robots, lastRevision } = robotObject(JSON.parse(data), ['version', 'robots', 'lastRevision']);
       if (version !== 1 || !Array.isArray(robots)) throw new Error();
       const records = robots.map(parseRecord);
       if (new Set(records.map(record => record.appId)).size !== records.length || records.some(record => record.revision === 0)) {
         throw new Error();
       }
-      return records;
+      return {
+        records,
+        lastRevision: records.reduce((highest, record) => Math.max(highest, record.revision),
+          lastRevision === undefined ? 0 : robotRevision(lastRevision)),
+      };
     } catch {
       throw new Error('机器人配置目录无法读取，请检查保存的数据。');
     }
+  }
+
+  list(): RobotConfigRecord[] {
+    return this.read().records;
+  }
+
+  private write(records: RobotConfigRecord[], lastRevision: number): void {
+    atomicWrite(this.path, [JSON.stringify({ version: 1, robots: records, lastRevision })]);
   }
 
   get(appId: string): RobotConfigRecord | undefined {
@@ -120,22 +144,33 @@ export class RobotConfigStore {
   }
 
   /** CAS prevents an old browser draft from reapplying a list that was changed separately. */
-  save(record: RobotConfigRecord): RobotConfigRecord {
-    const records = this.list();
+  save(record: BoundRobotConfig, unboundRevision?: number): BoundRobotConfig {
+    const { records, lastRevision } = this.read();
     const index = records.findIndex(existing => existing.appId === record.appId);
     const current = records[index];
-    if (record.revision !== (current?.revision ?? 0) || (current && current.kind !== record.kind)) {
+    const rebind = record.kind === 'additional' && record.revision === 0 && current !== undefined
+      && current.kind !== 'additional' && current.revision === unboundRevision;
+    if (!rebind && (record.revision !== (current?.revision ?? 0) || (current && current.kind !== record.kind))) {
       throw new RobotConfigConflictError();
     }
     const access = record.kind === 'additional' ? { ...record.access, commandMode: record.access.commandMode ?? 'open' } : undefined;
     const next = parseRecord({
       ...record,
       ...(access ? { access } : {}),
-      revision: record.revision + 1,
+      revision: record.revision === 0 ? lastRevision + 1 : record.revision + 1,
     });
+    if (next.kind === 'unbound') throw new RobotConfigConflictError();
     if (index < 0) records.push(next);
     else records[index] = next;
-    atomicWrite(this.path, [JSON.stringify({ version: 1, robots: records })]);
+    this.write(records, Math.max(lastRevision, next.revision));
     return next;
+  }
+
+  removeAdditional(appId: string, revision: number): void {
+    const { records, lastRevision } = this.read();
+    const current = records.find(record => record.appId === appId);
+    if (current?.kind !== 'additional' || current.revision !== revision) throw new RobotConfigConflictError();
+    const { appSecret: _secret, ...settings } = current;
+    this.write(records.map(record => record === current ? { ...settings, kind: 'unbound' } : record), lastRevision);
   }
 }

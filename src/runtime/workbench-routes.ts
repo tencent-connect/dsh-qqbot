@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import type { Context } from '@deepseek-ai/cordis';
-import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotBinding, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBOT_REMOVE_PATH, WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotBinding, type WorkbenchRobotPatch, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 import { BindingService } from '../setup/binding-service.ts';
 import type { SetupCredentials } from '../setup/persist.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
@@ -149,9 +149,8 @@ export function registerWorkbenchRobotBinding(
         });
         return { phase: 'bound', robot: publicRobot(robot) };
       } catch (error) {
-        return { phase: 'failed', reason: error instanceof RobotConfigConflictError
-          || (error instanceof WorkbenchRequestError && error.status === 409)
-          ? '这个机器人已添加，请在机器人列表中选择它。' : '绑定未保存，请核对凭据后重试。' };
+        return { phase: 'failed', reason: error instanceof WorkbenchRequestError || error instanceof RobotConfigConflictError
+          ? error.message : '绑定未保存，请核对凭据后重试。' };
       }
     })().then(result => {
       current.result = result;
@@ -236,6 +235,28 @@ export function registerWorkbenchRoutes(
     }
     assertWritable();
     return workbenchJson({ robot: publicRobot(await saveRobot(patch)) });
+  });
+}
+
+export function registerWorkbenchRobotRemoval(
+  ctx: Context,
+  remove: (appId: string, revision: number) => void | Promise<void>,
+): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_ROBOT_REMOVE_PATH, ['POST'], async (request, assertWritable) => {
+    let appId: string;
+    let revision: number;
+    try {
+      const text = await request.text();
+      if (Buffer.byteLength(text) > 4096) throw new Error();
+      const fields = robotObject(JSON.parse(text), ['appId', 'revision']);
+      appId = robotAppId(fields.appId);
+      revision = robotRevision(fields.revision);
+    } catch {
+      throw new WorkbenchRequestError(400, '请指定有效的机器人和配置版本。');
+    }
+    assertWritable();
+    await remove(appId, revision);
+    return workbenchJson({ ok: true });
   });
 }
 

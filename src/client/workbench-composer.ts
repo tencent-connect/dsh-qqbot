@@ -134,7 +134,7 @@ export const QqComposer = forwardRef<QqComposerHandle, {
         setStatus('请先移除附件，再引用回复。');
         return;
       }
-      edit({ ...draft, quote: { id: row.id, text: row.text.slice(0, 400), attachments: row.attachments, sender } });
+      edit({ ...draft, quote: { id: row.id, text: (row.displayText ?? row.text).slice(0, 400), attachments: row.attachments, sender } });
       setStatus('');
       input.current?.focus();
     },

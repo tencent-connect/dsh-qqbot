@@ -2,6 +2,8 @@ import type { ComponentType } from 'react';
 import type { WorkbenchConversation } from './workbench-conversation-protocol.ts';
 import type { TimelineEntry, TimelinePage } from './workbench-timeline-protocol.ts';
 
+export const QQ_HISTORY_VIEW_ID = 'qq-history';
+
 export interface QqConversationRef {
   appId: string;
   scope: WorkbenchConversation['scope'];
@@ -47,7 +49,7 @@ export interface QqWorkbenchViewProps {
   peer: WorkbenchConversation;
   robotName: string;
   disabledReason?: string;
-  openSession?: (id: string) => void;
+  openSession?: (id: string) => boolean | void | Promise<boolean | void>;
 }
 
 export interface QqWorkbenchView {

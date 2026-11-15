@@ -135,9 +135,11 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   type Icon = (props: IconProps) => ReactElement;
   export const IconCheckOutlineRegular: Icon;
   export const IconChevronDownOutlineRegular: Icon;
+  export const IconChevronLeftOutlineRegular: Icon;
   export const IconCopyOutlineRegular: Icon;
   export const IconDownloadOutlineRegular: Icon;
   export const IconEllipsisOutlineRegular: Icon;
   export const IconPlusOutlineRegular: Icon;
   export const IconSettingsOutlineRegular: Icon;
+  export const IconTrashOutlineRegular: Icon;
 }

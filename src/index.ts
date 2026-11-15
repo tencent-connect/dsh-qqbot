@@ -9,7 +9,7 @@ import { BindingService } from './setup/binding-service.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from './media/vision-tool.ts';
 import { RobotConfigStore } from './runtime/robot-config.ts';
 import { RobotRuntimes } from './runtime/robot-runtimes.ts';
-import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchRobotBinding, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
+import { registerWorkbenchDefaults, registerWorkbenchGroupGuideImages, registerWorkbenchRobotBinding, registerWorkbenchRobotRemoval, registerWorkbenchRoutes, registerWorkbenchTools } from './runtime/workbench-routes.ts';
 import { registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './runtime/workbench-conversations.ts';
 import { registerWorkbenchAnswer } from './runtime/workbench-answer.ts';
 import { registerWorkbenchExtensionSettings, WorkbenchExtensionSettings } from './runtime/workbench-extension-settings.ts';
@@ -39,6 +39,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   ctx.provide('qqbot', qqbot);
   registerWorkbenchExtensionSettings(ctx, settings, appId => robots.list().some(robot => robot.appId === appId));
   registerWorkbenchRoutes(ctx, () => robots.list(), patch => robots.save(patch));
+  if (profileDir) registerWorkbenchRobotRemoval(ctx, (appId, revision) => robots.remove(appId, revision, profileDir));
   if (store) registerWorkbenchRobotBinding(ctx, patch => robots.save(patch),
     () => new BindingService({ source: 'dsh-qqbot', logger }));
   registerWorkbenchDefaults(ctx, robots);
@@ -51,8 +52,27 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   const appId = resolveEnv(config.appId, 'QQBOT_APPID');
   const appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
   if (appId && appSecret) {
-    registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
     robots.bindPrimary({ ...config, appId, appSecret });
+    registerBoundCredentialRoutes(ctx, logger, appId, { ...config }, profileDir ? {
+      boundAppId: () => robots.list().some(robot => robot.primary && robot.appId === appId) ? appId : null,
+      onUnbind: () => {
+        try {
+          const robot = robots.list().find(entry => entry.primary && entry.appId === appId);
+          if (robot === undefined) return { persisted: false, error: '当前未绑定' };
+          robots.remove(appId, robot.revision, profileDir);
+          return { persisted: true };
+        } catch (error) {
+          return { persisted: false, error: error instanceof Error ? error.message : '解绑失败' };
+        }
+      },
+      onManualCredentials: credentials => {
+        if (credentials.appId !== appId) return { persisted: false, error: '更换凭据只适用于当前机器人。请通过添加机器人绑定其他 AppID。' };
+        if (!robots.list().some(robot => robot.primary && robot.appId === appId)) {
+          return { persisted: false, error: '此机器人已解绑，请刷新设置。' };
+        }
+        return { persisted: persistCredentialsToProfile(credentials, profileDir, logger) };
+      },
+    } : {});
     ensureVisionInputModal(config.vision, logger);
     registerDescribeImageTool(ctx, config.vision, logger);
     await robots.start();

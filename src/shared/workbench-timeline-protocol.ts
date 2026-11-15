@@ -14,6 +14,7 @@ export interface TimelineEntry {
   at: number;
   direction: 'inbound' | 'outbound';
   text: string;
+  displayText?: string;
   status: TimelineStatus;
   senderName?: string;
   senderId?: string;
@@ -26,7 +27,7 @@ export interface TimelineEntry {
   platformCode?: number;
   source?: 'manual' | 'answer' | 'automatic' | 'agent';
   inboundOutcome?: TimelineInboundOutcome;
-  quote?: { text: string; attachments?: number; senderName?: string };
+  quote?: { text: string; displayText?: string; attachments?: number; senderName?: string };
 }
 
 export function canQuoteTimelineEntry(row: TimelineEntry | undefined): row is TimelineEntry & { platformId: string } {

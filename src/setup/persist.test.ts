@@ -189,6 +189,12 @@ describe('persistCredentialsToProfile', () => {
 });
 
 describe('removeCredentialsFromProfile', () => {
+  it('does not remove credentials if the primary AppID changed', () => {
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    expect(removeCredentialsFromProfile(dir, log, 'different-app')).toBe(false);
+    expect(readFileSync(patchPath, 'utf8')).toBe(SHARED_PATCH);
+  });
+
   it('仅移除凭据字段，保留条目其余 config 与其他插件内容', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
 

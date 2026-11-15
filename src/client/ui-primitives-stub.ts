@@ -20,8 +20,10 @@ export const SegmentedControl = stub();
 export const DisclosureRow = stub();
 export const IconCheckOutlineRegular = stub();
 export const IconChevronDownOutlineRegular = stub();
+export const IconChevronLeftOutlineRegular = stub();
 export const IconCopyOutlineRegular = stub();
 export const IconDownloadOutlineRegular = stub();
 export const IconPlusOutlineRegular = stub();
 
 export const IconSettingsOutlineRegular = stub();
+export const IconTrashOutlineRegular = stub();

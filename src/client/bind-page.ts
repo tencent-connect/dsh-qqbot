@@ -249,8 +249,8 @@ export async function submitManualCredentials(appId: string, appSecret: string):
  * appSecret 永不回显（占位符提示），提交成功后展示保存结果；
  * 宿主写入 profile patch 并经 HMR 重载，状态轮询随后收敛为 bound。
  */
-function ManualForm({ initialAppId, recheck, onCancel, save = submitManualCredentials }: {
-  initialAppId?: string; recheck: () => void; onCancel?: () => void; save?: BindActions['submit'];
+function ManualForm({ initialAppId, fixedAppId = false, recheck, onCancel, save = submitManualCredentials }: {
+  initialAppId?: string; fixedAppId?: boolean; recheck: () => void; onCancel?: () => void; save?: BindActions['submit'];
 }): ReactNode {
   const formId = useId();
   const [appId, setAppId] = useState(initialAppId ?? '');
@@ -304,7 +304,7 @@ function ManualForm({ initialAppId, recheck, onCancel, save = submitManualCreden
       'AppID',
       createElement(Input, {
         value: appId, placeholder: 'QQ 机器人 AppID',
-        disabled: busy,
+        disabled: busy, readOnly: fixedAppId,
         onChange: (event) => { setAppId(event.currentTarget.value); },
         autoComplete: 'off', spellCheck: false, required: true,
       }),
@@ -356,7 +356,13 @@ function QqBotIcon({ size = 28 }: { size?: number }): ReactNode {
   );
 }
 /** 已绑定视图：回显 appId + 更换凭据 / 解绑入口 */
-function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): ReactNode {
+interface BoundActions {
+  replace: BindActions['submit'];
+  unbind: () => void;
+  disabled: boolean;
+}
+
+function BoundView({ appId, recheck, actions }: { appId: string; recheck: () => void; actions?: BoundActions }): ReactNode {
   const [editing, setEditing] = useState(false);
   const [confirmUnbind, setConfirmUnbind] = useState(false);
   const [unbindResult, setUnbindResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -408,13 +414,13 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
         ),
       ),
       createElement('div', { className: 'imqb-status-actions' },
-        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: busy, onClick: () => { setEditing(true); } }, '更换凭据'),
-        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger', disabled: busy, onClick: () => setConfirmUnbind(true) }, busy ? '正在解绑…' : '解绑'),
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: busy || actions?.disabled, onClick: () => { setEditing(true); } }, '更换凭据'),
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger', disabled: busy || actions?.disabled, onClick: actions?.unbind ?? (() => setConfirmUnbind(true)) }, busy ? '正在解绑…' : '解绑'),
       ),
     ),
     unbindResult !== null && !unbindResult.ok
       ? createElement('p', { className: 'imqb-error', role: 'alert' }, unbindResult.message) : null,
-    editing ? createElement(ManualForm, { initialAppId: appId, recheck, onCancel: () => setEditing(false) }) : null,
+    editing ? createElement(ManualForm, { initialAppId: appId, fixedAppId: actions !== undefined, recheck, save: actions?.replace, onCancel: () => setEditing(false) }) : null,
     createElement(Modal, { open: confirmUnbind, onClose: () => setConfirmUnbind(false), title: '解绑 QQ 机器人', closeLabel: '关闭', description: '清除本机保存的 QQ 凭据并重载连接，随后进入扫码绑定。会话历史保留；此操作不会移出 QQ 群或删除平台侧关系。', footer: createElement('div', { className: 'imqb-row' }, createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => setConfirmUnbind(false) }, '取消'), createElement(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: unbind }, '确认解绑')) }),
   );
 }
@@ -424,6 +430,7 @@ function UnboundView({ state, recheck, actions }: {
   state: Extract<BindStateWire, { phase: 'waiting' | 'starting' | 'failed' }>;
   recheck: () => void;
   actions?: BindActions;
+  boundActions?: BoundActions;
 }): ReactNode {
   const [manual, setManual] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -485,6 +492,7 @@ interface BindPanelBodyProps {
   recheck?: () => void;
   error?: string | null;
   actions?: BindActions;
+  boundActions?: BoundActions;
 }
 
 export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
@@ -551,7 +559,7 @@ export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
   }
 
   if (state?.phase === 'bound') {
-    return createElement(BoundView, { key: state.appId, appId: state.appId, recheck });
+    return createElement(BoundView, { key: state.appId, appId: state.appId, recheck, actions: props.boundActions });
   }
 
   return createElement(UnboundView, { state: state ?? { phase: 'starting' }, recheck, actions: props.actions });

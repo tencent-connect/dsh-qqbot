@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 import { BindingService } from './binding-service.ts';
-import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
+import { registerBindRoutes, type BindRoutesOptions, type WebServerLike } from './bind-routes.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
@@ -111,7 +111,10 @@ export async function ensureCredentials(
  * 在 apply 的 bootstrapGateway 之前调用；写入经同一 persist 路径，
  * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
  */
-export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
+export function registerBoundCredentialRoutes(
+  ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>,
+  actions: Pick<BindRoutesOptions, 'boundAppId' | 'onUnbind' | 'onManualCredentials'> = {},
+): void {
   (ctx as unknown as {
     inject(deps: readonly string[], callback: (scoped: Context) => void): unknown;
   }).inject(['webServer'], (scoped) => {
@@ -121,6 +124,7 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
       boundAppId: () => appId,
       onManualCredentials: (credentials) => persistCredentials(credentials, logger),
       currentConfig: () => config,
+      ...actions,
     });
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
       return disposeRoutes;

@@ -141,8 +141,24 @@ export function bootstrapGateway(
     const peer = message.kind === 'group' ? message.groupOpenid : message.senderId;
     if (!message.messageId || !peer || peer !== replyTarget.targetId || message.kind !== replyTarget.scope) return;
     const senderName = messageSenderName(message);
-    if (replyTarget.scope === 'c2c' && allowTarget(replyTarget)) {
-      history.names?.savePeer(config.appId, replyTarget.scope, peer, senderName);
+    if (allowTarget(replyTarget)) {
+      if (message.kind === 'c2c') {
+        history.names?.savePeer(config.appId, 'c2c', peer, senderName);
+      } else if (message.kind === 'group' && 'member_openid' in message.raw.author
+        && !message.raw.author.bot && message.raw.author.member_openid === message.senderId) {
+        history.names?.saveGroupMember(config.appId, message.senderId, senderName);
+      }
+      if (message.kind === 'group' && history.names && Array.isArray(message.mentions)) {
+        for (const mention of message.mentions) {
+          if (!mention || mention.scope === 'all') continue;
+          const name = (typeof mention.nickname === 'string' && mention.nickname.trim()) || mention.username;
+          for (const id of new Set([mention.id, mention.member_openid, mention.user_openid])) {
+            if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(id)) continue;
+            if (mention.is_you === true) history.names.saveBotIdentity(config.appId, id, name, peer);
+            else if (name) history.names.saveGroupMember(config.appId, id, name);
+          }
+        }
+      }
     }
     await history.initialize?.(replyTarget);
     if (!canRecord(replyTarget)) return;
@@ -292,9 +308,11 @@ export function bootstrapGateway(
     logger.warn(`qqbot-nodejs SDK 不支持 disconnected 事件（请升级 @tencent-connect/qqbot-nodejs 至 1.0.5+）: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  bot.on('ready', () => {
+  bot.on('ready', data => {
     if (!active) return;
     state = 'connected';
+    const user = (data as { user?: { id?: unknown; username?: unknown } } | undefined)?.user;
+    if (user) history?.names?.saveBotIdentity(config.appId, user.id, user.username);
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
   bot.on('resumed', () => { if (active) state = 'connected'; });

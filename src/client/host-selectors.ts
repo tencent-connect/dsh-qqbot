@@ -150,6 +150,18 @@ export function findModel(directory: ModelDirectory | null, selection: { provide
   return directory?.groups.find((group) => group.id === selection.provider)?.models.find((model) => model.model === selection.model);
 }
 
+/** Read the same next selection and catalog fallback as the native input box. */
+export function sessionModelLabel(projection: unknown, directory: ModelDirectory | null): string | undefined {
+  const next = record(projection)?.next;
+  const selection = next === null ? directory?.defaultModel : record(next);
+  const provider = text(selection?.provider);
+  const id = text(selection?.model);
+  if (!provider || !id) return undefined;
+  const model = findModel(directory, { provider, model: id });
+  const effort = text(record(next)?.reasoningEffort) ?? model?.defaultEffort;
+  return [model?.name ?? id, model?.efforts.find(option => option.id === effort)?.name ?? effort].filter(Boolean).join(' · ');
+}
+
 /** Resolve a model route to a human label without an inherit fallback. */
 function routeLabel(directory: ModelDirectory | null, selection: { provider: string; model: string }): string {
   const model = findModel(directory, selection);

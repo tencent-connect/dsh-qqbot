@@ -18,7 +18,7 @@ import {
 /** 配对状态轮询间隔（进行中的码需要实时反映"已认领"）。 */
 const POLL_MS = 2000;
 
-function usePairStatus(active: boolean): { status: PairStatusWire | null; error: string | null; reload: () => void } {
+function usePairStatus(active: boolean, path: string): { status: PairStatusWire | null; error: string | null; reload: () => void } {
   const [status, setStatus] = useState<PairStatusWire | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -26,7 +26,7 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
   useEffect(() => {
     if (!active) return;
     let stopped = false;
-    const load = (): void => { void fetchJson<PairStatusWire>(PAIR_STATUS_PATH, { cache: 'no-store' }).then((s) => { if (!stopped) { setStatus(s); setError(null); } }).catch((c: unknown) => {
+    const load = (): void => { void fetchJson<PairStatusWire>(path, { cache: 'no-store' }).then((s) => { if (!stopped) { setStatus(s); setError(null); } }).catch((c: unknown) => {
       if (stopped) return;
       const msg = c instanceof Error ? c.message : '';
       // The route may temporarily disappear during a reload. Keep the last successful snapshot.
@@ -35,16 +35,17 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
     load();
     const timer = setInterval(load, POLL_MS);
     return () => { stopped = true; clearInterval(timer); };
-  }, [active, tick]);
+  }, [active, path, tick]);
   return { status, error, reload };
 }
 
 /** 单个用途的认领面板：生成码 / 展示进行中的码 / 已认领成员列表（可撤销）。 */
-export function PairClaimPanel({ purpose, title, description, hint, enabled = true, onChange }: {
-  purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean; onChange?: () => void;
+export function PairClaimPanel({ purpose, title, description, hint, enabled = true, canPair = true, appId, onChange }: {
+  purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean; canPair?: boolean; appId?: string; onChange?: () => void;
 }): ReactNode {
   usePairingStyles();
-  const { status, error, reload } = usePairStatus(enabled);
+  const endpoint = (path: string) => appId === undefined ? path : `${path}?appId=${encodeURIComponent(appId)}`;
+  const { status, error, reload } = usePairStatus(enabled, endpoint(PAIR_STATUS_PATH));
   const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
   const [code, setCode] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -95,9 +96,9 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     h('p', { className: 'imqq-pairHint' }, '先完成 QQ 机器人绑定，才能配置认领。'));
 
   const issue = (): void => {
-    if (busy) return;
+    if (busy || !canPair) return;
     setBusy(true); setMsg(null);
-    void fetchJson<PairChallenge & { previousClaims: PairClaimResult[] }>(PAIR_ISSUE_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, previousCode: code?.code }) })
+    void fetchJson<PairChallenge & { previousClaims: PairClaimResult[] }>(endpoint(PAIR_ISSUE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, previousCode: code?.code }) })
       .then((r) => {
         setResults(previous => mergePairResults(previous, r.previousClaims));
         setCode({ code: r.code, expiresAt: r.expiresAt }); setCodeEnded(false); codeSeen.current = false;
@@ -109,7 +110,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const revoke = (openid: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson(PAIR_REVOKE_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
+    void fetchJson(endpoint(PAIR_REVOKE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
       .then(() => { reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '移除失败'))
       .finally(() => setBusy(false));
@@ -118,7 +119,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const saveRename = (openid: string, nickname: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson(PAIR_RENAME_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
+    void fetchJson(endpoint(PAIR_RENAME_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
       .then(() => { setEditing(null); reload(); onChange?.(); })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '修改失败'))
       .finally(() => setBusy(false));
@@ -126,7 +127,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const addManual = (): void => {
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
-    void fetchJson<ManualPairResult>(PAIR_MANUAL_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
+    void fetchJson<ManualPairResult>(endpoint(PAIR_MANUAL_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
       .then((r) => {
         setManualOpenid(r.errors.map(error => error.input).join('\n'));
         setResults(previous => mergePairResults(previous, r.results));
@@ -137,12 +138,12 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       .finally(() => setBusy(false));
   };
   const secs = code ? Math.max(0, Math.round((code.expiresAt - Date.now()) / 1000)) : 0;
-  const openAdd = (): void => { setAddOpen(true); setMsg(null); setResults([]); setWindowCodes([]); setManualOpenid(''); setManualOpen(false); issue(); };
+  const openAdd = (): void => { setAddOpen(true); setMsg(null); setResults([]); setWindowCodes([]); setManualOpenid(''); setManualOpen(!canPair); if (canPair) issue(); };
   const finish = (): void => {
     if (busy) return;
     if (code === null) { setAddOpen(false); return; }
     setBusy(true); setMsg(null);
-    void fetchJson(PAIR_END_PATH, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, code: code.code }) })
+    void fetchJson(endpoint(PAIR_END_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, code: code.code }) })
       .then(() => { setAddOpen(false); setCode(null); codeSeen.current = false; reload(); onChange?.(); })
       .catch((error: unknown) => setMsg(error instanceof Error ? error.message : '结束配对失败，请重试'))
       .finally(() => setBusy(false));
@@ -197,8 +198,9 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
             h('span', { className: 'imqq-pairCodeMeta' }, codeEnded || secs === 0 ? '已结束，请重新生成' : `剩余 ${Math.floor(secs / 60).toString().padStart(2, '0')}:${(secs % 60).toString().padStart(2, '0')}`)),
           h('div', { className: 'imqq-pairCodeActions' },
             h(Button, { variant: 'outline', size: 'sm', disabled: busy || codeEnded || secs === 0, onClick: () => { void copyPairCode(code.code); } }, copied ? '已复制' : '复制配对码'),
-            h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '重新生成')))
-          : h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '生成配对码'),
+            h(Button, { variant: 'primary', size: 'sm', disabled: busy || !canPair, onClick: issue }, busy ? '生成中…' : '重新生成')))
+          : canPair ? h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '生成配对码')
+            : h('p', { className: 'imqq-pairHint' }, '启用机器人后可生成配对码。'),
         h(DisclosureRow, { title: `通过 OpenID 批量添加（非${purpose === 'allow-group' ? '群号' : ' QQ 号'}）`, icon: h(IconChevronDownOutlineRegular), open: manualOpen, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: () => setManualOpen(value => !value) },
         h('div', { className: 'imqq-pairManual' },
         h('p', { className: 'imqq-pairHint' }, '用户 OpenID 不是 QQ 号，群 OpenID 也不是群号，不能直接填写 QQ 号或群号。请使用当前机器人对应的 OpenID；没有 OpenID 时，请使用上方配对码添加。'),
