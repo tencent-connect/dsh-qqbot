@@ -55,17 +55,16 @@ export function PromptEditor({ label, value, hint, disabled, onChange }: {
   };
   const brace = value.indexOf('{{');
   const hasVariables = brace >= 0 && value.indexOf('}}', brace + 2) >= 0;
-  return h('section', { className: 'imqw-prompt-editor', 'aria-label': label },
+  return h('div', { className: 'imqw-prompt-fields' },
     h('div', { className: 'imqw-prompt-toolbar' },
-      h('label', { htmlFor: `${id}-text` }, label),
-      h('div', { className: 'imqw-actions' },
-        h(SegmentedControl<EditorPage>, {
-          id, label: `${label}视图`, value: page, onChange: setPage,
-          options: [{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }],
-        }),
-        h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: disabled || reading,
-          'aria-label': `从文件导入${label}`, title: '支持 MD、TXT 和 DOCX', onClick: () => fileInput.current?.click(),
-        }, reading ? '正在读取…' : '从文件导入'))),
+      h(SegmentedControl<EditorPage>, {
+        id, label: `${label}视图`, value: page, onChange: setPage,
+        options: [{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }],
+      }),
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: disabled || reading,
+        'aria-label': `从文件导入${label}`, title: '支持 MD、TXT 和 DOCX', onClick: () => fileInput.current?.click(),
+      }, reading ? '正在读取…' : '导入文件'),
+    ),
     h('input', { type: 'file', accept: '.md,.txt,.docx', hidden: true, ref: fileInput,
       'aria-label': `选择${label}文件`, disabled: disabled || reading,
       onChange: (event: ChangeEvent<HTMLInputElement>) => {
@@ -74,12 +73,14 @@ export function PromptEditor({ label, value, hint, disabled, onChange }: {
         if (file && !disabled && !reading) void pick(file);
       },
     }),
-    h('div', { role: 'tabpanel', id: `${id}-edit-panel`, 'aria-labelledby': `${id}-edit`, hidden: page !== 'edit' },
-      h('textarea', { id: `${id}-text`, value, rows: 5, maxLength: EXTRA_MAX_CHARS, disabled,
-        onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { setImported(''); onChange(event.currentTarget.value); },
-      })),
-    h('div', { role: 'tabpanel', id: `${id}-preview-panel`, 'aria-labelledby': `${id}-preview`, hidden: page !== 'preview' },
-      h('pre', { className: 'imqw-prompt-preview', 'aria-label': `${label}预览`, tabIndex: 0 }, value || '暂无补充提示词。')),
+    h('div', { className: 'imqw-prompt-surface' },
+      h('div', { role: 'tabpanel', id: `${id}-edit-panel`, 'aria-labelledby': `${id}-edit`, hidden: page !== 'edit' },
+        h('textarea', { value, maxLength: EXTRA_MAX_CHARS, disabled, 'aria-label': label, placeholder: `输入${label}`,
+          onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { setImported(''); onChange(event.currentTarget.value); },
+        })),
+      h('div', { role: 'tabpanel', id: `${id}-preview-panel`, 'aria-labelledby': `${id}-preview`, hidden: page !== 'preview' },
+        h('pre', { className: 'imqw-prompt-preview', 'aria-label': `${label}预览`, tabIndex: 0 }, value || '暂无补充提示词。')),
+    ),
     h('div', { className: 'imqw-prompt-status imqw-muted' },
       h('span', null, hint),
       h('span', null, `${value.length.toLocaleString('zh-CN')} / ${EXTRA_MAX_CHARS.toLocaleString('zh-CN')}`)),

@@ -6,15 +6,14 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 export function SlashCommandList({ commands }: { commands: readonly SlashCommandDescriptor[] }): ReactNode {
   const [open, setOpen] = useState(false);
   const toggle = useCallback(() => setOpen(value => !value), []);
-  const visible = commands.filter((command) => command.hidden !== true);
   return h(DisclosureRow, { className: 'imqc-cmdList',
     icon: h(IconChevronDownOutlineRegular),
-    title: `支持的斜杠命令（${visible.length} 个）`,
+    title: `支持的斜杠命令（${commands.length} 个）`,
     open, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: toggle,
   }, h('div', { className: 'imqc-cmdContent' },
-    visible.length === 0 ? h('p', { className: 'imqc-hint' }, '暂无可用命令。') : null,
+    commands.length === 0 ? h('p', { className: 'imqc-hint' }, '暂无可用命令。') : null,
     ...(['agent', 'qqbot'] as const).map((category) => {
-      const items = visible.filter((command) => command.category === category);
+      const items = commands.filter((command) => command.category === category);
       if (items.length === 0) return null;
       return h('div', { className: 'imqc-cmdGroup', key: category },
         h('strong', null, category === 'agent' ? '通用能力' : 'QQ 内置'),

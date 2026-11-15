@@ -287,23 +287,27 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
   border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md);
   font-size: 13px;
 }
+.imqw-prompt-fields { display: grid; gap: 8px; min-width: 0; }
 .imqw-prompt-toolbar, .imqw-prompt-status {
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
 }
-.imqw-prompt-toolbar > label { font-weight: 500; }
-.imqw-prompt-toolbar .imqw-actions { flex-wrap: wrap; }
-.imqw-prompt-editor textarea, .imqw-prompt-preview {
-  display: block; box-sizing: border-box; width: 100%; margin: 0;
-  min-height: 106px; max-height: 340px; padding: 9px 10px; overflow: auto;
+.imqw-prompt-surface {
+  box-sizing: border-box; height: 128px; min-height: 106px; max-height: 340px;
+  overflow: hidden; resize: vertical;
   border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm);
-  background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary);
-  font: inherit; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--dsw-alias-bg-layer-3);
 }
-.imqw-prompt-editor textarea { resize: vertical; }
-.imqw-prompt-editor :is(textarea, .imqw-prompt-preview):focus-visible {
+.imqw-prompt-surface > [role='tabpanel'] { height: 100%; }
+.imqw-prompt-surface :is(textarea, .imqw-prompt-preview) {
+  display: block; box-sizing: border-box; width: 100%; height: 100%; margin: 0;
+  padding: 9px 10px; overflow: auto; border: 0; background: transparent; color: inherit;
+  font: inherit; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; resize: none;
+}
+.imqw-prompt-surface:has(:focus-visible) {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color);
   outline-offset: 1px;
 }
+.imqw-prompt-surface :is(textarea, .imqw-prompt-preview):focus-visible { outline: none; }
 .imqw-prompt-editor p { margin: 0; }
 .imqw-current-session {
   display: grid; justify-items: start; gap: 6px; min-width: 0;
@@ -327,18 +331,6 @@ button.imqw-message-action:hover, button.imqw-message-action:focus-visible { bac
 .imqw-tool-list label:hover { background: var(--dsw-alias-bg-layer-3); }
 .imqw-tool-list input { flex: none; margin-block: 2px 0; accent-color: var(--dsw-focus-ring-color); }
 .imqw-tool-list small { display: block; color: var(--dsw-alias-label-tertiary); }
-.imqw-agent-fields textarea {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 64px;
-  resize: vertical;
-  padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-2);
-  color: inherit;
-  font: inherit;
-}
 .imqw-agent-fields .imqq-selectAnchor { min-width: 0; }
 .imqw-agent-fields .imqq-select {
   width: 100%;

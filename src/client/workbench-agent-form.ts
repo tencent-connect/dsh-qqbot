@@ -1,5 +1,5 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
+import { createElement as h, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Button, Input, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { ChatScope } from '../types.ts';
 import {
   WORKBENCH_BASE_PERMISSIONS, WORKBENCH_TOOLS_PATH, type WorkbenchAgentSettings, type WorkbenchToolChoice,
@@ -243,15 +243,31 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange, pla
   );
 }
 
+const promptScopes = [{ value: 'group', label: '群聊' }, { value: 'c2c', label: '私聊' }] as const;
+
 export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: AgentFieldsProps & { scope?: ChatScope }): ReactNode {
+  const scopeId = useId();
+  const [promptScope, setPromptScope] = useState<ChatScope>('group');
+  const activeScope = scope ?? promptScope;
+  const key = activeScope === 'group' ? 'groupPrompt' : 'directPrompt';
+  const label = activeScope === 'group' ? '群聊补充提示词' : '私聊补充提示词';
+  const title = scope ? label : '补充提示词';
+  const editor = h(PromptEditor, {
+    key, label, value: settings[key], disabled, onChange: value => onChange({ [key]: value }),
+    hint: scope ? '保存后，下次组装模型请求时读取。' : undefined,
+  });
   return h('div', { className: 'imqw-agent-fields' },
-    ...(['group', 'c2c'] as const).filter(kind => !scope || kind === scope).map(kind => {
-      const key = kind === 'group' ? 'groupPrompt' : 'directPrompt';
-      return h(PromptEditor, { key, label: kind === 'group' ? '群聊补充提示词' : '私聊补充提示词',
-        value: settings[key], disabled, onChange: value => onChange({ [key]: value }),
-        hint: scope ? '保存后，下次组装模型请求时读取。' : undefined,
-      });
-    }),
+    h('section', { className: 'imqw-prompt-editor', 'aria-label': title },
+      h('div', { className: 'imqw-prompt-toolbar' },
+        h('h3', null, title),
+        scope ? null : h(SegmentedControl<ChatScope>, {
+          id: scopeId, label: '补充提示词场景', value: promptScope, onChange: setPromptScope, options: promptScopes,
+        }),
+      ),
+      scope ? editor : promptScopes.map(({ value }) => h('div', {
+        key: value, role: 'tabpanel', id: `${scopeId}-${value}-panel`, 'aria-labelledby': `${scopeId}-${value}`, hidden: value !== promptScope,
+      }, value === promptScope ? editor : null)),
+    ),
     scope !== 'c2c' ? h('p', { className: 'imqw-receiving imqw-muted' }, '群聊生成完成后发送整条回复。') : null,
     ...([
       ['streaming', '私聊流式输出', '保存后下一轮生效，仅限被动回复。'],

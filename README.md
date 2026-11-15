@@ -200,6 +200,7 @@ QQ 提问继续通过原生 `followup` 进入 Inbox。同一群／联系人按�
 | `/stop` | 中止当前生成 |
 | `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |
 | `/bot-version` | 查看版本信息 |
+| `/bot-me` | 查看自己的 OpenID，群聊中同时显示群 OpenID |
 | `/bot-status` | 查看当前会话状态 |
 | `/bot-help` | 查看所有指令 |
 

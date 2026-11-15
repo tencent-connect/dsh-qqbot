@@ -1,6 +1,6 @@
 import { isAbsolute, join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
-import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import { AccessControlSchema, ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { describeCommands } from '../commands/index.ts';
 import { bootstrapGateway, openDeliveryLedger, type GatewayRuntime } from '../gateway/bootstrap.ts';
 import { registerSendFileTool } from '../media/send-file-tool.ts';
@@ -327,8 +327,7 @@ export class RobotRuntimes {
           kind: 'additional',
           appSecret: patch.appSecret ?? (record?.kind === 'additional' ? record.appSecret : ''),
           access: {
-            c2cMode: 'allowlist', c2cAllow: [], groupMode: 'allowlist', groupAllow: [], commandMode: 'open',
-            ...savedAccess,
+            ...(savedAccess ?? AccessControlSchema()),
             ...patch.access,
             ...(unboundAccess && patch.access?.c2cAllow ? {
               c2cMode: unboundAccess.c2cMode,

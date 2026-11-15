@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import type { WebRoute } from '../setup/bind-routes.ts';
 import { PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH } from '../shared/pairing-protocol.ts';
 import { expect, it, vi } from 'vitest';
-import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import { ConfigSchema, type AccessControlConfig, type ImQQBotConfig } from '../config.ts';
 import type { DshAgentRegistry } from '../session/index.ts';
 import { persistCredentialsToProfile } from '../setup/persist.ts';
 import { RobotConfigStore } from './robot-config.ts';
@@ -180,6 +180,47 @@ it('clears only the confirmed binding, letting a later retry finish safely', asy
   }
 });
 
+it('uses upstream defaults for new robots and retains access for existing AppIDs', async () => {
+  sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-robot-access-defaults-'));
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  const store = new RobotConfigStore(join(sandbox.dir, 'robots.json'));
+  const savedAccess = {
+    c2cMode: 'disabled', c2cAllow: ['saved-user'],
+    groupMode: 'allowlist', groupAllow: ['saved-group'], commandMode: 'disabled',
+  } satisfies AccessControlConfig;
+  const existing = store.save({
+    kind: 'additional', appId: 'existing-robot', appSecret: 'fixture-secret', alias: '', enabled: false, revision: 0,
+    access: savedAccess,
+  });
+  let runtime!: RobotRuntimes;
+  const plugin = new Context().plugin(scope => {
+    runtime = new RobotRuntimes(scope, { get: vi.fn() } as unknown as DshAgentRegistry, logger, store);
+  });
+  try {
+    await plugin.await();
+    const credentials = { appSecret: 'fixture-secret', revision: null, enabled: false };
+    const access = {
+      c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'open',
+    };
+    const manual = await runtime.save({ ...credentials, appId: 'manual-robot' });
+    expect(manual.access).toEqual(access);
+    const scanned = await runtime.save({
+      ...credentials, appId: 'scanned-robot', access: { c2cMode: 'allowlist', c2cAllow: ['scanning-user'] },
+    });
+    expect(scanned.access).toEqual({ ...access, c2cMode: 'allowlist', c2cAllow: ['scanning-user'] });
+    await expect(runtime.save({ ...credentials, appId: existing.appId })).rejects.toThrow('这个机器人已添加');
+    expect(store.get(existing.appId)).toEqual(existing);
+
+    runtime.remove(existing.appId, existing.revision, sandbox.dir);
+    const rebound = await runtime.save({ ...credentials, appId: existing.appId });
+    expect(rebound.access).toEqual(savedAccess);
+  } finally {
+    await plugin.dispose();
+    rmSync(sandbox.dir, { recursive: true, force: true });
+    sandbox.dir = '';
+  }
+});
+
 it('shares the upstream whitelist handlers by AppID across enable, revoke and rebind', async () => {
   sandbox.dir = mkdtempSync(join(tmpdir(), 'qq-robot-scoped-access-'));
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
@@ -211,7 +252,10 @@ it('shares the upstream whitelist handlers by AppID across enable, revoke and re
     fetch(`http://127.0.0.1:${address.port}${path}?appId=${appId}`, body === undefined ? {} : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-  const create = (appId: string) => runtime.save({ appId, appSecret: 'fixture-secret', revision: null, access: { commandMode: 'allowlist' } });
+  const create = (appId: string) => runtime.save({
+    appId, appSecret: 'fixture-secret', revision: null,
+    access: { c2cMode: 'allowlist', groupMode: 'allowlist', commandMode: 'allowlist' },
+  });
   const read = (appId: string) => runtime.list().find(robot => robot.appId === appId)!;
   try {
     await create('robot-a');
