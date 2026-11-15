@@ -38,6 +38,7 @@ function loadNative(): Promise<NativeExecutor> {
 // PTC transport is not a capability that can appear in a custom tool list.
 const excluded = new Set(['run_code', 'subagent', 'spawn_agent', 'send_message', 'interrupt_agent', 'workflow', 'plugin_manager']);
 const usable = (name: string): boolean => !excluded.has(name) && !name.startsWith('subagent_') && !name.startsWith('schedule_');
+const nativePermissionEvents = new Set(['permission/preset', 'sandbox/mode', 'approval/policy']);
 const definitions = (ctx: Context): Tools | undefined => ctx.get('tools') as Tools | undefined;
 const presetOf = (agent: DshAgent): string | undefined => agent.session.header?.agentPreset;
 
@@ -67,7 +68,11 @@ function expands(from: WorkbenchAgentSettings | undefined, to: WorkbenchAgentSet
 }
 
 export class WorkbenchToolPolicies {
-  private readonly installed = new WeakMap<DshAgent, { release(): void; replaceable: boolean }>();
+  private readonly installed = new WeakMap<DshAgent, {
+    release(): void;
+    replaceable: boolean;
+    withinNativeCap(): boolean;
+  }>();
   private readonly owners = new WeakMap<DshAgent, string>();
 
   constructor(
@@ -78,6 +83,7 @@ export class WorkbenchToolPolicies {
   ) {
     const lifecycle = ctx as unknown as {
       on(event: 'agent/created' | 'agent/disposed', handler: (event: { agent: DshAgent }) => void | Promise<void>, options: { global: true }): void;
+      on(event: 'session/event', handler: (session: DshAgent['session'], event: { type: string }) => void, options: { global: true }): void;
     };
     lifecycle.on('agent/created', async ({ agent }) => {
       const key = await this.resolveOwner(agent);
@@ -86,6 +92,15 @@ export class WorkbenchToolPolicies {
     lifecycle.on('agent/disposed', ({ agent }) => {
       this.owners.delete(agent);
       this.installed.delete(agent);
+    }, { global: true });
+    lifecycle.on('session/event', (session, event) => {
+      if (!nativePermissionEvents.has(event.type)) return;
+      const agent = this.agents.get(session.id);
+      if (agent?.session !== session || agent.status !== 'running') return;
+      if (this.installed.get(agent)?.withinNativeCap() === false) {
+        // Cancel synchronously so work already past the guard cannot start.
+        agent.cancel({ kind: 'user' }, { keepInbox: true });
+      }
     }, { global: true });
   }
 
@@ -131,13 +146,13 @@ export class WorkbenchToolPolicies {
     const Native = await loadNative();
     if (this.installed.has(agent)) return;
     const executor = new Native(agent.ctx);
-    const allows = (policy: WorkbenchAgentSettings | undefined, name: string): boolean => {
-      if (policy?.tools === undefined) return true;
-      if (!usable(name) || !policy.tools.includes(name)) return false;
+    const withinCap = (policy: WorkbenchAgentSettings): boolean => {
       const limit = rank(policy.permission);
       const actual = rank(permission.current(agent.session));
       return actual >= 0 && limit >= actual;
     };
+    const allows = (policy: WorkbenchAgentSettings | undefined, name: string): boolean =>
+      policy?.tools === undefined || (usable(name) && policy.tools.includes(name) && withinCap(policy));
     const unguard = tools.guard(execution => {
       try {
         const policy = this.read(key);
@@ -153,7 +168,16 @@ export class WorkbenchToolPolicies {
         },
         execute: input => executor.execute(input),
       });
-      this.installed.set(agent, { replaceable, release: () => { deselect(); unguard(); } });
+      this.installed.set(agent, {
+        replaceable,
+        release: () => { deselect(); unguard(); },
+        withinNativeCap: () => {
+          try {
+            const policy = this.read(key);
+            return policy?.tools === undefined || withinCap(policy);
+          } catch { return false; }
+        },
+      });
     } catch (error) {
       unguard();
       throw error;

@@ -48,7 +48,7 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
   /absolute/dsh-qqbot.tgz /absolute/workbench-history.tgz /absolute/new-run-dir
 ```
 
-脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后；撤权后放行，工具本体不得启动。另启动真实的宿主内子 Agent，检查旧请求和 PTC 是否能绕过新策略。使用修复前的包作对照时，追加 `baseline` 以验证两条旧路径确实产生文件。证据写入运行目录的 `report.json`，Host 结束后自动停止。
+脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后，分别通过 QQ 设置撤权、通过 DSH 原生 `/permission` 将权限调到上限之外。释放等待后，预期工具本体不会执行。恢复原生权限后，新一轮应能正常写入。脚本另启动真实的宿主内子 Agent，检查旧请求和 PTC 的授权。用同时缺少 QQ 撤权和原生权限修复的旧包跑正对照时追加 `baseline`。证据写入运行目录的 `report.json`，Host 结束后自动停止。
 
 ## 本地协议夹具
 

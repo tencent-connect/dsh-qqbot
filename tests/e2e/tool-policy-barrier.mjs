@@ -11,13 +11,17 @@ export function apply(ctx) {
   }, { global: true });
   ctx.on('tools/execute', async (exec, next) => {
     const path = exec.arguments?.file_path;
-    if (exec.name === 'write' && typeof path === 'string' && path.endsWith('/waiting.txt')) {
+    if (exec.name === 'write' && typeof path === 'string'
+      && (path.endsWith('/waiting.txt') || path.endsWith('/waiting-native-cap.txt'))) {
       const gate = Promise.withResolvers();
       gates.set(String(exec.agent.id), gate);
       // Deliberately do not stop waiting when aborted; exercise the Host's own
       // check at the body after a non-cooperative dispatch wrapper returns.
       const timeout = setTimeout(gate.resolve, 15_000);
-      try { await gate.promise; } finally { clearTimeout(timeout); }
+      try { await gate.promise; } finally {
+        clearTimeout(timeout);
+        gates.delete(String(exec.agent.id));
+      }
     }
     return next();
   }, { global: true, prepend: true });

@@ -193,6 +193,7 @@ try {
   await save('c2c', { tools: ['read'] });
   releaseChild([write('child-forbidden.txt')]);
   const childEvents = await finish(child, 1, direct);
+  await finish(direct, 1);
   const childWrite = existsSync(join(workspace, 'child-forbidden.txt'));
   assert.equal(childWrite, expected === 'baseline');
   report.cases.liveChild = { fileWritten: childWrite, turn: childEvents.filter(row => row.type === 'turn/end').at(-1).data.reason };
@@ -232,6 +233,38 @@ try {
   const stale = await finish(group, 8);
   assert.equal(existsSync(join(workspace, 'ptc-bypass.txt')), false);
   report.cases.stalePtc = { fileWritten: false, turn: stale.filter(row => row.type === 'turn/end').at(-1).data.reason };
+
+  const setNativePermission = async (preset) => {
+    const result = await client.rpc('commands/execute', {
+      agentId: group, line: '/permission ' + preset, submittedAttachments: [],
+    });
+    assert.deepEqual(result?.result, { kind: 'success', text: 'preset ' + preset });
+  };
+  await save('group', { permission: 'workspace-write', tools: ['read', 'write'] });
+  await setNativePermission('workspace-write');
+  plan('waiting-before-native-switch', [write('waiting-native-cap.txt')]);
+  await dispatch('group');
+  await until(async () => (await client.get(barrierPath)).waiting.includes(group), 'write admitted under workspace-write');
+  assert.deepEqual((await observed('waiting-before-native-switch')).tools, ['read', 'write']);
+  await setNativePermission('danger-full-access');
+  await client.post(barrierPath, { sessionId: group });
+  const switched = await finish(group, 9);
+  const nativeSwitchWrite = existsSync(join(workspace, 'waiting-native-cap.txt'));
+  const nativeSwitchError = switched.find(row => row.type === 'tool/result' && row.data.turn === 9)?.data.error?.code;
+  report.cases.nativeSwitchAfterGuard = {
+    fileWritten: nativeSwitchWrite, errorCode: nativeSwitchError ?? null,
+    turn: switched.filter(row => row.type === 'turn/end').at(-1).data.reason,
+  };
+  assert.equal(nativeSwitchWrite, expected === 'baseline', 'native permission above the QQ cap must fence the admitted write');
+  if (expected === 'fixed') assert.equal(nativeSwitchError, 'ABORTED_BEFORE_DISPATCH');
+
+  await setNativePermission('workspace-write');
+  plan('after-native-switch-restored', [write('native-restored.txt')]);
+  await dispatch('group');
+  await finish(group, 10);
+  assert.deepEqual((await observed('after-native-switch-restored')).tools, ['read', 'write']);
+  assert.equal(await readFile(join(workspace, 'native-restored.txt'), 'utf8'), 'fixture only\n');
+  report.cases.nativeSwitchRestored = 'A fresh turn can write after the native permission returns within the cap';
   report.sessions = { group, direct, child };
   assert.equal(qq.state.unexpectedRequests, 0);
 } finally {

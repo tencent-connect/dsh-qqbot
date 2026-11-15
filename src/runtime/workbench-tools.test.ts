@@ -25,9 +25,14 @@ function fixture(initial = native) {
   const saved = new Map([[key, initial], [peer, native]]);
   const live = new Map<string, DshAgent>();
   const events = new Map<string, (event: { agent: DshAgent }) => unknown>();
+  type SessionListener = (session: DshAgent['session'], event: { type: string }) => void;
+  let observeSession: SessionListener | undefined;
   const stored = new Map<string, { header: { parentSession?: string } }>();
   const ctx = {
-    on: (event: string, callback: (event: { agent: DshAgent }) => unknown) => events.set(event, callback),
+    on(event: string, callback: SessionListener & ((event: { agent: DshAgent }) => unknown)) {
+      if (event === 'session/event') observeSession = callback;
+      else events.set(event, callback);
+    },
     get: (name: string) => name === 'sessionPersistence' ? { stat: async (id: string) => stored.get(id) } : undefined,
     effect: vi.fn(),
   };
@@ -56,7 +61,10 @@ function fixture(initial = native) {
     try { await events.get('agent/created')?.({ agent }); }
     catch (error) { live.delete(id); throw error; }
     return { cancel, signal: signal.signal, setIdle: () => { simulated.status = 'idle'; },
-      setPermission: (next: string) => { permission = next; },
+      setPermission: (next: string, type = 'permission/preset') => {
+        permission = next;
+        observeSession?.(agent.session, { type });
+      },
       guard: (name: string) => check?.({ name, agent }),
       tools: () => describe(['read', 'write', 'subagent', 'run_code'].map(name => ({ name }))).schemas.map(tool => tool.name),
       dispose() { events.get('agent/disposed')?.({ agent }); live.delete(id); },
@@ -100,6 +108,36 @@ describe('QQ custom tool permissions', () => {
     waitingToDispatch();
     expect(invoked.mock.calls).toEqual([['already started']]);
     expect(root.guard('write')).toMatch(/未允许/);
+  });
+
+  it.each([
+    ['permission/preset', 'danger-full-access'],
+    ['sandbox/mode', 'danger-full-access'],
+    ['approval/policy', 'custom'],
+  ])('cancels an admitted call when %s leaves the base permission', async (event, permission) => {
+    const { start } = fixture(custom);
+    const root = await start('root');
+    const independent = await start('independent');
+    expect(root.guard('write')).toBeUndefined();
+
+    root.setPermission(permission, event);
+    expect(root.tools()).toEqual([]);
+    expect(root.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true });
+    expect(independent.cancel).not.toHaveBeenCalled();
+
+    root.setPermission('workspace-write');
+    expect(root.signal.aborted).toBe(true);
+    expect(root.tools()).toEqual(['read', 'write']);
+  });
+
+  it('keeps running when native permission stays within the cap or the Session has no custom policy', async () => {
+    const { start } = fixture(custom);
+    const root = await start('root');
+    root.setPermission('read-only');
+    expect(root.cancel).not.toHaveBeenCalled();
+    const independent = await start('independent');
+    independent.setPermission('danger-full-access');
+    expect(independent.cancel).not.toHaveBeenCalled();
   });
 
   it('recovers QQ ownership for a child reopened after its ancestor is disposed', async () => {

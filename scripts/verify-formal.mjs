@@ -114,6 +114,7 @@ function main(args) {
     for (const [name, expectedInvariant] of [
       ['no-child-policy', 'NoSideEffectAfterRevocation'],
       ['no-dispatch-fence', 'NoSideEffectAfterRevocation'],
+      ['no-native-fence', 'NoSideEffectAfterNativeConflict'],
       ['no-install-check', 'InstalledBeforePublication'],
     ]) {
       runTlc(jar, { ...tools, config: `${name}.cfg`, metadir: join(dir, name), expectedInvariant });
