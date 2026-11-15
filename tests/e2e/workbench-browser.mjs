@@ -67,25 +67,55 @@ async function verifyMessages(page, client, fixture, until) {
     .getByText('QQ 拒绝', { exact: true }).waitFor();
   await fixture('outbound', { mode: 'success' });
 
-  assert.equal(await button(history, '刷新消息').count(), 0);
-  const sessionMenu = button(pane, '当前 Session');
-  await sessionMenu.click();
+  const tree = page.getByRole('complementary', { name: 'QQ 会话列表' });
+  const refreshList = button(tree, '刷新会话列表');
+  const refreshMessages = button(pane, '刷新消息');
+  for (const refresh of [refreshList, refreshMessages]) {
+    assert.equal((await refresh.textContent()).trim(), '');
+    assert.equal(await refresh.locator('svg').count(), 1);
+  }
+  const [conversationsResponse] = await Promise.all([
+    page.waitForResponse(response => response.url().includes(workbench + 'conversations?') && response.request().method() === 'GET'),
+    refreshList.click(),
+  ]);
+  assert(conversationsResponse.ok());
+
   await page.route('**/api/qqbot/workbench/timeline?*', route => route.fulfill({
     status: 503, contentType: 'application/json', body: JSON.stringify({ error: '夹具读取失败' }),
   }), { times: 1 });
-  await menu('刷新消息').click();
+  await refreshMessages.click();
   const error = history.getByRole('alert').filter({ hasText: '夹具读取失败' });
   await error.waitFor();
   await button(history, '重试').click();
   await error.waitFor({ state: 'hidden' });
 
-  await sessionMenu.click();
-  await menu('新建 Session').click();
+  const openCurrent = button(pane, '当前 Session');
+  const newSession = button(pane, '新建 Session');
+  await newSession.click();
   await button(page.getByRole('dialog', { name: '新建 QQ Session' }), '取消').click();
+  await openCurrent.click();
+  await button(page, '返回 QQ 对话').click();
+  await row.waitFor();
   await messageActions.click();
   await menu('打开关联 Session').click();
   await button(page, '返回 QQ 对话').click();
   await row.waitFor();
+
+  const archived = await client.rpc('workspace/archiveSession', { request: { sessionId: inbound.sessionId } });
+  assert(archived.archivedSessionIds.includes(inbound.sessionId));
+  await page.reload();
+  await button(page, 'QQ 机器人').click();
+  await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
+  await button(pane, '恢复当前 Session').click();
+  await openCurrent.waitFor();
+  assert(await openCurrent.isEnabled());
+  const { conversations } = await client.get(workbench + 'conversations?appId=' + DUMMY_APP_ID);
+  assert.equal(conversations.find(peer => peer.openId === directId).currentSessionId, inbound.sessionId);
+
+  await fixture('message', { scope: 'c2c', identity: 'denied', command: 'ping' });
+  await page.locator('.imqw-peer-select').filter({ hasText: 'ied-user' }).click();
+  assert(await openCurrent.isDisabled(), 'a peer without a Session cannot open one');
+  assert(await newSession.isEnabled(), 'a new peer can create its first Session');
 
   await page.locator('.imqw-peer-select').filter({ hasText: groupId.slice(-8) }).click();
   await page.setViewportSize({ width: 840, height: 900 });
@@ -96,9 +126,12 @@ async function verifyMessages(page, client, fixture, until) {
     const toolbar = node.querySelector('.imqw-composer-toolbar');
     return toolbar.scrollWidth <= toolbar.clientWidth + 1 && node.scrollWidth <= node.clientWidth + 1;
   }), 'composer and toolbar fit a narrow viewport');
+  for (const action of [openCurrent, newSession, refreshMessages, button(pane, '会话设置')]) await action.waitFor();
+  assert(await pane.locator('.imqw-main-head').evaluate(node => node.scrollWidth <= node.clientWidth + 1),
+    'header actions fit a narrow viewport');
   await page.setViewportSize({ width: 1640, height: 1040 });
-  return { attachment: true, quoteAndSend: true, responseDetails: true, refreshAndRetry: true,
-    sendFailure: true, nativeSessionReturn: true, narrowLayout: true };
+  return { attachment: true, quoteAndSend: true, responseDetails: true, listRefresh: true, messageRefreshAndRetry: true,
+    sendFailure: true, nativeSessionReturn: true, restoreArchivedSession: true, firstSessionAction: true, narrowLayout: true };
 }
 
 async function verifyToolPicker(page, client, until) {

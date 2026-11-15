@@ -150,6 +150,7 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export const IconEllipsisOutlineRegular: Icon;
   export const IconPaperclipOutlineRegular: Icon;
   export const IconPlusOutlineRegular: Icon;
+  export const IconRefreshOutlineRegular: Icon;
   export const IconSettingsOutlineRegular: Icon;
   export const IconTrashOutlineRegular: Icon;
 }

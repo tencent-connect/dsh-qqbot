@@ -101,13 +101,17 @@ export const WORKBENCH_STYLES = `
   flex-wrap: wrap; flex: none; padding-bottom: 9px;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
-.imqw-main-head .imqw-actions { margin-inline-start: auto; align-items: center; }
+.imqw-main-head .imqw-actions { margin-inline-start: auto; align-items: center; max-width: 100%; }
+.imqw-column-head .imqw-icon-action { flex: none; width: 28px; padding-inline: 0; }
 .imqw-main-title { flex: 1 1 10ch; }
 .imqw-main-title h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.imqw-session-menu { overflow-wrap: anywhere; }
 .imqw-conversation-grid > .imqw-conversation {
   container: imqq-messages / inline-size;
   display: flex; flex-direction: column; overflow: hidden;
+}
+@container imqq-messages (max-width: 360px) {
+  .imqw-main-title { flex-basis: 100%; }
+  .imqw-main-head .imqw-actions { margin-inline-start: 0; }
 }
 .imqw-settings > .imqw-column-head { margin-bottom: 3px; }
 .imqw-settings .imqw-column-head { align-items: flex-start; padding-bottom: 12px; }

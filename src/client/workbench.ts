@@ -1,5 +1,5 @@
 import { createElement as h, Fragment, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent, type ReactNode, type SyntheticEvent } from 'react';
-import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, IconRefreshOutlineRegular, IconSettingsOutlineRegular, Input, Menu, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
   WORKBENCH_CONVERSATIONS_PATH,
   WORKBENCH_NEW_SESSION_PATH,
@@ -262,7 +262,6 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
   const [openViewId, setOpenViewId] = useState<string>();
   const selectedView = views.find(view => view.id === openViewId);
   const activeView = selectedView ?? views.find(view => view.id === QQ_HISTORY_VIEW_ID);
-  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [viewRefreshKey, setViewRefreshKey] = useState(0);
   useEffect(() => {
     if (!selectedView) setOpenViewId(undefined);
@@ -469,7 +468,6 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     const key = conversationKey(item);
     peerSelections.set(appId, key);
     setSelection(key);
-    setSessionMenuOpen(false);
     setOpenError('');
     onSmallPage('conversation');
   };
@@ -478,18 +476,6 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     return (filter === 'all' || filter === item.scope)
       && [peerName(item), item.name, item.openId].some(value => value.toLowerCase().includes(needle));
   });
-  const sessionMenu: MenuEntry[] = [];
-  if (currentArchived) {
-    sessionMenu.push({ id: 'restore', label: restoring === current?.id ? '恢复中…' : '恢复原会话',
-      disabled: !restoreSession || !!busyKey || !!restoring });
-  } else if (current) {
-    sessionMenu.push({ id: 'open', label: '打开当前 Session', disabled: !openSession });
-  }
-  sessionMenu.push({ id: 'new', label: '新建 Session',
-    disabled: !peer?.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey || !!restoring });
-  if (activeView?.refreshable) {
-    sessionMenu.push({ type: 'separator', id: 'message-actions' }, { id: 'refresh', label: '刷新消息' });
-  }
   const sessionCaption = current && [sessionTitle?.(current.id),
     workspaceTitle?.(current.id, current.cwd) || workspaceName(current.cwd), current.preset].filter(Boolean).join(' · ');
 
@@ -497,7 +483,10 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     h('aside', { className: 'imqw-tree', 'aria-label': 'QQ 会话列表' },
       h('header', { className: 'imqw-column-head' },
         h('h2', null, 'QQ 会话'),
-        h(Button, { variant: 'ghost', size: 'sm', onClick: () => setReload(value => value + 1) }, '刷新')),
+        h(Button, {
+          type: 'button', variant: 'ghost', size: 'sm', className: 'imqw-icon-action',
+          'aria-label': '刷新会话列表', title: '刷新会话列表', onClick: () => setReload(value => value + 1),
+        }, h(IconRefreshOutlineRegular, { size: 14 }))),
       h('p', { className: 'imqw-muted imqw-tree-caption' }, accountName(robot)),
       h(Input, {
         type: 'search', value: query, onChange: event => setQuery(event.currentTarget.value),
@@ -579,27 +568,29 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
             'aria-expanded': activeView === view,
             onClick: () => setOpenViewId(activeView === view ? undefined : view.id),
           }, `${activeView === view ? '收起' : '查看'} ${view.title}`)) : null,
-          peer ? h(Menu, {
-            items: sessionMenu, open: sessionMenuOpen, align: 'end', portal: true, autoFocus: true,
-            listClassName: 'imqw-session-menu',
-            footer: sessionCaption ? [{ type: 'label', id: 'session-caption', text: sessionCaption }] : undefined,
-            onClose: () => setSessionMenuOpen(false),
-            onSelect: id => {
-              setSessionMenuOpen(false);
-              if (id === 'open' && current) void openNative(current.id, peer);
-              if (id === 'restore') void restoreCurrent();
-              if (id === 'new') openNewSession();
-              if (id === 'refresh') setViewRefreshKey(value => value + 1);
-            },
-            anchor: h(Button, { type: 'button', size: 'sm', variant: 'outline',
-              'aria-haspopup': 'menu', 'aria-expanded': sessionMenuOpen, onClick: () => setSessionMenuOpen(open => !open),
-            }, current ? '当前 Session' : 'Session', h(IconChevronDownOutlineRegular, { size: 12 })),
-          }) : null,
-          peer ? h(Button, {
-            ref: settingsTrigger, size: 'sm', variant: 'outline',
-            className: 'imqw-settings-trigger', 'aria-controls': settingsId,
-            'aria-label': '会话设置', title: '会话设置', 'aria-expanded': settingsVisible, onClick: toggleSettings,
-          }, h(IconSettingsOutlineRegular, { size: 14 })) : null,
+          peer ? h(Fragment, null,
+            currentArchived ? h(Button, {
+              type: 'button', size: 'sm', variant: 'outline',
+              disabled: !restoreSession || !!busyKey || !!restoring, onClick: () => { void restoreCurrent(); },
+            }, restoring === current?.id ? '恢复中…' : '恢复当前 Session') : h(Button, {
+              type: 'button', size: 'sm', variant: 'outline', disabled: !current || !openSession,
+              title: current ? sessionCaption || '打开当前 Session' : '尚未创建 Session',
+              onClick: () => { if (current) void openNative(current.id, peer); },
+            }, '当前 Session'),
+            h(Button, {
+              type: 'button', size: 'sm', variant: 'outline', onClick: openNewSession,
+              disabled: !peer.agent || !peer.admitted || !peer.receiving || !robot.enabled || robot.state !== 'connected' || !!busyKey || !!restoring,
+            }, '新建 Session'),
+            activeView?.refreshable ? h(Button, {
+              type: 'button', size: 'sm', variant: 'ghost', className: 'imqw-icon-action',
+              'aria-label': '刷新消息', title: '刷新消息', onClick: () => setViewRefreshKey(value => value + 1),
+            }, h(IconRefreshOutlineRegular, { size: 14 })) : null,
+            h(Button, {
+              ref: settingsTrigger, size: 'sm', variant: 'outline',
+              className: 'imqw-icon-action imqw-settings-trigger', 'aria-controls': settingsId,
+              'aria-label': '会话设置', title: '会话设置', 'aria-expanded': settingsVisible, onClick: toggleSettings,
+            }, h(IconSettingsOutlineRegular, { size: 14 })),
+          ) : null,
         ),
       ),
       currentArchived ? h('p', { className: 'imqw-muted', role: 'status' },

@@ -27,6 +27,6 @@ export const IconDownloadOutlineRegular = stub();
 export const IconEllipsisOutlineRegular = stub();
 export const IconPaperclipOutlineRegular = stub();
 export const IconPlusOutlineRegular = stub();
-
+export const IconRefreshOutlineRegular = stub();
 export const IconSettingsOutlineRegular = stub();
 export const IconTrashOutlineRegular = stub();
