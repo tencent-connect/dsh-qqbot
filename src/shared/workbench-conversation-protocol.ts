@@ -20,6 +20,8 @@ export interface WorkbenchConversation {
   recording: boolean;
   admitted: boolean;
   revision: number;
+  /** Present while this conversation uses the robot's template as its settings baseline. */
+  defaultsRevision?: number;
   agent?: WorkbenchAgentSettings;
   currentSessionId?: string;
   sessions: WorkbenchSession[];
@@ -30,6 +32,7 @@ export interface WorkbenchConversationPatch {
   scope: ChatScope;
   openId: string;
   revision: number;
+  defaultsRevision?: number;
   alias?: string;
   receiving?: boolean;
   recording?: boolean;

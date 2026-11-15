@@ -10,7 +10,7 @@
  * hover/过渡/focus 样式无法用 inline style 表达，统一走类；
  * 颜色尽量取 DSW 主题变量（--dsw-alias-*），缺省值兜底。
  *
- * 同一组件复用于两种展示位（侧栏绑定页 / 设置页 QQ Bot 栏目）。
+ * 机器人工作台复用扫码、新增和更换凭据的视图。
  * 运行时仅依赖 react（dsh 客户端平台种子表提供）；宿主通信走同源 fetch，
  * Desktop 下由壳的 IPC 桥自动附加 Host 认证转发。
  */
@@ -19,7 +19,6 @@ import {
   BIND_MANUAL_PATH,
   BIND_REFRESH_PATH,
   BIND_STATE_PATH,
-  BIND_UNBIND_PATH,
   type BindStateWire,
 } from '../shared/bind-protocol.ts';
 import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
@@ -57,15 +56,6 @@ export function installPanelStyles(): void {
 .imqb-icon { font-size: 32px; line-height: 1; }
 .imqb-qr { box-sizing: content-box; border-radius: var(--dsw-radius-md); padding: 8px; max-width: calc(100% - 16px); height: auto; }
 .imqb-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-/* 主面板页面容器（layout.selectPanel 目标）：滚动 + 留白 */
-.imqb-pluginPage {
-  height: 100%; min-height: 0; overflow: auto; box-sizing: border-box;
-  padding: 24px clamp(16px, 4vw, 48px) 32px;
-  color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family);
-}
-.imqb-pluginPageContent { max-width: 680px; margin: 0 auto; }
-.imqb-pageTitle { margin: 0 0 12px; font-size: 20px; line-height: 1.5; font-weight: 600; }
-.imqb-pageDescription { margin: 0 0 16px; font-size: 13px; color: var(--dsw-alias-label-secondary); }
 .imqb-form { display: flex; flex-direction: column; gap: 12px; width: min(320px, 100%); box-sizing: border-box; }
 .imqb-credentialsModal { width: min(440px, 100%); max-height: 100%; overflow-y: auto; }
 .imqb-form--credentials { width: 100%; gap: 16px; }
@@ -112,7 +102,6 @@ export function installPanelStyles(): void {
     `;
   style.textContent += `\n.imqb-danger { color: var(--dsw-alias-state-error-primary); }
 .imqb-field > span { width: 100%; }
-.imqb-cards { display: flex; flex-direction: column; gap: 20px; }
 .imqb-card { border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg); padding: 4px 16px 16px; background: var(--dsw-alias-bg-layer-1); }
 .imqb-cardTitle { margin: 14px 0 4px; font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .imqb-cardHint { margin: 0 0 8px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }`;
@@ -139,7 +128,7 @@ function usePanelStyles(): void {
  *          gone 表示插件未启用（从未注册过路由），recheck 废弃当前
  *          定时器并立即重新轮询（新轮询链取代旧链，不产生双计时器）。
  */
-export function useBindState(enabled = true): { state: BindStateWire | null; gone: boolean; error: string | null; recheck: () => void } {
+function useBindState(enabled: boolean): { state: BindStateWire | null; gone: boolean; error: string | null; recheck: () => void } {
   const [state, setState] = useState<BindStateWire | null>(null);
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -362,47 +351,8 @@ interface BoundActions {
   disabled: boolean;
 }
 
-function BoundView({ appId, recheck, actions }: { appId: string; recheck: () => void; actions?: BoundActions }): ReactNode {
+function BoundView({ appId, recheck, actions }: { appId: string; recheck: () => void; actions: BoundActions }): ReactNode {
   const [editing, setEditing] = useState(false);
-  const [confirmUnbind, setConfirmUnbind] = useState(false);
-  const [unbindResult, setUnbindResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const unbind = useCallback((): void => {
-    if (busy) return;
-    setConfirmUnbind(false);
-    setBusy(true);
-    setUnbindResult(null);
-    void fetchJson<{ ok?: boolean; message?: string; error?: string }>(BIND_UNBIND_PATH, { method: 'POST' })
-      .then((body) => {
-        if (body.ok === true) {
-          setUnbindResult({ ok: true, message: body.message ?? '已解绑，插件将重载并重新进入绑定流程' });
-          // bound 态轮询已降频到 30s：立即重置节拍，让 waiting（二维码）
-          // 尽快出现而不是等下一个 30s 周期
-          recheck();
-          return;
-        }
-        setUnbindResult({ ok: false, message: body.error ?? '解绑失败，请重试' });
-      })
-      .catch((err: unknown) => {
-        setUnbindResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
-      })
-      .finally(() => { setBusy(false); });
-  }, [recheck, busy]);
-
-  if (unbindResult?.ok === true) {
-    // 非终态视图：解绑成功后正常由轮询收敛到 waiting；若 HMR 未
-    // 触发（状态停留 bound），用户仍有「刷新状态」出口而不是死胡同
-    return createElement('div', { className: 'imqb-status' },
-      createElement('div', { className: 'imqb-status-row' },
-        createElement('div', { className: 'imqb-status-icon' }, '👋'),
-        createElement('div', { className: 'imqb-status-meta' },
-          createElement('p', { className: 'imqb-status-title' }, unbindResult.message),
-        ),
-        createElement(Button, { type: 'button', variant: 'ghost', size: 'sm', onClick: recheck }, '刷新状态'),
-      ),
-    );
-  }
 
   return createElement('div', { className: 'imqb-status' },
     createElement('div', { className: 'imqb-account' },
@@ -414,14 +364,11 @@ function BoundView({ appId, recheck, actions }: { appId: string; recheck: () => 
         ),
       ),
       createElement('div', { className: 'imqb-status-actions' },
-        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: busy || actions?.disabled, onClick: () => { setEditing(true); } }, '更换凭据'),
-        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger', disabled: busy || actions?.disabled, onClick: actions?.unbind ?? (() => setConfirmUnbind(true)) }, busy ? '正在解绑…' : '解绑'),
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', disabled: actions.disabled, onClick: () => { setEditing(true); } }, '更换凭据'),
+        createElement(Button, { type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger', disabled: actions.disabled, onClick: actions.unbind }, '解绑'),
       ),
     ),
-    unbindResult !== null && !unbindResult.ok
-      ? createElement('p', { className: 'imqb-error', role: 'alert' }, unbindResult.message) : null,
-    editing ? createElement(ManualForm, { initialAppId: appId, fixedAppId: actions !== undefined, recheck, save: actions?.replace, onCancel: () => setEditing(false) }) : null,
-    createElement(Modal, { open: confirmUnbind, onClose: () => setConfirmUnbind(false), title: '解绑 QQ 机器人', closeLabel: '关闭', description: '清除本机保存的 QQ 凭据并重载连接，随后进入扫码绑定。会话历史保留；此操作不会移出 QQ 群或删除平台侧关系。', footer: createElement('div', { className: 'imqb-row' }, createElement(Button, { variant: 'ghost', size: 'sm', onClick: () => setConfirmUnbind(false) }, '取消'), createElement(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: unbind }, '确认解绑')) }),
+    editing ? createElement(ManualForm, { initialAppId: appId, fixedAppId: true, recheck, save: actions.replace, onCancel: () => setEditing(false) }) : null,
   );
 }
 
@@ -488,9 +435,7 @@ function FailedView({ reason, recheck }: { reason: string; recheck: () => void }
 /** 依据宿主相位渲染面板主体（可注入共享轮询结果避免双计时器） */
 interface BindPanelBodyProps {
   state?: BindStateWire | null;
-  gone?: boolean;
   recheck?: () => void;
-  error?: string | null;
   actions?: BindActions;
   boundActions?: BoundActions;
 }
@@ -500,9 +445,9 @@ export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
   const injected = props.state !== undefined;
   const internal = useBindState(!injected);
   const state = injected ? (props.state ?? null) : internal.state;
-  const gone = injected ? (props.gone ?? false) : internal.gone;
+  const gone = !injected && internal.gone;
   const recheck = injected ? (props.recheck ?? (() => {})) : internal.recheck;
-  const error = injected ? props.error : internal.error;
+  const error = !injected ? internal.error : null;
   // 扫码成功的连接过渡场景需要保留最后一帧二维码：waiting 相位持续记录，
   // bound 后清空（避免下次解绑重绑时旧码闪现）
   const [lastQr, setLastQr] = useState<string | null>(null);
@@ -559,7 +504,9 @@ export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
   }
 
   if (state?.phase === 'bound') {
-    return createElement(BoundView, { key: state.appId, appId: state.appId, recheck, actions: props.boundActions });
+    return props.boundActions
+      ? createElement(BoundView, { key: state.appId, appId: state.appId, recheck, actions: props.boundActions })
+      : createElement('p', { className: 'imqb-hint', role: 'status' }, '凭据已保存，正在读取机器人…');
   }
 
   return createElement(UnboundView, { state: state ?? { phase: 'starting' }, recheck, actions: props.actions });

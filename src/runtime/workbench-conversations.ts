@@ -220,10 +220,13 @@ async function projectConversations(
         if (session) sessions.push(session);
       }
       sessions.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+      const settings = robots.conversationSettings.get(key);
+      const agent = account.agentSettings?.(scope, openId, sessions.length > 0);
       return {
         scope, openId, name: account.peerName(scope, openId),
-        ...robots.conversationSettings.get(key),
-        agent: account.agentSettings?.(scope, openId, sessions.length > 0),
+        ...settings, agent,
+        ...(!settings.agent && agent && sessions.length === 0
+          ? { defaultsRevision: robots.conversationSettings.template(appId)?.revision ?? 0 } : {}),
         admitted: allowsConversation(account.access, scope, openId),
         currentSessionId: sessions.some(session => session.id === current) ? current : undefined,
         sessions,
@@ -236,11 +239,12 @@ async function projectConversations(
 async function parsePatch(request: Request): Promise<WorkbenchConversationPatch> {
   const text = await request.text();
   if (Buffer.byteLength(text) > 512 * 1024) throw new Error('会话设置请求过大。');
-  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'alias', 'receiving', 'recording', 'agent']);
+  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'defaultsRevision', 'alias', 'receiving', 'recording', 'agent']);
   if ((value.scope !== 'c2c' && value.scope !== 'group') || !validOpenId(value.openId)) throw new Error('QQ 会话地址无效。');
   if (value.alias === undefined && value.receiving === undefined && value.recording === undefined && value.agent === undefined) throw new Error('缺少要保存的会话设置。');
   return {
     appId: robotAppId(value.appId), scope: value.scope, openId: value.openId, revision: robotRevision(value.revision),
+    ...(value.defaultsRevision === undefined ? {} : { defaultsRevision: robotRevision(value.defaultsRevision) }),
     ...(value.alias === undefined ? {} : { alias: aliasValue(value.alias) }),
     ...(value.receiving === undefined ? {} : { receiving: receivingValue(value.receiving) }),
     ...(value.recording === undefined ? {} : { recording: recordingValue(value.recording) }),
@@ -393,6 +397,11 @@ export function registerWorkbenchConversations(
       if (robots.conversationSettings.get(key).revision !== patch.revision) {
         throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
       }
+      if ((patch.defaultsRevision !== undefined && patch.defaultsRevision !== conversation.defaultsRevision)
+        || (conversation.defaultsRevision !== undefined
+          && (robots.conversationSettings.template(patch.appId)?.revision ?? 0) !== conversation.defaultsRevision)) {
+        throw new WorkbenchRequestError(409, '机器人默认设置已更新，请合并会话草稿。');
+      }
       if (baseline) {
         const current = sessionBindings();
         if (baseline.pending || current.pending || JSON.stringify(current) !== JSON.stringify(baseline)) {
@@ -402,6 +411,7 @@ export function registerWorkbenchConversations(
     };
     try {
       let afterSave: (() => void) | undefined;
+      assertCurrent();
       if (patch.agent && conversation.agent) {
         try {
           await robots.conversationAccount(patch.appId)?.validateAgent?.(patch.agent, conversation.agent);
@@ -419,7 +429,9 @@ export function registerWorkbenchConversations(
       assertCurrent();
       const settings = robots.conversationSettings.save(key, { ...patch, agent: patch.agent ?? conversation.agent });
       afterSave?.();
-      return workbenchJson({ conversation: { ...conversation, ...settings } });
+      return workbenchJson({ conversation: {
+        ...conversation, ...settings, defaultsRevision: settings.agent ? undefined : conversation.defaultsRevision,
+      } });
     } finally {
       if (patch.agent) robots.toolPolicies?.reconcile(key, sessions);
     }

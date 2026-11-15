@@ -1,14 +1,4 @@
-/**
- * QQ 机器人配置面板 — 必要配置的 UI 编辑
- *
- * 使用宿主公共 Switch、SegmentedControl、Button 与目录菜单；多行草稿保留普通 textarea。
- *
- * 数据流：GET /qqbot/im-qqbot/config 回显当前生效配置（appSecret
- * 已由宿主剔除）→ 表单编辑 → dirty diff → POST 仅提交变更键 →
- * 宿主白名单 + Schema 校验 → 最小写入 profile patch → HMR 重载生效。
- *
- * 保留上游的回复、模型与提示词设置，并管理账号访问范围。
- */
+/** 主机器人的账号与权限，以及两个账号类型共用的准入设置。 */
 import { createElement, Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
@@ -53,10 +43,7 @@ function useConfigPanelStyles(): void {
   flex: 1; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.5;
   color: var(--dsw-alias-label-primary);
 }
-.imqb2-help { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
 .imqb2-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-.imqb2-textarea { box-sizing: border-box; width: 100%; min-height: 68px; padding: 8px 12px; resize: vertical; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; }
-.imqb2-textarea:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 2px; }
 /* Preserve the QQ settings draft and readback feedback in the sticky footer. */
 .imqb2-footer {
   position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center;
@@ -79,18 +66,13 @@ function useConfigPanelStyles(): void {
 .imqb2-summary { padding: 16px 0; font-size: 13px; font-weight: 500; cursor: pointer; }
 .imqb2-summary::marker { color: var(--dsw-alias-label-tertiary); }
 .imqb2-summary:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color); outline-offset: 2px; border-radius: var(--dsw-radius-sm); }
-.imqb2-directory-feedback { display: flex; align-items: flex-start; gap: 8px; }
-.imqb2-directory-feedback p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 480px) {
   .imqb2-head:has([role=tablist]) { align-items: stretch; flex-direction: column; }
-  .imqb2-selector-head { align-items: stretch; flex-direction: column; }
   .imqb2-note { flex-basis: 100%; }
 }
 .imqb2-note { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
 .imqb2-note--error { color: var(--dsw-alias-state-error-primary); }
 .imqb2-note--ok { color: var(--dsw-alias-label-secondary); }
-/* cwd 只读行 */
-.imqb2-readonly { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; margin: 0; }
     `;
     document.head.appendChild(style);
     return retain(style);
@@ -237,22 +219,19 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
   return undefined;
 }
 
-export interface ConfigPanelProps {
-  bindPhase?: string;
-  accountOnly?: boolean;
-  account?: {
-    appId: string;
-    revision: number;
-    enabled: boolean;
-    formId: string;
-    controls: ReactNode;
-    credentials: ReactNode;
-    onAliasSaved: (robot: WorkbenchRobot) => void;
-  };
+interface PrimaryAccountSettingsProps {
+  appId: string;
+  revision: number;
+  enabled: boolean;
+  formId: string;
+  controls: ReactNode;
+  credentials: ReactNode;
+  onAliasSaved(robot: WorkbenchRobot): void;
 }
 
-/** Settings editor with recoverable requests and a draft protected from binding refreshes. */
-export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigPanelProps = {}): ReactNode {
+export function PrimaryAccountSettings({
+  appId, revision, enabled, formId, controls, credentials, onAliasSaved,
+}: PrimaryAccountSettingsProps): ReactNode {
   useConfigPanelStyles();
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const draftRef = useRef<ConfigDraft | null>(null);
@@ -265,9 +244,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
   const [result, setResult] = useState<SaveResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
-  const appId = account?.appId;
-  const robotRevision = account?.revision;
-  const storageKey = appId === undefined ? DRAFT_STORAGE_KEY : `${DRAFT_STORAGE_KEY}:${appId}`;
+  const storageKey = `${DRAFT_STORAGE_KEY}:${appId}`;
 
   const replaceDraft = useCallback((next: ConfigDraft): void => {
     draftRef.current = next;
@@ -287,12 +264,10 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
     setLoadError(null);
     void fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH, { cache: 'no-store', signal: controller.signal })
       .then(async ({ config }) => {
-        if (appId !== undefined) {
-          const { robots } = await fetchJson<WorkbenchRobotsResponse>(WORKBENCH_ROBOTS_PATH, { cache: 'no-store', signal: controller.signal });
-          const robot = robots.find(robot => robot.appId === appId && robot.primary);
-          if (!robot || config.appId !== appId) throw new Error('主机器人绑定已更新，请重新打开设置。');
-          config = { ...config, alias: robot.alias, robotRevision: robot.revision };
-        }
+        const { robots } = await fetchJson<WorkbenchRobotsResponse>(WORKBENCH_ROBOTS_PATH, { cache: 'no-store', signal: controller.signal });
+        const robot = robots.find(robot => robot.appId === appId && robot.primary);
+        if (!robot || config.appId !== appId) throw new Error('主机器人绑定已更新，请重新打开设置。');
+        config = { ...config, alias: robot.alias, robotRevision: robot.revision };
         if (stopped || saveController.current !== null) return;
         const expected = pendingConfirmation.current;
         const confirmed = expected !== null && matchesSavedConfig(config, expected);
@@ -316,7 +291,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
       })
       .finally(() => { if (!stopped) setLoading(false); });
     return () => { stopped = true; controller.abort(); };
-  }, [appId, bindPhase, reload, replaceDraft, storageKey, robotRevision]);
+  }, [appId, reload, replaceDraft, revision]);
 
   const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
     const current = draftRef.current;
@@ -343,7 +318,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
     setResult(null);
     let aliasSaved = false;
     void (async () => {
-      if (alias !== undefined && appId !== undefined) {
+      if (alias !== undefined) {
         const { robot } = await fetchJson<{ robot: WorkbenchRobot }>(WORKBENCH_ROBOTS_PATH, {
           method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
           body: JSON.stringify({ appId, revision: current.baseline.robotRevision, alias }),
@@ -353,7 +328,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
         const identity = { alias: robot.alias, robotRevision: robot.revision };
         submitted = { ...submitted, ...identity };
         replaceDraft({ baseline: { ...current.baseline, ...identity }, form: submitted });
-        account?.onAliasSaved(robot);
+        onAliasSaved(robot);
       }
       if (!configChanged) {
         setResult({ kind: 'confirmed', message: '配置已保存。' });
@@ -363,7 +338,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
         method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
         body: JSON.stringify({
           ...changed,
-          ...(appId === undefined ? {} : { expectedAppId: appId }),
+          expectedAppId: appId,
           ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }),
         }),
       });
@@ -378,8 +353,7 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
       if (!mounted.current || controller.signal.aborted) return;
       if (config !== undefined) {
         pendingConfirmation.current = null;
-        const baseline = appId === undefined ? config
-          : { ...config, alias: submitted.alias, robotRevision: submitted.robotRevision };
+        const baseline = { ...config, alias: submitted.alias, robotRevision: submitted.robotRevision };
         replaceDraft({ baseline, form: baseline });
         setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
       } else {
@@ -399,21 +373,21 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
           if (mounted.current) setBusy(false);
         }
       });
-  }, [account, appId, busy, replaceDraft]);
+  }, [onAliasSaved, appId, busy, replaceDraft]);
 
   const retry = (): void => { setReload((value) => value + 1); };
   const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb2-feedback', role: 'alert' },
     createElement('p', { className: 'imqb2-note imqb2-note--error' }, `配置加载失败：${loadError}`),
     createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? '重试中…' : '重试'),
   );
-  const accountFields = account && createElement(Fragment, null,
-    account.controls,
+  const accountFields = createElement(Fragment, null,
+    controls,
     draft && createElement('label', { className: 'imqb-field imqr-field' }, '机器人名称', createElement(Input, {
-      form: account.formId, value: draft.form.alias ?? '', disabled: busy || loading,
+      form: formId, value: draft.form.alias ?? '', disabled: busy || loading,
       placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120,
       onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch('alias', event.target.value),
     })),
-    account.credentials,
+    credentials,
   );
   if (draft === null) {
     return createElement('div', { 'aria-busy': loading }, accountFields, loadFeedback,
@@ -428,39 +402,18 @@ export function ConfigPanel({ bindPhase, accountOnly = false, account }: ConfigP
     ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
     : '没有未保存的修改。');
 
-  const settingsForm = createElement('form', { id: account?.formId, className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
+  const settingsForm = createElement('form', { id: formId, className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
     createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
-      createElement(AccessSettings, { access, busy, bound: bindPhase === 'bound', appId, enabled: account?.enabled, onMembershipChange: retry,
+      createElement(AccessSettings, { access, busy, appId, enabled, onMembershipChange: retry,
         onMode: (key, value) => patch('access', { ...access, [key]: value }),
       }),
       createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
-      ...([
-        ['requireMention', '群聊仅回复 @机器人的消息'],
-        ['streaming', '流式输出'],
-        ['showToolResults', '显示工具成功结果'],
-      ] as const).filter(([key]) => !accountOnly || key === 'requireMention').map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
+      createElement('div', { className: 'imqb2-field' },
         createElement('div', { className: 'imqb2-head' },
-          createElement('span', { className: 'imqb2-label' }, label),
-          createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
-            onChange: (value: boolean) => patch(key, value) })),
-        key === 'showToolResults' ? createElement('p', { className: 'imqb2-hint' }, '仅在整轮失败时向 QQ 发送简短提示。') : null)),
-      accountOnly ? null : createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
-      ...([
-        ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],
-      ] as const).filter(() => !accountOnly).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
-        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
-        createElement(Input, { id: `imqq-${key}`, value: form[key] ?? '', placeholder: '留空继承 DSH 默认',
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch(key, event.target.value) }))),
-      ...([
-        ['groupPrompt', '群聊补充提示词'], ['directPrompt', '私聊补充提示词'],
-      ] as const).filter(() => !accountOnly).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
-        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
-        createElement('textarea', { id: `imqq-${key}`, className: 'imqb2-textarea', value: form[key] ?? '', rows: 3,
-          onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => patch(key, event.target.value) }))),
-      accountOnly || form.cwd === undefined ? null : createElement('div', { className: 'imqb2-field' },
-        createElement('span', { className: 'imqb2-label' }, 'Agent 工作目录（只读）'),
-        createElement('p', { className: 'imqb2-readonly' }, form.cwd)),
+          createElement('span', { className: 'imqb2-label' }, '群聊仅回复 @机器人的消息'),
+          createElement(Switch, { label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
+            onChange: value => patch('requireMention', value) }))),
     ),
     createElement('div', { className: 'imqb2-footer' },
       createElement('p', { className: `imqb2-note${result === null ? '' : result.kind === 'failed' ? ' imqb2-note--error' : ' imqb2-note--ok'}`, role: result?.kind === 'failed' ? 'alert' : 'status', 'aria-live': 'polite' }, message),

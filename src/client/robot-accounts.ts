@@ -11,7 +11,7 @@ import {
   type WorkbenchRobotsResponse,
 } from '../shared/workbench-protocol.ts';
 import { BindPanelBody, QQ_BOT_LOGO_PATH } from './bind-page.ts';
-import { AccessSettings, ConfigPanel } from './config-panel.ts';
+import { AccessSettings, PrimaryAccountSettings } from './config-panel.ts';
 import { fetchJson, HttpError } from './http.ts';
 
 export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
@@ -25,6 +25,11 @@ const MODE_KEYS = ['c2cMode', 'groupMode', 'commandMode'] as const satisfies rea
 type Draft = { alias: string; c2cMode: Mode; groupMode: Mode; commandMode: Mode };
 type EditRobot = { kind: 'edit'; baseline: WorkbenchRobot; draft: Draft };
 type Editor = { kind: 'add'; id: string } | EditRobot;
+const accountDrafts = new Map<string, EditRobot>();
+
+export function robotBindingKey(robot: WorkbenchRobot): string {
+  return JSON.stringify([robot.appId, robot.bindingRevision]);
+}
 
 export function accountName(robot: WorkbenchRobot): string {
   return robot.alias || (robot.primary ? '主机器人' : `机器人 ${robot.appId}`);
@@ -53,6 +58,12 @@ function makePatch({ draft, baseline }: EditRobot): WorkbenchRobotPatch {
   return patch;
 }
 
+function rememberEdit(editor: EditRobot): void {
+  const key = robotBindingKey(editor.baseline);
+  if (Object.keys(makePatch(editor)).length > 2) accountDrafts.set(key, editor);
+  else accountDrafts.delete(key);
+}
+
 function rebase(editor: EditRobot, latest: WorkbenchRobot): EditRobot {
   const next = editRobot(latest);
   const patch = makePatch(editor);
@@ -79,6 +90,9 @@ export interface RobotAccountsProps {
     compact: boolean;
     onToggleCollapse: () => void;
     onOpenSettings: (appId: string) => void;
+    onBindPrimary?: () => void;
+    primaryBinding?: boolean;
+    settingsRequest?: () => void;
     onAdd: () => void;
     onCancelAdd: () => void;
     render: (view: {
@@ -113,6 +127,13 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   const bindId = editor?.kind === 'add' ? editor.id : undefined;
   const bindState = binding?.id === bindId ? binding?.state : undefined;
   const bindingBusy = busy || bindState?.phase === 'saving' || bindState?.phase === 'bound';
+  const activeRobot = robots?.find(robot => robot.appId === selectedAppId)
+    ?? robots?.find(robot => robot.primary) ?? robots?.[0];
+
+  const setEdit = (next: EditRobot): void => {
+    rememberEdit(next);
+    setEditor(next);
+  };
 
   useEffect(() => () => { mutation.current?.abort(); mutation.current = null; }, []);
   useEffect(() => {
@@ -147,6 +168,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     const latest = robots.find(robot => robot.appId === removing.appId);
     if (!latest) {
       if (removeMode === 'clear') return;
+      accountDrafts.delete(robotBindingKey(removing));
       setRemoving(undefined);
       setEditor(current => current?.kind === 'edit' && current.baseline.appId === removing.appId ? null : current);
       if (selectedAppId === removing.appId && robots[0]) onSelect(robots[0].appId);
@@ -203,8 +225,8 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       workbench.onOpenSettings(bindState.robot.appId);
       return;
     }
-    if (robots?.length === 0) sawUnboundPrimary.current = true;
     const primary = robots?.find(robot => robot.primary);
+    if (!primary) sawUnboundPrimary.current = robots?.length === 0 || !!workbench.primaryBinding;
     if (sawUnboundPrimary.current && primary) {
       sawUnboundPrimary.current = false;
       setEditor(editRobot(primary));
@@ -257,10 +279,10 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       if (controller.signal.aborted) return { ok: false, error: '操作已取消。' };
       setRobots(current => replaceRobot(current, robot));
       if (editing) {
-        setEditor(editRobot(robot));
+        setEdit(editRobot(robot));
       } else if (editor?.kind === 'edit' && editor.baseline.appId === robot.appId
         && editor.baseline.revision === patch.revision) {
-        setEditor(rebase(editor, robot));
+        setEdit(rebase(editor, robot));
       }
       return { ok: true };
     } catch (error) {
@@ -302,6 +324,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       });
       if (controller.signal.aborted) return;
       setRobots(current => current?.filter(item => item.appId !== robot.appId) ?? null);
+      accountDrafts.delete(robotBindingKey(robot));
       setEditor(current => current?.kind === 'edit' && current.baseline.appId === robot.appId ? null : current);
       setRemoving(undefined);
       if (activeRobot?.appId === robot.appId) {
@@ -327,18 +350,25 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     setRebased(false);
   };
   const setField = <K extends keyof Draft>(key: K, value: Draft[K]): void => {
-    setEditor(current => current?.kind === 'edit' ? { ...current, draft: { ...current.draft, [key]: value } } : current);
+    if (editor?.kind !== 'edit') return;
+    const latest = accountDrafts.get(robotBindingKey(editor.baseline)) ?? editor;
+    setEdit({ ...latest, draft: { ...latest.draft, [key]: value } });
   };
   const current = editor?.kind === 'edit' ? robots?.find(robot => robot.appId === editor.baseline.appId) : undefined;
   const stale = editor?.kind === 'edit' && current !== undefined && current.revision !== editor.baseline.revision;
   useEffect(() => {
     if (!stale || !current || editor?.kind !== 'edit' || busy) return;
     const baseline = editor.baseline;
+    if (robotBindingKey(baseline) !== robotBindingKey(current)) {
+      accountDrafts.delete(robotBindingKey(baseline));
+      setEditor(editRobot(current));
+      return;
+    }
     const modesUnchanged = MODE_KEYS.every(key => current.access[key] === baseline.access[key]);
     if (Object.keys(makePatch(editor)).length === 2 || (
       current.alias === baseline.alias && current.enabled === baseline.enabled && modesUnchanged
     )) {
-      setEditor(rebase(editor, current));
+      setEdit(rebase(editor, current));
     }
   }, [busy, current, editor, stale]);
   const patch = editor?.kind === 'edit' ? makePatch(editor) : undefined;
@@ -350,14 +380,33 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     workbench.onCancelAdd();
   };
   const openSettings = (robot: WorkbenchRobot): void => {
-    if (editor?.kind !== 'edit' || editor.baseline.appId !== robot.appId) startEdit(editRobot(robot));
+    const key = robotBindingKey(robot);
+    if (editor?.kind !== 'edit' || robotBindingKey(editor.baseline) !== key) {
+      startEdit(accountDrafts.get(key) ?? editRobot(robot));
+    }
     workbench.onOpenSettings(robot.appId);
   };
-  const footer = h('div', { className: 'imqr-footer' },
+  const bindPrimary = (): void => {
+    setEditor(null);
+    setEditError('');
+    setRebased(false);
+    sawUnboundPrimary.current = true;
+    workbench.onBindPrimary?.();
+  };
+  useEffect(() => {
+    if (!workbench.settingsRequest || !robots || unavailable || bindingBusy) return;
+    if (activeRobot) openSettings(activeRobot);
+    else bindPrimary();
+    workbench.settingsRequest();
+  }, [workbench, robots, unavailable, bindingBusy, activeRobot]);
+  const footer = h('div', { className: 'imqw-actions imqw-savebar imqr-footer' },
     h(Button, { size: 'sm', variant: 'ghost', type: 'button',
       disabled: busy || (!stale && !canSave),
       onClick: () => {
-        if (editor?.kind === 'edit') startEdit(editRobot(current ?? editor.baseline));
+        if (editor?.kind === 'edit') {
+          accountDrafts.delete(robotBindingKey(editor.baseline));
+          startEdit(editRobot(current ?? editor.baseline));
+        }
       },
     }, '撤销修改'),
     h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave },
@@ -376,7 +425,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         h('p', { className: 'imqb-error', role: 'alert' }, '配置已变化，草稿仍保留。'),
         h(Button, { size: 'sm', variant: 'outline', type: 'button', disabled: busy, onClick: () => {
           if (editor.kind !== 'edit' || !current) return;
-          setEditor(rebase(editor, current));
+          setEdit(rebase(editor, current));
           setEditError('');
           setRebased(true);
         } }, '合并到最新配置')) : null,
@@ -416,15 +465,13 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         actions: { refresh: startBinding, submit: submitBinding } })
     : editor && h('section', { className: 'imqr-inline' },
       editor.baseline.primary
-        ? h<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, {
-            key: editor.baseline.appId, bindPhase: 'bound', accountOnly: true,
-            account: {
-              appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
-              enabled, formId, controls: accountControls,
-              credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
-                h('h3', null, '凭据与访问'), credentials),
-              onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
-            },
+        ? h(PrimaryAccountSettings, {
+            key: robotBindingKey(editor.baseline),
+            appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
+            enabled, formId, controls: accountControls,
+            credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
+              h('h3', null, '凭据与访问'), credentials),
+            onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
           })
         : h(Fragment, null, accountControls, form, credentials,
             h(AccessSettings, {
@@ -436,7 +483,6 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     return workbench.render({ robots, unavailable, rail: null, accountSettings: null, cancelAdd, busy: bindingBusy });
   }
 
-  const activeRobot = robots?.find(robot => robot.appId === selectedAppId) ?? robots?.[0];
   const retryClear = removing !== undefined && removeMode === 'clear' && removeError !== ''
     && robots?.some(robot => robot.appId === removing.appId) === false;
   const rail = h('section', { className: 'imqr-rail', 'aria-label': '机器人账号' },
@@ -459,6 +505,10 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         }, workbench.collapsed ? '›' : '‹') : null)),
     loadError ? h('p', { className: 'imqb-error', role: 'alert' }, loadError) : null,
     actionError ? h('p', { className: 'imqb-error', role: 'alert' }, actionError) : null,
+    robots?.length && !robots.some(robot => robot.primary)
+      ? h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: bindingBusy,
+        'aria-label': '绑定主机器人', title: '绑定主机器人', onClick: bindPrimary,
+      }, workbench.collapsed ? h(IconPlusOutlineRegular, { size: 16 }) : '绑定主机器人') : null,
     robots?.length === 0 ? h('p', { className: 'imqb-status-sub' }, '还没有机器人') : null,
     robots?.map(robot => {
       const name = accountName(robot);

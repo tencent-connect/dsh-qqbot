@@ -57,6 +57,9 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       react:
         specifier: ^18.2.0
         version: 18.3.1
@@ -604,6 +607,9 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
+
+  fflate@0.8.3:
+    resolution: {integrity: sha512-tbZNuJrLwGUp3zshBtdy4W+ORxZuIh8a5ilyIEQDC5rY1f3U20JMry0Ll3WBzU58EZKsEuJFXhb5gwv8CsPvgA==}
 
   find-up@4.1.0:
     resolution: {integrity: sha512-PpOwAdQ/YlXQ2vj8a3h8IipDuYRi3wceVQQGYWxNINccq40Anw7BlsEXCMbt1Zt+OLA6Fq9suIpIWD0OsnISlw==}
@@ -1397,6 +1403,8 @@ snapshots:
       '@types/estree': 1.0.9
 
   expect-type@1.4.0: {}
+
+  fflate@0.8.3: {}
 
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:

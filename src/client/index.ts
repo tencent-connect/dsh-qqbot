@@ -1,9 +1,8 @@
 /** QQ 工作台、设置和原生会话操作的客户端入口。 */
 import type { Context } from '@deepseek-ai/cordis';
-import { createElement, useCallback, useSyncExternalStore, type ReactNode } from 'react';
+import { createElement, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Button, IconChevronLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
-import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
-import { ConfigPanel } from './config-panel.ts';
+import { QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { hasQqSessionOrigin, QQWorkbench, restoreQqSessionOrigin } from './workbench.ts';
 import { WorkbenchExtensions } from './workbench-extensions.ts';
 import { QqAnswerAction } from './workbench-answer.ts';
@@ -33,12 +32,54 @@ interface SavedSidebarTabs {
   closeIn(sessionId: string, tabId: string): void;
 }
 
-/** 设置页栏目：共享一份绑定状态轮询，驱动绑定面板与配置刷新 */
-function QQBotSettingsSection({ accountOnly = false }: { accountOnly?: boolean } = {}): ReactNode {
-  const { state, gone, recheck } = useBindState();
-  return createElement('div', null,
-    createElement<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, { state, gone, recheck }),
-    createElement<NonNullable<Parameters<typeof ConfigPanel>[0]>>(ConfigPanel, { bindPhase: state?.phase, accountOnly }),
+function OpenWorkbenchSettings({ close, onOpen }: { close: () => void; onOpen: () => void }): null {
+  useEffect(() => {
+    onOpen();
+    close();
+  }, [close, onOpen]);
+  return null;
+}
+
+interface ProfileSettingsRemote {
+  describe(): Promise<{ ok: boolean; value?: { hasDocument: boolean } }>;
+  openSettingsDocument(): Promise<{ ok: boolean }>;
+}
+
+function OpenProfileConfig({ remote }: { remote?: ProfileSettingsRemote }): ReactNode {
+  const [available, setAvailable] = useState(false);
+  const [error, setError] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const inFlight = useRef(false);
+  useEffect(() => {
+    let active = true;
+    setAvailable(false);
+    setError(false);
+    void remote?.describe().then(result => {
+      if (active) setAvailable(result.ok && result.value?.hasDocument === true);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [remote]);
+  if (!available || !remote) return null;
+  const open = async (): Promise<void> => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setOpening(true);
+    setError(false);
+    try {
+      const result = await remote.openSettingsDocument();
+      setError(!result.ok);
+    } catch {
+      setError(true);
+    } finally {
+      inFlight.current = false;
+      setOpening(false);
+    }
+  };
+  return createElement('div', { className: 'imqw-actions' },
+    error ? createElement('span', { className: 'imqb-error', role: 'alert' }, '无法打开配置文件。') : null,
+    createElement(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: opening,
+      title: '打开当前 DSH 配置的 cordis.patch.yml', onClick: () => { void open(); },
+    }, '打开配置文件'),
   );
 }
 
@@ -74,10 +115,6 @@ export function apply(ctx: Context): void {
   const disposers: Array<() => void> = [];
 
   if (slots) {
-    disposers.push(slots.inject('settings.section', () => slots.register(
-      { name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人' },
-      QQBotSettingsSection,
-    )));
     const slot = 'conversation.chat.assistant-actions';
     disposers.push(slots.inject(slot, () => slots.register(
       { name: slot, id: 'im-qqbot-send-answer', order: 30 },
@@ -121,6 +158,34 @@ export function apply(ctx: Context): void {
         selectPanel(panelId: string | null): void;
       } }).layout;
       if (pageSlots === undefined || layout === undefined) return undefined;
+      const settingsListeners = new Set<() => void>();
+      let settingsPending = false;
+      let profileSettings: ProfileSettingsRemote | undefined;
+      const emitSettings = (): void => {
+        for (const listener of settingsListeners) listener();
+      };
+      const subscribeSettings = (listener: () => void): (() => void) => {
+        settingsListeners.add(listener);
+        return () => { settingsListeners.delete(listener); };
+      };
+      const dismissSettingsRequest = (): void => {
+        settingsPending = false;
+        emitSettings();
+      };
+      const openRobotSettings = (): void => {
+        layout.selectPanel(IM_MAIN_PANEL_ID);
+        settingsPending = true;
+        emitSettings();
+      };
+      void ctxInject.call(pageCtx, ['remote', 'remote.settings'], scope => {
+        const { remote } = scope as unknown as { remote: {
+          $host?: { isLoopback: boolean }; settings: ProfileSettingsRemote;
+        } };
+        if (!remote.$host?.isLoopback) return undefined;
+        profileSettings = remote.settings;
+        emitSettings();
+        return () => { profileSettings = undefined; emitSettings(); };
+      });
       type AgentRemotes = {
         session: { modelCatalog(): Promise<unknown> };
         agentPresets: { list(): Promise<unknown> };
@@ -206,6 +271,8 @@ export function apply(ctx: Context): void {
         } | undefined)?.list?.getSnapshot().items ?? [],
       };
       const QQBotPage = (): ReactNode => {
+        const openSettings = useSyncExternalStore(subscribeSettings, () => settingsPending);
+        const documentRemote = useSyncExternalStore(subscribeSettings, () => profileSettings);
         const workspace = pageCtx.get('uiWorkspace') as {
           openSession?(id: string): void;
           unarchiveSession?(id: string): Promise<void>;
@@ -228,8 +295,8 @@ export function apply(ctx: Context): void {
         );
         return createElement(QQWorkbench, {
           extensions,
-          primarySettings: createElement(QQBotSettingsSection),
-          primaryAccountSettings: createElement<{ accountOnly?: boolean }>(QQBotSettingsSection, { accountOnly: true }),
+          settingsRequest: openSettings ? dismissSettingsRequest : undefined,
+          configFileAction: createElement(OpenProfileConfig, { remote: documentRemote }),
           agentSource, archivedSessionIds,
           restoreSession: workspace?.unarchiveSession?.bind(workspace),
           prepareSession: id => {
@@ -254,12 +321,16 @@ export function apply(ctx: Context): void {
         { name: 'main', key: IM_MAIN_PANEL_ID },
         QQBotPage,
       ));
+      const stopSettings = pageSlots.inject('settings.section', () => pageSlots.register({
+        name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人',
+        inject: () => ({ onOpen: openRobotSettings }),
+      }, OpenWorkbenchSettings));
       const stopActions = pageSlots.inject('plugins.detail.actions', () => pageSlots.register(
         {
           name: 'plugins.detail.actions', id: 'im-qqbot-open', order: 20,
           inject: () => ({
             packageName: PACKAGE_NAME,
-            onOpen: () => layout.selectPanel(IM_MAIN_PANEL_ID),
+            onOpen: openRobotSettings,
           }),
         },
         OpenQqBotAction,
@@ -284,6 +355,7 @@ export function apply(ctx: Context): void {
         for (const stop of stopReturn) stop();
         stopActions();
         stopSidebar();
+        stopSettings();
         stopMain();
       };
     });

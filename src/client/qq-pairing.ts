@@ -18,25 +18,37 @@ import {
 /** 配对状态轮询间隔（进行中的码需要实时反映"已认领"）。 */
 const POLL_MS = 2000;
 
-function usePairStatus(active: boolean, path: string): { status: PairStatusWire | null; error: string | null; reload: () => void } {
+function usePairStatus(active: boolean, path: string) {
   const [status, setStatus] = useState<PairStatusWire | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const sequence = useRef(0);
   const reload = useCallback(() => setTick((n) => n + 1), []);
+  const applyStatus = (snapshot: PairStatusWire): void => {
+    sequence.current++;
+    setStatus(snapshot);
+    setError(null);
+  };
   useEffect(() => {
     if (!active) return;
     let stopped = false;
-    const load = (): void => { void fetchJson<PairStatusWire>(path, { cache: 'no-store' }).then((s) => { if (!stopped) { setStatus(s); setError(null); } }).catch((c: unknown) => {
-      if (stopped) return;
-      const msg = c instanceof Error ? c.message : '';
-      // The route may temporarily disappear during a reload. Keep the last successful snapshot.
-      setError(msg || '读取认领状态失败');
-    }); };
+    const load = (): void => {
+      const request = ++sequence.current;
+      const current = () => !stopped && request === sequence.current;
+      void fetchJson<PairStatusWire>(path, { cache: 'no-store' }).then((snapshot) => {
+        if (!current()) return;
+        setStatus(snapshot);
+        setError(null);
+      }).catch((cause: unknown) => {
+        if (!current()) return;
+        setError(cause instanceof Error ? cause.message : '读取认领状态失败');
+      });
+    };
     load();
     const timer = setInterval(load, POLL_MS);
     return () => { stopped = true; clearInterval(timer); };
   }, [active, path, tick]);
-  return { status, error, reload };
+  return { status, error, reload, applyStatus };
 }
 
 /** 单个用途的认领面板：生成码 / 展示进行中的码 / 已认领成员列表（可撤销）。 */
@@ -45,7 +57,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
 }): ReactNode {
   usePairingStyles();
   const endpoint = (path: string) => appId === undefined ? path : `${path}?appId=${encodeURIComponent(appId)}`;
-  const { status, error, reload } = usePairStatus(enabled, endpoint(PAIR_STATUS_PATH));
+  const { status, error, reload, applyStatus } = usePairStatus(enabled, endpoint(PAIR_STATUS_PATH));
   const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
   const [code, setCode] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,8 +122,12 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const revoke = (openid: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson(endpoint(PAIR_REVOKE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
-      .then(() => { reload(); onChange?.(); })
+    void fetchJson<PairStatusWire>(endpoint(PAIR_REVOKE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
+      .then((snapshot) => {
+        applyStatus(snapshot);
+        setMsg(`已从${title}移除。`);
+        onChange?.();
+      })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '移除失败'))
       .finally(() => setBusy(false));
   };
@@ -119,20 +135,26 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const saveRename = (openid: string, nickname: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson(endpoint(PAIR_RENAME_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
-      .then(() => { setEditing(null); reload(); onChange?.(); })
+    void fetchJson<PairStatusWire>(endpoint(PAIR_RENAME_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
+      .then((snapshot) => {
+        applyStatus(snapshot);
+        setEditing(null);
+        setMsg('昵称已更新。');
+        onChange?.();
+      })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '修改失败'))
       .finally(() => setBusy(false));
   };
   const addManual = (): void => {
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
-    void fetchJson<ManualPairResult>(endpoint(PAIR_MANUAL_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
+    void fetchJson<ManualPairResult & PairStatusWire>(endpoint(PAIR_MANUAL_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
       .then((r) => {
+        applyStatus(r);
         setManualOpenid(r.errors.map(error => error.input).join('\n'));
         setResults(previous => mergePairResults(previous, r.results));
-        setMsg(r.errors.length ? r.errors.map(error => `${error.input}：${error.message}`).join('\n') : null);
-        reload(); onChange?.();
+        setMsg(r.errors.length ? [r.message, ...r.errors.map(error => `${error.input}：${error.message}`)].join('\n') : r.message);
+        onChange?.();
       })
       .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '添加失败'))
       .finally(() => setBusy(false));
@@ -160,6 +182,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       } }, '导出 CSV'))),
     description ? h('p', { className: 'imqq-pairHint' }, description) : null,
     hint ? h('p', { className: 'imqq-pairHint' }, hint) : null,
+    h('p', { className: 'imqq-pairHint' }, '名单修改即时保存。'),
     msg ? h('p', { className: 'imqq-pairHint', role: 'status' }, msg) : null,
     error ? h('p', { className: 'imqq-pairError', role: 'alert' }, error) : null,
     members.length === 0

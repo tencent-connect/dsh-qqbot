@@ -14,20 +14,10 @@ export interface ConfigWire {
   alias?: string;
   robotRevision?: number;
   requireMention?: boolean;
-  streaming?: boolean;
-  showToolResults?: boolean;
-  debug?: boolean;
-  provider?: string;
-  model?: string;
-  preset?: string;
-  groupPrompt?: string;
-  directPrompt?: string;
   access?: AccessControlWire;
-  cwd?: string;
 }
 
-const EDITABLE_KEYS = ['alias', 'access', 'requireMention', 'streaming', 'showToolResults', 'debug',
-  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt'] as const;
+const EDITABLE_KEYS = ['alias', 'access', 'requireMention'] as const;
 const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
 export const DEFAULT_ACCESS: AccessControlWire = {
@@ -105,13 +95,11 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
   const validConfig = (candidate: unknown): candidate is ConfigWire => {
     if (candidate === null || typeof candidate !== 'object') return false;
     const fields = candidate as Record<string, unknown>;
-    for (const key of ['appId', 'alias', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
+    for (const key of ['appId', 'alias', 'accessRevision']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'string') return false;
     }
     if (fields.robotRevision !== undefined && (!Number.isSafeInteger(fields.robotRevision) || Number(fields.robotRevision) < 0)) return false;
-    for (const key of ['requireMention', 'streaming', 'showToolResults', 'debug']) {
-      if (fields[key] !== undefined && typeof fields[key] !== 'boolean') return false;
-    }
+    if (fields.requireMention !== undefined && typeof fields.requireMention !== 'boolean') return false;
     if (fields.access !== undefined) {
       if (fields.access === null || typeof fields.access !== 'object') return false;
       const access = fields.access as Record<string, unknown>;

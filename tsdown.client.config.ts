@@ -47,7 +47,7 @@ function clientConfig(id: string, entry: string, outDir: string) {
     deps: {
       // 平台种子表内的说明符保持外部引用（经注入 require 解析）
       neverBundle: isBaseline,
-      // 其余依赖整体内联（本客户端无第三方依赖，此为兜底保护）
+      // 其他依赖内联，浏览器加载器只需提供上面的宿主模块。
       alwaysBundle: (specifier: string) => !isBaseline(specifier),
     },
     outputOptions: {

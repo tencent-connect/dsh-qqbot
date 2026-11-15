@@ -10,22 +10,25 @@ import {
 } from '../shared/workbench-conversation-protocol.ts';
 import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
-import { accountName, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
+import { accountName, robotBindingKey, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
+import { BindPanelBody } from './bind-page.ts';
 import { extensionSettingsProps, type WorkbenchExtensions } from './workbench-extensions.ts';
 import { QQ_HISTORY_VIEW_ID, type QqWorkbenchSettingsSection, type QqWorkbenchView } from '../shared/workbench-extension.ts';
 import { useWorkbenchLayout } from './workbench-layout.ts';
 import { WORKBENCH_STYLES } from './workbench-styles.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
 import { readDefaults, WorkbenchDefaultsForm } from './workbench-defaults.ts';
+import { agentSettingsPatch } from './agent-settings-draft.ts';
+import { SettingsGroup } from './workbench-settings-group.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
-type RobotView = 'conversation' | 'settings' | 'add';
+type RobotView = 'conversation' | 'settings' | 'add' | 'bind-primary';
 type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording' | 'agent'>;
 
 interface Draft extends EditableSettings {
-  baseline: EditableSettings & Pick<WorkbenchConversation, 'revision'>;
+  baseline: EditableSettings & Pick<WorkbenchConversation, 'revision' | 'defaultsRevision'>;
 }
 
 interface Navigation {
@@ -96,16 +99,19 @@ function accessLabel(robot: WorkbenchRobot, peer: WorkbenchConversation): string
 }
 
 function selectDraft(peer: WorkbenchConversation): Draft {
-  const { alias, receiving, recording, agent, revision } = peer;
-  return { alias, receiving, recording, agent, baseline: { alias, receiving, recording, agent, revision } };
+  const { alias, receiving, recording, agent, revision, defaultsRevision } = peer;
+  return { alias, receiving, recording, agent, baseline: { alias, receiving, recording, agent, revision, defaultsRevision } };
 }
 
 function changes(draft: Draft): Partial<EditableSettings> {
+  const agentChanged = draft.agent && draft.baseline.agent
+    ? Object.keys(agentSettingsPatch(draft.baseline.agent, draft.agent)).length > 0
+    : draft.agent !== draft.baseline.agent;
   return {
     ...(draft.alias !== draft.baseline.alias ? { alias: draft.alias } : {}),
     ...(draft.receiving !== draft.baseline.receiving ? { receiving: draft.receiving } : {}),
     ...(draft.recording !== draft.baseline.recording ? { recording: draft.recording } : {}),
-    ...(JSON.stringify(draft.agent) !== JSON.stringify(draft.baseline.agent) ? { agent: draft.agent } : {}),
+    ...(agentChanged ? { agent: draft.agent } : {}),
   };
 }
 
@@ -115,12 +121,7 @@ function mergeDraft(peer: WorkbenchConversation, draft: Draft, edited: Partial<E
   const { agent } = edited;
   const baseline = draft.baseline.agent;
   if (latest.agent && agent && baseline) {
-    const merged: WorkbenchAgentSettings = { ...latest.agent };
-    const copyIfChanged = <K extends keyof WorkbenchAgentSettings>(key: K): void => {
-      if (JSON.stringify(agent[key]) !== JSON.stringify(baseline[key])) merged[key] = agent[key];
-    };
-    for (const key of Object.keys(merged) as Array<keyof WorkbenchAgentSettings>) copyIfChanged(key);
-    next.agent = merged;
+    next.agent = { ...latest.agent, ...agentSettingsPatch(baseline, agent) };
   }
   return next;
 }
@@ -136,12 +137,12 @@ interface SessionNavigation {
 
 export interface QQWorkbenchProps extends SessionNavigation {
   extensions: WorkbenchExtensions;
-  primarySettings: ReactNode;
-  primaryAccountSettings: ReactNode;
+  settingsRequest?: () => void;
+  configFileAction?: ReactNode;
   agentSource?: AgentFormSource;
 }
 
-export function QQWorkbench({ extensions, primarySettings, primaryAccountSettings, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
+export function QQWorkbench({ extensions, settingsRequest, configFileAction, agentSource, ...sessionNavigation }: QQWorkbenchProps): ReactNode {
   const views = useSyncExternalStore(extensions.subscribe, extensions.getViews);
   const settingsSections = useSyncExternalStore(extensions.subscribe, extensions.getSettingsSections);
   const [nav, setNav] = useState(() => ({ ...lastNavigation }));
@@ -169,18 +170,20 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
       onToggleCollapse: () => navigate({ collapsed: !nav.collapsed }),
       onAdd: () => setRobotView('add'),
       onCancelAdd: () => setRobotView('conversation'),
+      settingsRequest,
+      primaryBinding: robotView === 'bind-primary',
+      onBindPrimary: () => setRobotView('bind-primary'),
       onOpenSettings: appId => {
         if (nav.appId !== appId) navigate({ appId });
         setRobotPage('account');
         setRobotView('settings');
       },
       render: ({ robots, unavailable, rail, accountSettings, cancelAdd, busy }) => {
-        if (unavailable) return h('div', { className: 'imqb-pluginPage' },
-          h('div', { className: 'imqb-pluginPageContent' }, primarySettings));
-        const robot = robots?.find(candidate => candidate.appId === nav.appId) ?? robots?.[0];
-        const primaryUnbound = robots?.length === 0;
+        const robot = robots?.find(candidate => candidate.appId === nav.appId)
+          ?? robots?.find(candidate => candidate.primary) ?? robots?.[0];
+        const primaryUnbound = !unavailable && (robots?.length === 0 || robotView === 'bind-primary');
         const adding = robotView === 'add';
-        const editing = robotView === 'settings' && robot !== undefined && accountSettings !== null;
+        const editing = !unavailable && robotView === 'settings' && robot !== undefined && accountSettings !== null;
         const showRobotSettings = primaryUnbound || adding || editing;
         const settingsSubtitle = editing && robot
           ? `${accountName(robot)} · ${ROBOT_STATE_LABELS[robot.state]}`
@@ -193,8 +196,8 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
           h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-account-panel`, 'aria-labelledby': `${robotTabsId}-account`, hidden: robotPage !== 'account' },
             accountSettings),
           h('div', { className: 'imqw-robot-tab', role: 'tabpanel', id: `${robotTabsId}-defaults-panel`, 'aria-labelledby': `${robotTabsId}-defaults`, hidden: robotPage !== 'defaults' },
-            h(WorkbenchDefaultsForm, { key: robot.appId, appId: robot.appId, source: agentSource })),
-        ) : primaryUnbound ? primaryAccountSettings : accountSettings;
+            h(WorkbenchDefaultsForm, { key: robotBindingKey(robot), appId: robot.appId, bindingRevision: robot.bindingRevision, source: agentSource })),
+        ) : primaryUnbound ? h(BindPanelBody) : accountSettings;
         return h('div', { className: 'imqw-root', ref: layout.root },
           h('style', null, WORKBENCH_STYLES),
           h('div', {
@@ -207,7 +210,8 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
             h('aside', { className: 'imqw-robots', 'aria-label': '机器人列表' }, rail),
             layout.divider('robots'),
             h('div', { className: 'imqw-content' },
-              robot ? h('div', {
+              unavailable ? h('section', { className: 'imqw-empty' }, h('p', { role: 'status' }, '机器人服务暂不可用，正在重试…'))
+                : robot ? h('div', {
                 className: 'imqw-conversation-grid', hidden: showRobotSettings,
                 'data-settings': nav.peerSettingsOpen, 'data-page': nav.smallPage,
               }, h(RobotConversations, {
@@ -224,9 +228,10 @@ export function QQWorkbench({ extensions, primarySettings, primaryAccountSetting
                   h('header', { className: 'imqw-column-head imqw-robot-settings-head' },
                     h('div', null, h('h2', null, '机器人设置'),
                       h('p', { className: 'imqw-muted' }, settingsSubtitle)),
-                    primaryUnbound ? null : h(Button, { size: 'sm', variant: 'outline', disabled: adding && busy,
-                      onClick: adding ? cancelAdd : () => setRobotView('conversation'),
-                    }, '返回会话')),
+                    h('div', { className: 'imqw-actions' }, configFileAction,
+                      robot ? h(Button, { size: 'sm', variant: 'outline', disabled: adding && busy,
+                        onClick: adding ? cancelAdd : () => setRobotView('conversation'),
+                      }, '返回会话') : null)),
                   settingsBody,
                 ),
               ) : null,
@@ -359,7 +364,8 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     const key = scopedKey(appId, target);
     const controller = new AbortController();
     const patch: WorkbenchConversationPatch = {
-      appId, scope: target.scope, openId: target.openId, revision: draft.baseline.revision, ...changes(draft),
+      appId, scope: target.scope, openId: target.openId, revision: draft.baseline.revision,
+      defaultsRevision: draft.baseline.defaultsRevision, ...changes(draft),
     };
     mutation.current = controller;
     generation.current++;
@@ -633,13 +639,6 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
   );
 }
 
-function SettingsGroup({ title, hint, defaultOpen, children }: { title: string; hint?: string; defaultOpen?: boolean; children: ReactNode }): ReactNode {
-  return h('details', { className: 'imqw-settings-group', open: defaultOpen },
-    h('summary', null, h(IconChevronDownOutlineRegular, { size: 14 }), h('strong', null, title),
-      hint ? h('span', { className: 'imqw-muted' }, hint) : null),
-    h('div', { className: 'imqw-settings-group-body' }, children));
-}
-
 function ExtensionSettingsGroup({ section, appId, scope, openId }: {
   section: QqWorkbenchSettingsSection;
   appId: string;
@@ -708,7 +707,7 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
   const [menuOpen, setMenuOpen] = useState(false);
   const edited = changes(draft);
   const dirty = Object.keys(edited).length > 0;
-  const stale = dirty && draft.baseline.revision !== peer.revision;
+  const stale = dirty && (draft.baseline.revision !== peer.revision || draft.baseline.defaultsRevision !== peer.defaultsRevision);
   const current = peer.sessions.find(session => session.id === peer.currentSessionId);
   const agent = draft.agent;
   const disabled = busy || reading;
@@ -799,8 +798,8 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
       }, '合并草稿')) : null,
     feedback ? h('p', { className: 'imqb-error', role: 'alert' }, feedback.message) : null,
     h('footer', { className: 'imqw-actions imqw-savebar' },
-      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: disabled || !dirty, onClick: () => onEdit(selectDraft(peer)) }, '放弃修改'),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: disabled || !dirty || stale }, busy ? '保存中…' : '保存更改'),
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: disabled || !dirty, onClick: () => onEdit(selectDraft(peer)) }, '撤销修改'),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: disabled || !dirty || stale }, busy ? '保存中…' : '保存'),
     ),
   );
 }

@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type ReactNode } from 'react';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { ChatScope } from '../types.ts';
 import {
@@ -11,6 +11,7 @@ import {
   type ModelDirectory, type PermissionDirectory, type PresetChoice, type SelectorSource,
 } from './host-selectors.ts';
 import { QQSelect, type QQSelectOption } from './qq-select.ts';
+import { PromptEditor } from './prompt-editor.ts';
 
 export interface AgentFormSource extends SelectorSource {
   sessionModels?: SessionModelSource;
@@ -246,14 +247,14 @@ export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: Ag
   return h('div', { className: 'imqw-agent-fields' },
     ...(['group', 'c2c'] as const).filter(kind => !scope || kind === scope).map(kind => {
       const key = kind === 'group' ? 'groupPrompt' : 'directPrompt';
-      return h('label', { className: 'imqw-field', key },
-        h('span', null, kind === 'group' ? '群聊补充提示词' : '私聊补充提示词'),
-        h('textarea', { value: settings[key], rows: 3, maxLength: 80_000, disabled,
-          onChange: (event: ChangeEvent<HTMLTextAreaElement>) => onChange({ [key]: event.currentTarget.value }),
-        }), scope ? h('small', { className: 'imqw-muted' }, '下次组装模型请求时读取。') : null);
+      return h(PromptEditor, { key, label: kind === 'group' ? '群聊补充提示词' : '私聊补充提示词',
+        value: settings[key], disabled, onChange: value => onChange({ [key]: value }),
+        hint: scope ? '保存后，下次组装模型请求时读取。' : undefined,
+      });
     }),
+    scope !== 'c2c' ? h('p', { className: 'imqw-receiving imqw-muted' }, '群聊生成完成后发送整条回复。') : null,
     ...([
-      ['streaming', '私聊流式输出', '下一轮开始生效，仅限被动回复。'],
+      ['streaming', '私聊流式输出', '保存后下一轮生效，仅限被动回复。'],
       ['showToolResults', '显示工具成功结果', '仅在整轮失败时向 QQ 发送简短提示。'],
     ] as const).filter(([key]) => key !== 'streaming' || scope !== 'group').map(([key, label, hint]) =>
       h('div', { className: 'imqw-receiving', key },

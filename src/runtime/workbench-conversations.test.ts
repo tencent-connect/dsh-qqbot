@@ -80,9 +80,6 @@ async function fixture(withPersistence = true, hooks?: {
   const conversationSettings = new ConversationSettingsStore(settingsPath);
   const access = { c2cMode: 'allowlist' as const, c2cAllow: ['same'], groupMode: 'disabled' as const, groupAllow: [] };
   const agent = legacyAgentSettings(ConfigSchema({} as ImQQBotConfig));
-  const account = { access, liveSessionId: () => undefined, peerName: () => '',
-    ...(hooks ? { ...hooks, agentSettings: () => agent } : {}),
-  };
   const mediaRoot = (appId: string) => join(dir, 'media', appId);
   const stat = vi.fn(async (id: string) => !['old-a', 'group-a', 'current-b'].includes(id) ? undefined : ({
     header: { id, cwd: '/test/workspace', agentPreset: 'test-preset', createdAt: 5 },
@@ -100,7 +97,12 @@ async function fixture(withPersistence = true, hooks?: {
   await host.await();
   const plugin = ctx.plugin(scope => registerWorkbenchConversations(scope, {
     prefs, conversationSettings, timeline,
-    conversationAccount: id => ['A', 'B'].includes(id) ? { ...account, mediaRoot: mediaRoot(id) } : undefined,
+    conversationAccount: id => ['A', 'B'].includes(id) ? {
+      access, liveSessionId: () => undefined, peerName: () => '', mediaRoot: mediaRoot(id),
+      ...(hooks ? { ...hooks, agentSettings: (scope, openId, existing) =>
+        conversationSettings.get(peerKey(id, scope, openId)).agent
+        ?? (!existing ? conversationSettings.template(id)?.settings : undefined) ?? agent } : {}),
+    } : undefined,
   }, logger));
   await plugin.await();
   const route = registered.get(WORKBENCH_CONVERSATIONS_PATH);
@@ -203,6 +205,31 @@ it.each(['bound', 'pending'] as const)('rejects permission changes while another
     expect(f.conversationSettings.get(peer).agent?.tools).toEqual([]);
   } finally {
     resume.resolve();
+    await f.close();
+  }
+});
+
+it('rejects a stale save for a peer that still inherits the robot template', async () => {
+  const f = await fixture(true, { validateAgent: async () => {}, sessionChangePending: () => false });
+  try {
+    const target = { appId: 'A', scope: 'c2c', openId: 'same' };
+    const { conversations: [original] } = await (await f.get('A')).json();
+    expect(original).toMatchObject({ revision: 0, defaultsRevision: 0 });
+    f.conversationSettings.saveTemplate('A', {
+      revision: 0, settings: { ...original.agent, directPrompt: 'new template' },
+    }, new Map());
+    const stale = await f.post({ ...target, revision: original.revision, defaultsRevision: original.defaultsRevision,
+      agent: { ...original.agent, streaming: false } });
+    expect(stale.status).toBe(409);
+    const { conversations: [fresh] } = await (await f.get('A')).json();
+    expect(fresh).toMatchObject({ revision: 0, defaultsRevision: 1, agent: { directPrompt: 'new template' } });
+    const saved = await f.post({ ...target, revision: fresh.revision, defaultsRevision: fresh.defaultsRevision,
+      agent: { ...fresh.agent, streaming: false } });
+    expect(saved.status).toBe(200);
+    const { conversation } = await saved.json();
+    expect(conversation.defaultsRevision).toBeUndefined();
+    expect(conversation.agent).toMatchObject({ directPrompt: 'new template', streaming: false });
+  } finally {
     await f.close();
   }
 });

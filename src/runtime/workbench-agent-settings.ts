@@ -7,6 +7,7 @@ import { resolveAgentCwd } from '../shared/dirs.ts';
 import { WORKBENCH_BASE_PERMISSIONS, type WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { robotObject } from './robot-config.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
+import { EXTRA_MAX_CHARS } from '../prompt/extra.ts';
 
 export function legacyAgentSettings(config: ImQQBotConfig): WorkbenchAgentSettings {
   return {
@@ -49,8 +50,8 @@ export function parseAgentSettings(raw: unknown): WorkbenchAgentSettings {
     model, cwd, reasoningEffort: string(row.reasoningEffort, '推理强度', 64).trim(),
     preset: string(row.preset, 'Agent 预设', 256).trim(),
     permission, ...(tools === undefined ? {} : { tools }),
-    groupPrompt: string(row.groupPrompt, '群聊补充提示词', 80_000),
-    directPrompt: string(row.directPrompt, '私聊补充提示词', 80_000),
+    groupPrompt: string(row.groupPrompt, '群聊补充提示词', EXTRA_MAX_CHARS),
+    directPrompt: string(row.directPrompt, '私聊补充提示词', EXTRA_MAX_CHARS),
     streaming: row.streaming, showToolResults: row.showToolResults,
   };
 }

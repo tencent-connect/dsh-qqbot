@@ -1,81 +1,127 @@
-import { createElement as h, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { createElement as h, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
-import { WORKBENCH_DEFAULTS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { WORKBENCH_DEFAULTS_PATH, type WorkbenchAgentSettings, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { agentSettingsPatch } from './agent-settings-draft.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
+import { SettingsGroup } from './workbench-settings-group.ts';
 
 export function readDefaults(appId: string, signal?: AbortSignal): Promise<WorkbenchDefaults> {
   return fetchJson<WorkbenchDefaults>(`${WORKBENCH_DEFAULTS_PATH}?${new URLSearchParams({ appId })}`, { cache: 'no-store', signal });
 }
 
-export function WorkbenchDefaultsForm({ appId, source }: { appId: string; source?: AgentFormSource }): ReactNode {
-  const [base, setBase] = useState<WorkbenchDefaults>();
-  const [settings, setSettings] = useState<WorkbenchDefaults['settings']>();
-  const [attempt, setAttempt] = useState(0);
+interface DefaultsDraft {
+  base: WorkbenchDefaults;
+  settings: WorkbenchAgentSettings;
+}
+
+const drafts = new Map<string, DefaultsDraft>();
+
+function changes(draft: DefaultsDraft): Partial<WorkbenchAgentSettings> {
+  return agentSettingsPatch(draft.base.settings, draft.settings);
+}
+
+export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
+  appId: string; bindingRevision?: number; source?: AgentFormSource;
+}): ReactNode {
+  const key = JSON.stringify([appId, bindingRevision]);
+  const [draft, setDraft] = useState(() => drafts.get(key));
+  const currentDraft = useRef(draft);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
+  const [notice, setNotice] = useState('');
   const [conflict, setConflict] = useState(false);
-  const dirty = JSON.stringify(settings) !== JSON.stringify(base?.settings);
+  const [loading, setLoading] = useState(true);
+  const request = useRef<AbortController>();
+  const dirty = draft !== undefined && Object.keys(changes(draft)).length > 0;
 
-  useEffect(() => {
+  const replace = (next: DefaultsDraft): void => {
+    if (Object.keys(changes(next)).length) drafts.set(key, next);
+    else drafts.delete(key);
+    currentDraft.current = next;
+    setDraft(next);
+  };
+
+  const run = async (action: (signal: AbortSignal) => Promise<void>): Promise<void> => {
+    if (request.current) return;
     const controller = new AbortController();
-    void readDefaults(appId, controller.signal).then(value => {
-      setBase(value);
-      setSettings(value.settings);
-      setError('');
-    }).catch(error => {
-      if (!controller.signal.aborted) setError(error instanceof Error ? error.message : '默认设置加载失败。');
-    });
-    return () => controller.abort();
-  }, [appId, attempt]);
-
-  const save = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    if (!base || !settings || busy || !dirty || conflict) return;
+    request.current = controller;
     setBusy(true);
     setError('');
+    setNotice('');
     try {
-      const next = await fetchJson<WorkbenchDefaults>(WORKBENCH_DEFAULTS_PATH, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ appId, revision: base.revision, settings }),
-      });
-      setBase(next);
-      setSettings(next.settings);
-      setSaved(true);
-    } catch (error) {
-      setConflict(error instanceof HttpError && error.status === 409);
-      setError(error instanceof Error ? error.message : '默认设置保存失败。');
+      await action(controller.signal);
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof HttpError && cause.status === 409) setConflict(true);
+      setError(cause instanceof Error ? cause.message : '无法更新默认设置。');
     } finally {
-      setBusy(false);
+      if (request.current === controller) {
+        request.current = undefined;
+        setBusy(false);
+        setLoading(false);
+      }
     }
   };
-  const change = (patch: Partial<WorkbenchDefaults['settings']>): void => {
-    setSettings(current => current && { ...current, ...patch });
-    setSaved(false);
+
+  const read = (mode: 'restore' | 'merge' | 'discard'): Promise<void> => run(async signal => {
+    const latest = await readDefaults(appId, signal);
+    if (signal.aborted) return;
+    const previous = drafts.get(key);
+    if (mode === 'discard' || !previous) {
+      replace({ base: latest, settings: latest.settings });
+    } else {
+      const merged = { base: latest, settings: { ...latest.settings, ...changes(previous) } };
+      if (mode === 'restore' && Object.keys(changes(merged)).length
+        && (latest.revision !== previous.base.revision || Object.keys(agentSettingsPatch(previous.base.settings, latest.settings)).length)) {
+        setConflict(true);
+        setError('默认设置已更新，草稿已保留。');
+        return;
+      }
+      replace(merged);
+      if (mode === 'merge') setNotice('草稿已合并，请核对后保存。');
+    }
+    setConflict(false);
+  });
+
+  useEffect(() => {
+    void read('restore');
+    return () => { request.current?.abort(); request.current = undefined; };
+    // The parent keys this form by the robot binding.
+  }, [key]);
+
+  const save = (event: FormEvent): void => {
+    event.preventDefault();
+    if (!draft || !dirty || conflict || loading) return;
+    void run(async signal => {
+      const next = await fetchJson<WorkbenchDefaults>(WORKBENCH_DEFAULTS_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal,
+        body: JSON.stringify({ appId, revision: draft.base.revision, settings: draft.settings }),
+      });
+      if (signal.aborted) return;
+      replace({ base: next, settings: next.settings });
+      setNotice('默认设置已保存。');
+    });
   };
+  const change = (patch: Partial<WorkbenchAgentSettings>): void => {
+    // Read the current draft so two edits from the same render compose.
+    const current = currentDraft.current;
+    if (current) replace({ ...current, settings: { ...current.settings, ...patch } });
+    setNotice('');
+  };
+  const fields = draft && { settings: draft.settings, disabled: busy || loading, onChange: change };
   return h('form', { className: 'imqw-form imqw-defaults-form', onSubmit: save },
-    h('p', { className: 'imqw-muted' }, '仅用于首次接入的群聊和私聊。'),
-    settings ? h('section', { className: 'imqw-defaults-section', 'aria-label': 'Agent 基本设置' },
-      h('h3', null, 'Agent 基本设置'),
-      h(WorkbenchAgentFields, { settings, source, disabled: busy, onChange: change }),
-    ) : null,
-    settings ? h('section', { className: 'imqw-defaults-section', 'aria-label': 'QQ 回复' },
-      h('h3', null, 'QQ 回复'),
-      h(WorkbenchReplyFields, { settings, disabled: busy, onChange: change }),
-    ) : null,
+    h('p', { className: 'imqw-muted' }, '首次建立 QQ 群聊或私聊的配置时采用。'),
+    fields ? h(SettingsGroup, { title: 'Agent 设置', defaultOpen: true, children: h(WorkbenchAgentFields, { ...fields, source }) }) : null,
+    fields ? h(SettingsGroup, { title: 'QQ 回复', defaultOpen: true, children: h(WorkbenchReplyFields, fields) }) : null,
     error ? h('p', { className: 'imqb-error', role: 'alert' }, error) : null,
-    saved ? h('p', { className: 'imqw-muted', role: 'status' }, '默认设置已保存。') : null,
-    settings ? h('footer', { className: 'imqw-actions imqw-savebar' },
-      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: busy || !dirty, onClick: () => {
-        setSettings(undefined);
-        setBase(undefined);
-        setConflict(false);
-        setError('');
-        setSaved(false);
-        setAttempt(value => value + 1);
-      } }, '放弃修改'),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || !dirty || conflict }, busy ? '保存中…' : '保存默认设置'),
-    ) : error ? h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => setAttempt(value => value + 1) }, '重新读取') : h('p', { role: 'status', className: 'imqw-muted' }, '正在读取默认设置…'),
+    notice ? h('p', { className: 'imqw-muted', role: 'status' }, notice) : null,
+    fields ? h('footer', { className: 'imqw-actions imqw-savebar' },
+      conflict ? h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: busy, onClick: () => { void read('merge'); } }, '合并草稿') : null,
+      h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: busy || (!dirty && !conflict),
+        onClick: () => { void read('discard'); } }, '撤销修改'),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || loading || !dirty || conflict }, busy ? '处理中…' : '保存'),
+    ) : error ? h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => { void read('restore'); } }, '重新读取')
+      : h('p', { role: 'status', className: 'imqw-muted' }, '正在读取默认设置…'),
   );
 }
