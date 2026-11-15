@@ -1,9 +1,14 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
-import { extname, isAbsolute } from 'node:path';
+import { createHash } from 'node:crypto';
+import { accessSync, constants, lstatSync, realpathSync, type Stats } from 'node:fs';
+import { open, opendir, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { DOMParser } from '@xmldom/xmldom';
 import { Unzip, UnzipInflate } from 'fflate';
-import { WORKBENCH_PROMPT_PATH_LIMIT } from '../shared/workbench-agent-settings.ts';
+import { atomicWrite } from '../shared/atomic-file.ts';
+import {
+  WORKBENCH_PROMPT_EXTENSIONS, WORKBENCH_PROMPT_PATH_LIMIT, type WorkbenchPromptFiles, type WorkbenchPromptPreview,
+} from '../shared/workbench-agent-settings.ts';
 import { EXTRA_MAX_CHARS } from './extra.ts';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -14,19 +19,63 @@ const WORD_NAMESPACES = new Set([
 ]);
 
 export class PromptFileError extends Error {}
+export class PromptFileConflict extends PromptFileError {
+  constructor() { super('文件已被外部修改。请重新读取原文件后合并修改。'); }
+}
 
-export function parsePromptFilePath(value: unknown): string {
+function absolutePath(value: unknown): string {
   if (typeof value !== 'string' || value.length > WORKBENCH_PROMPT_PATH_LIMIT || value.includes('\0') || !isAbsolute(value.trim())) {
     throw new PromptFileError('请输入 DSH 宿主上的绝对文件路径。');
   }
-  const path = value.trim();
-  if (!['.md', '.txt', '.docx'].includes(extname(path).toLowerCase())) {
+  return value.trim();
+}
+
+export function parsePromptFilePath(value: unknown): string {
+  const path = absolutePath(value);
+  if (!WORKBENCH_PROMPT_EXTENSIONS.has(extname(path).toLowerCase())) {
     throw new PromptFileError('提示词文件支持 .md、.txt 和 .docx。');
   }
   return path;
 }
 
-async function readBytes(path: string, signal?: AbortSignal): Promise<Uint8Array> {
+export async function browsePromptFiles(directory: unknown, fromFile: unknown, signal: AbortSignal): Promise<WorkbenchPromptFiles> {
+  const path = directory !== undefined ? resolve(absolutePath(directory)) : absolutePath(homedir());
+  let initial = path;
+  if (directory === undefined && typeof fromFile === 'string' && isAbsolute(fromFile.trim())) {
+    initial = dirname(resolve(absolutePath(fromFile)));
+  }
+  const entries: WorkbenchPromptFiles['entries'] = [];
+  let scanned = 0;
+  let truncated = false;
+  try {
+    signal.throwIfAborted();
+    for await (const child of await opendir(initial)) {
+      signal.throwIfAborted();
+      if (++scanned > 4096 || entries.length === 512) { truncated = true; break; }
+      if (child.name.startsWith('.')) continue;
+      const path = join(initial, child.name);
+      if (path.length > WORKBENCH_PROMPT_PATH_LIMIT) continue;
+      const info = child.isSymbolicLink() ? await stat(path).catch(() => undefined) : child;
+      if (!info) continue;
+      if (info.isDirectory()) entries.push({ kind: 'directory', path, name: child.name });
+      else if (info.isFile() && WORKBENCH_PROMPT_EXTENSIONS.has(extname(child.name).toLowerCase())) {
+        entries.push({ kind: 'file', path, name: child.name });
+      }
+    }
+  } catch {
+    signal.throwIfAborted();
+    throw new PromptFileError('无法读取此目录，请选择其他目录。');
+  }
+  const parent = dirname(initial);
+  entries.sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return { directory: initial, parent: parent === initial ? null : parent, entries, truncated };
+}
+
+function fileIdentity(stat: Stats): string {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+}
+
+async function readBytes(path: string, signal?: AbortSignal): Promise<{ bytes: Buffer; info: Stats }> {
   signal?.throwIfAborted();
   try {
     const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -39,7 +88,10 @@ async function readBytes(path: string, signal?: AbortSignal): Promise<Uint8Array
       while (offset < buffer.length) {
         signal?.throwIfAborted();
         const { bytesRead } = await file.read(buffer, offset, buffer.length - offset, offset);
-        if (bytesRead === 0) return buffer.subarray(0, offset);
+        if (bytesRead === 0) {
+          if (fileIdentity(await file.stat()) !== fileIdentity(stat)) throw new PromptFileConflict();
+          return { bytes: buffer.subarray(0, offset), info: stat };
+        }
         offset += bytesRead;
       }
       throw new PromptFileError('读取期间提示词文件已更新，请重试。');
@@ -56,10 +108,13 @@ async function readBytes(path: string, signal?: AbortSignal): Promise<Uint8Array
   }
 }
 
-function decodeText(bytes: Uint8Array): string {
-  const encoding = bytes[0] === 255 && bytes[1] === 254 ? 'utf-16le'
+function textEncoding(bytes: Uint8Array): 'utf-16le' | 'utf-16be' | 'utf-8' {
+  return bytes[0] === 255 && bytes[1] === 254 ? 'utf-16le'
     : bytes[0] === 254 && bytes[1] === 255 ? 'utf-16be' : 'utf-8';
-  return new TextDecoder(encoding, { fatal: true }).decode(bytes);
+}
+
+function decodeText(bytes: Uint8Array): string {
+  return new TextDecoder(textEncoding(bytes), { fatal: true }).decode(bytes);
 }
 
 function readWordBody(bytes: Uint8Array): string {
@@ -118,11 +173,14 @@ function readWordBody(bytes: Uint8Array): string {
   }).join('\n');
 }
 
-export async function readPromptFile(value: unknown, signal?: AbortSignal): Promise<string> {
-  const path = parsePromptFilePath(value);
-  const word = extname(path).toLowerCase() === '.docx';
-  const bytes = await readBytes(path, signal);
-  signal?.throwIfAborted();
+function normalizePrompt(content: string): string {
+  content = content.replace(/\r\n?/g, '\n');
+  if (content.includes('\0')) throw new PromptFileError('提示词文件包含无效字符。');
+  if (content.length > EXTRA_MAX_CHARS) throw new PromptFileError(`提示词文件最多 ${EXTRA_MAX_CHARS.toLocaleString('zh-CN')} 字符，请缩短文件内容。`);
+  return content;
+}
+
+function parseContent(bytes: Buffer, word: boolean): string {
   let content: string;
   try {
     content = word ? readWordBody(bytes) : decodeText(bytes);
@@ -130,8 +188,69 @@ export async function readPromptFile(value: unknown, signal?: AbortSignal): Prom
     if (error instanceof PromptFileError) throw error;
     throw new PromptFileError(word ? '无法读取 DOCX 正文，请检查文件。' : '文本编码无法读取，请使用 UTF-8 或带 BOM 的 UTF-16。');
   }
-  content = content.replace(/\r\n?/g, '\n');
-  if (content.includes('\0')) throw new PromptFileError('提示词文件包含无效字符。');
-  if (content.length > EXTRA_MAX_CHARS) throw new PromptFileError(`提示词文件最多 ${EXTRA_MAX_CHARS.toLocaleString('zh-CN')} 字符，请缩短文件内容。`);
-  return content;
+  return normalizePrompt(content);
+}
+
+function revision(path: string, info: Stats, bytes: Buffer): string {
+  return createHash('sha256').update(JSON.stringify([path, fileIdentity(info)])).update(bytes).digest('hex');
+}
+
+export async function readPromptFile(value: unknown, signal?: AbortSignal): Promise<string> {
+  const path = parsePromptFilePath(value);
+  const { bytes } = await readBytes(path, signal);
+  signal?.throwIfAborted();
+  return parseContent(bytes, extname(path).toLowerCase() === '.docx');
+}
+
+export async function previewPromptFile(value: unknown, signal: AbortSignal): Promise<WorkbenchPromptPreview> {
+  const path = parsePromptFilePath(value);
+  const { bytes, info } = await readBytes(path, signal);
+  signal.throwIfAborted();
+  const word = extname(path).toLowerCase() === '.docx';
+  const text = parseContent(bytes, word);
+  return word ? { kind: 'docx', text } : { kind: 'text', text, revision: revision(path, info, bytes) };
+}
+
+function encodeLikeSource(text: string, original: Buffer): Buffer {
+  const lineBreak = /\r\n?|\n/.exec(decodeText(original))?.[0] ?? '\n';
+  const document = text.replaceAll('\n', lineBreak);
+  const encoding = textEncoding(original);
+  if (encoding === 'utf-16le') return Buffer.from('\uFEFF' + document, 'utf16le');
+  if (encoding === 'utf-16be') return Buffer.from('\uFEFF' + document, 'utf16le').swap16();
+  return Buffer.from(original[0] === 239 && original[1] === 187 && original[2] === 191 ? '\uFEFF' + document : document);
+}
+
+export async function writePromptFile(input: { path: unknown; revision: unknown; text: unknown },
+  signal: AbortSignal, assertWritable: () => void): Promise<WorkbenchPromptPreview> {
+  const path = parsePromptFilePath(input.path);
+  if (extname(path).toLowerCase() === '.docx') throw new PromptFileError('请在原文编辑器里修改 DOCX。');
+  if (typeof input.revision !== 'string' || !/^[a-f0-9]{64}$/.test(input.revision) || typeof input.text !== 'string') {
+    throw new PromptFileError('提示词文件保存请求无效。');
+  }
+  const text = normalizePrompt(input.text);
+  const { bytes, info } = await readBytes(path, signal);
+  if (revision(path, info, bytes) !== input.revision) throw new PromptFileConflict();
+  const updated = encodeLikeSource(text, bytes);
+  try {
+    const destination = realpathSync(path);
+    if (!['.md', '.txt'].includes(extname(destination).toLowerCase())) {
+      throw new PromptFileError('原文件必须为 MD 或 TXT。');
+    }
+    const verify = (): void => {
+      if (realpathSync(path) !== destination || fileIdentity(lstatSync(destination)) !== fileIdentity(info)) {
+        throw new PromptFileConflict();
+      }
+      accessSync(destination, constants.W_OK);
+    };
+    signal.throwIfAborted();
+    assertWritable();
+    verify();
+    atomicWrite(destination, [updated], { mode: info.mode & 0o777, verify });
+    return { kind: 'text', text, revision: revision(path, lstatSync(destination), updated) };
+  } catch (error) {
+    signal.throwIfAborted();
+    assertWritable();
+    if (error instanceof PromptFileError) throw error;
+    throw new PromptFileError('无法保存原文件，请检查文件及目录的写入权限。');
+  }
 }

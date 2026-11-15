@@ -9,6 +9,7 @@ import { strToU8, zipSync } from 'fflate';
 import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost } from './host.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
+import { deliveryKey } from '../../lib/transport/delivery-ledger.js';
 
 const [source, corePackage, historyPackage, dir, expected = 'fixed', browser] = process.argv.slice(2);
 assertNodeVersion();
@@ -19,6 +20,7 @@ assert([source, corePackage, historyPackage, dir].every(value => value && isAbso
 await mkdir(dir, { mode: 0o700 });
 const home = join(dir, 'home');
 const workspace = join(dir, 'workspace');
+const qqData = join(dir, 'qq-data');
 await mkdir(workspace);
 const profile = 'qqbot-policy';
 const hostPort = await availablePort();
@@ -69,7 +71,7 @@ let host;
 const controls = [];
 try {
   const env = {
-    ...process.env, HOME: home, DSH_HOME: home, QQBOT_DATA_DIR: join(dir, 'qq-data'),
+    ...process.env, HOME: home, DSH_HOME: home, QQBOT_DATA_DIR: qqData,
     QQBOT_BASE_URL: qq.origin, QQBOT_TOKEN_BASE_URL: qq.origin,
     QQBOT_TOOL_TEST_KEY: 'isolated-test-only', DSH_TELEMETRY_MODE: 'DISABLED',
   };
@@ -94,6 +96,46 @@ try {
       models: [primary.model, secondary.model].map(id => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024 })) } } } },
     { insert: [{ id: 'qqbot-tool-policy-barrier', name: barrier }] },
   ], null, 2), { mode: 0o600 });
+  let historyFixture;
+  let openLog;
+  if (browser === '--browser') {
+    const directId = 'local-fixture-allowed-user';
+    const pausedId = 'local-fixture-legacy-paused';
+    const timelineOnlyId = 'local-fixture-legacy-timeline';
+    const timedId = 'local-fixture-already-timed';
+    const settings = (recording, alias = '') => ({ alias, receiving: true, recording, revision: 0 });
+    await mkdir(qqData, { recursive: true });
+    await writeFile(join(qqData, 'conversation-settings.json'), JSON.stringify({
+      version: 1, peers: {
+        [`qqbot:${DUMMY_APP_ID}:c2c:${directId}`]: settings(true),
+        [`qqbot:${DUMMY_APP_ID}:c2c:${pausedId}`]: settings(false, '旧暂停对话'),
+        [`qqbot:${DUMMY_APP_ID}:c2c:${timedId}`]: { alias: '', receiving: true, retention: '7d', revision: 1 },
+      },
+    }), { mode: 0o600 });
+    const older = 'QQ_TIMELINE_BEYOND_30_DAYS';
+    const recent = 'QQ_TIMELINE_BETWEEN_7_AND_30_DAYS';
+    const seed = async (openId, entries) => {
+      const peer = join(qqData, 'timeline', deliveryKey(DUMMY_APP_ID), deliveryKey('c2c', openId));
+      await mkdir(peer, { recursive: true });
+      await writeFile(join(peer, 'peer.json'), JSON.stringify({ scope: 'c2c', openId }));
+      const file = join(peer, 'rows.jsonl');
+      await writeFile(file, entries.map(([text, age]) => JSON.stringify({
+        id: deliveryKey(text), text, at: Date.now() - age * 86_400_000, direction: 'inbound', status: 'received',
+      })).join('\n') + '\n');
+      return file;
+    };
+    historyFixture = { older, recent, pausedId, timelineOnlyId, file: await seed(directId, [[older, 35], [recent, 12]]) };
+    historyFixture.startupExpiryFile = await seed(timedId, [['QQ_EXPIRE_WITHOUT_OPENING', 9], ['QQ_KEEP_ON_STARTUP', 2]]);
+    await seed(timelineOnlyId, [['QQ_LEGACY_TIMELINE_WITHOUT_SETTINGS', 35]]);
+    if (process.platform === 'darwin') {
+      openLog = join(dir, 'native-open.log');
+      const bin = join(dir, 'bin');
+      await mkdir(bin);
+      await writeFile(join(bin, 'open'), '#!/bin/sh\nprintf "%s\\n" "$1" >> "$QQBOT_TEST_OPEN_LOG"\n', { mode: 0o700 });
+      env.PATH = bin + ':' + env.PATH;
+      env.QQBOT_TEST_OPEN_LOG = openLog;
+    }
+  }
   host = await spawnLogged(process.execPath, [...cli, ...select, '--port', String(hostPort), '--no-open'], { cwd: source, env, logPath: hostLog });
   report.pid = host.child.pid;
   await writeFile(join(dir, 'process.json'), JSON.stringify({ pid: report.pid, hostOrigin }), { mode: 0o600 });
@@ -277,17 +319,24 @@ try {
   report.sessions = { group, direct, child };
   if (browser === '--browser') {
     const { verifyWorkbenchBrowser } = await import('./workbench-browser.mjs');
-    const word = { path: join(dir, 'group-prompt.docx'), initial: 'QQ_GROUP_WORD_PROMPT' };
+    const files = join(dir, 'prompt documents');
+    await mkdir(files);
+    const word = { path: join(files, 'group-prompt.docx'), initial: 'QQ_GROUP_WORD_PROMPT', openLog };
     const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
       + `<w:body><w:p><w:r><w:t>${word.initial}</w:t></w:r></w:p></w:body></w:document>`;
     await writeFile(word.path, zipSync({ 'word/document.xml': strToU8(xml) }), { mode: 0o600 });
-    const prompt = { path: join(dir, 'live-prompt.md'), initial: '# QQ_PROMPT_PREVIEW_INITIAL\n', edited: '# QQ_PROMPT_PREVIEW_EDITED\n', word };
+    const plain = { path: join(files, 'plain-prompt.txt'), initial: '原 TXT 提示词\n', edited: 'TXT 已原地保存\n' };
+    const prompt = { path: join(files, 'live-prompt.md'), initial: '# QQ_PROMPT_PREVIEW_INITIAL\n', edited: '# QQ_PROMPT_PREVIEW_EDITED\n', word, plain };
     await writeFile(prompt.path, prompt.initial, { mode: 0o600 });
-    const unauthenticated = await fetch(hostOrigin + base + 'prompt-preview', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: prompt.path }),
-    });
-    assert([401, 403].includes(unauthenticated.status), 'preview requires a trusted Host owner');
-    report.browser = await verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt });
+    await writeFile(plain.path, plain.initial, { mode: 0o600 });
+    await writeFile(join(files, 'hidden-from-picker.pdf'), 'unsupported');
+    for (const route of ['prompt-preview', 'prompt-files', 'prompt-write', 'timeline/clear']) {
+      const unauthenticated = await fetch(hostOrigin + base + route, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: prompt.path }),
+      });
+      assert([401, 403].includes(unauthenticated.status), route + ' requires a trusted Host owner');
+    }
+    report.browser = await verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt, historyFixture });
 
     const before = await conversation('c2c');
     assert.equal(before.currentSessionId, direct);
@@ -307,6 +356,9 @@ try {
     assert(system?.includes(JSON.stringify(latest).slice(1, -1)), 'the next model request receives the updated complete file');
     assert(!system.includes(prompt.edited.trim()), 'the previous file content is gone from the current system prompt');
     assert.equal((await conversation('c2c')).revision, before.revision);
+    assert.equal((await client.get(base + 'timeline?' + new URLSearchParams({
+      appId: DUMMY_APP_ID, scope: 'c2c', openId: peer('c2c'),
+    }))).entries.length, 0, 'paused recording does not prevent model requests or add new rows');
 
     await rm(prompt.path);
     plan('file-prompt-missing');

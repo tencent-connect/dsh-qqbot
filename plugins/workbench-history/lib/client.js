@@ -366,13 +366,13 @@ window.__ModuleLoader__.load({
 			return !!previous && previous.direction === row.direction && (row.direction === "outbound" || !!row.senderId && previous.senderId === row.senderId) && row.at >= previous.at && row.at - previous.at < 18e4;
 		}
 		function updateLatest(current, latest) {
-			if (!current || !latest.entries.length) return latest;
+			if (!current || current.generation !== latest.generation || !latest.entries.length) return latest;
 			const overlap = current.entries.findIndex((row) => row.id === latest.entries[0]?.id);
 			if (overlap < 0) return latest;
 			return {
+				...latest,
 				entries: [...current.entries.slice(0, overlap), ...latest.entries],
-				before: overlap > 0 ? current.before : latest.before,
-				incomplete: latest.incomplete
+				before: overlap > 0 ? current.before : latest.before
 			};
 		}
 		function QqTimelineView({ appId, peer, robotName, disabledReason, openSession, refreshKey }) {
@@ -437,7 +437,9 @@ window.__ModuleLoader__.load({
 							exists.body?.cancel();
 							if (exists.ok) while (visible.before && !visible.entries.some((row) => row.id === position.entryId)) {
 								const older = await fetchJson(params(visible.before), options);
+								if (older.generation !== visible.generation) break;
 								visible = {
+									...visible,
 									entries: [...older.entries, ...visible.entries],
 									before: older.before,
 									incomplete: older.incomplete || visible.incomplete
@@ -508,14 +510,18 @@ window.__ModuleLoader__.load({
 					});
 					if (signal.aborted) return;
 					olderHeight.current = list.current?.scrollHeight;
-					setPage((current) => current?.before === before ? {
+					setPage((current) => current?.before === before && current.generation === older.generation ? {
+						...current,
 						entries: [...older.entries, ...current.entries],
 						before: older.before,
 						incomplete: current.incomplete || older.incomplete
 					} : current);
 					setError("");
 				} catch (cause) {
-					if (!signal.aborted) setError(cause instanceof Error ? cause.message : "无法读取更早记录");
+					if (!signal.aborted) {
+						if (cause instanceof HttpError && cause.status === 404) setRefresh((value) => value + 1);
+						else setError(cause instanceof Error ? cause.message : "无法读取更早记录");
+					}
 				} finally {
 					setReadingOlder(false);
 				}
@@ -550,7 +556,7 @@ window.__ModuleLoader__.load({
 			return (0, react.createElement)("section", {
 				className: "imqw-timeline",
 				"aria-label": "QQ 消息"
-			}, !recording || refreshKey === void 0 ? (0, react.createElement)("div", { className: "imqw-timeline-notice" }, !recording ? (0, react.createElement)("span", { className: "imqw-muted" }, "消息保存已关闭") : null, refreshKey === void 0 ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+			}, !recording || refreshKey === void 0 ? (0, react.createElement)("div", { className: "imqw-timeline-notice" }, !recording ? (0, react.createElement)("span", { className: "imqw-muted" }, "已暂停记录新消息") : null, refreshKey === void 0 ? (0, react.createElement)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				variant: "ghost",
 				size: "sm",
 				disabled: readingOlder,

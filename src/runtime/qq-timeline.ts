@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync, type Stats } from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
@@ -9,6 +9,8 @@ interface Peer { scope: ChatScope; openId: string }
 type StoredEntry = TimelineEntry & { imageFiles?: string[] };
 interface Journal {
   signature: string;
+  generation?: string;
+  oldestAt: number;
   rows: Map<string, StoredEntry>;
   completeBytes?: number;
 }
@@ -19,6 +21,12 @@ function missing(error: unknown): boolean {
 
 function signature(stats: { ino: number; size: number; mtimeMs: number }): string {
   return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
+}
+
+function journalState(stats: Stats, rows: Map<string, StoredEntry>): Journal {
+  let oldestAt = Infinity;
+  for (const row of rows.values()) oldestAt = Math.min(oldestAt, row.at);
+  return { signature: signature(stats), generation: deliveryKey(stats.ino, stats.birthtimeMs), oldestAt, rows };
 }
 
 export function timelineText(text: string): string {
@@ -36,16 +44,37 @@ export class QqTimeline {
   private readonly pending = new Set<string>();
   private readonly generations = new Map<string, number>();
 
-  constructor(private readonly root: string, private readonly logger: Logger) {}
+  constructor(private readonly root: string, private readonly logger: Logger,
+    private readonly retainAfter?: (appId: string, target: ReplyTarget) => number | undefined) {}
 
   clearAccount(appId: string): void {
     const path = this.accountDir(appId);
-    this.generations.set(appId, (this.generations.get(appId) ?? 0) + 1);
+    this.advanceGeneration(path);
+    for (const key of this.generations.keys()) if (key.startsWith(path + sep)) this.generations.delete(key);
     for (const key of this.journals.keys()) if (key.startsWith(path + sep)) this.journals.delete(key);
     for (const set of [this.incomplete, this.pending]) {
       for (const key of set) if (key.startsWith(path + sep)) set.delete(key);
     }
     rmSync(path, { force: true, recursive: true });
+  }
+
+  clearPeer(appId: string, target: ReplyTarget): void {
+    const path = this.peerDir(appId, target);
+    const file = join(path, 'rows.jsonl');
+    if (existsSync(file)) atomicWrite(file, []);
+    this.advanceGeneration(path);
+    this.journals.delete(file);
+    for (const key of this.pending) if (key.startsWith(path + sep)) this.pending.delete(key);
+    rmSync(join(path, 'incomplete'), { force: true });
+    this.incomplete.delete(path);
+  }
+
+  expire(appId: string, target: ReplyTarget): void {
+    try {
+      this.retainedJournal(appId, target);
+    } catch {
+      this.noteFailure(this.peerDir(appId, target));
+    }
   }
 
   peers(appId: string): Peer[] {
@@ -82,8 +111,7 @@ export class QqTimeline {
   }
 
   imageFile(appId: string, target: ReplyTarget, id: string, index: number): string | undefined {
-    const directory = this.peerDir(appId, target);
-    return this.load(join(directory, 'rows.jsonl')).rows.get(id)?.imageFiles?.[index];
+    return this.retainedJournal(appId, target).rows.get(id)?.imageFiles?.[index];
   }
 
   reportInbound(appId: string, target: ReplyTarget, inboundOutcome: TimelineInboundOutcome, sessionId?: string): void {
@@ -98,16 +126,19 @@ export class QqTimeline {
 
   entry(appId: string, target: ReplyTarget, id: string): TimelineEntry | undefined {
     const directory = this.peerDir(appId, target);
-    const row = this.load(join(directory, 'rows.jsonl')).rows.get(id);
+    const row = this.retainedJournal(appId, target).rows.get(id);
     return row && this.observedStatus(directory, row);
   }
 
   async observe<T>(appId: string, target: ReplyTarget, entry: TimelineEntry,
     send: () => Promise<T>, finish: (result?: T, error?: unknown) => Partial<TimelineEntry>,
     stillOwned?: () => boolean): Promise<T> {
-    const key = join(this.peerDir(appId, target), entry.id);
-    const generation = this.generations.get(appId);
-    const current = () => this.generations.get(appId) === generation;
+    const account = this.accountDir(appId);
+    const peer = this.peerDir(appId, target);
+    const key = join(peer, entry.id);
+    const accountGeneration = this.generations.get(account);
+    const peerGeneration = this.generations.get(peer);
+    const current = () => this.generations.get(account) === accountGeneration && this.generations.get(peer) === peerGeneration;
     this.pending.add(key);
     this.update(appId, target, entry.id, previous => ({ ...entry, at: previous?.at ?? entry.at }));
     try {
@@ -128,7 +159,8 @@ export class QqTimeline {
 
   page(appId: string, target: ReplyTarget, before?: string): TimelinePage | undefined {
     const directory = this.peerDir(appId, target);
-    const rows = [...this.load(join(directory, 'rows.jsonl')).rows.values()];
+    const journal = this.retainedJournal(appId, target);
+    const rows = [...journal.rows.values()];
     const end = before === undefined ? rows.length : rows.findIndex(row => row.id === before);
     if (end < 0) return undefined;
     const start = Math.max(0, end - TIMELINE_PAGE_SIZE);
@@ -136,6 +168,7 @@ export class QqTimeline {
       entries: rows.slice(start, end).map(row => this.observedStatus(directory, row)),
       before: start > 0 ? rows[start]?.id : undefined,
       incomplete: this.incomplete.has(directory) || existsSync(join(directory, 'incomplete')),
+      generation: journal.generation,
     };
   }
 
@@ -153,13 +186,38 @@ export class QqTimeline {
     return join(this.accountDir(appId), deliveryKey(target.scope, target.targetId));
   }
 
+  private advanceGeneration(path: string): void {
+    this.generations.set(path, (this.generations.get(path) ?? 0) + 1);
+  }
+
+  private retainedJournal(appId: string, target: ReplyTarget): Journal {
+    const directory = this.peerDir(appId, target);
+    const file = join(directory, 'rows.jsonl');
+    const journal = this.load(file);
+    const cutoff = this.retainAfter?.(appId, target);
+    if (cutoff === undefined || journal.oldestAt >= cutoff) return journal;
+    const rows = new Map([...journal.rows].filter(([, row]) => row.at >= cutoff));
+    try {
+      if (journal.completeBytes !== undefined && !existsSync(join(directory, 'incomplete'))) {
+        atomicWrite(join(directory, 'incomplete'), ['Interrupted append\n']);
+      }
+      atomicWrite(file, journalLines(rows.values()));
+      const retained = journalState(statSync(file), rows);
+      this.remember(file, retained);
+      return retained;
+    } catch {
+      this.noteFailure(directory);
+      return { ...journal, rows, generation: deliveryKey(journal.generation, rows.size, rows.keys().next().value) };
+    }
+  }
+
   private update(appId: string, target: ReplyTarget, id: string, change: (previous?: StoredEntry) => StoredEntry | undefined): void {
     const directory = this.peerDir(appId, target);
     const file = join(directory, 'rows.jsonl');
     try {
       const journal = this.load(file);
       const entry = change(journal.rows.get(id));
-      if (!entry) return;
+      if (!entry || entry.at < (this.retainAfter?.(appId, target) ?? -Infinity)) return;
       if (journal.rows.size === 0) {
         atomicWrite(join(directory, 'peer.json'), [JSON.stringify({ scope: target.scope, openId: target.targetId })]);
       }
@@ -174,7 +232,10 @@ export class QqTimeline {
         let offset = 0;
         while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
         fsyncSync(fd);
-        journal.signature = signature(fstatSync(fd));
+        const stats = fstatSync(fd);
+        journal.signature = signature(stats);
+        journal.generation ??= deliveryKey(stats.ino, stats.birthtimeMs);
+        journal.oldestAt = Math.min(journal.oldestAt, entry.at);
         journal.completeBytes = undefined;
       } finally { closeSync(fd); }
       journal.rows.set(id, entry);
@@ -189,7 +250,7 @@ export class QqTimeline {
     let stats: ReturnType<typeof statSync>;
     try { stats = statSync(file); }
     catch (error) {
-      if (missing(error) && !this.journals.has(file)) return { signature: '', rows: new Map() };
+      if (missing(error) && !this.journals.has(file)) return { signature: '', oldestAt: Infinity, rows: new Map() };
       throw error;
     }
     const stamp = signature(stats);
@@ -212,7 +273,7 @@ export class QqTimeline {
         || !['received', 'sending', 'partial', 'accepted', 'rejected', 'unknown'].includes(row.status)) throw new Error('Invalid QQ timeline');
       rows.set(row.id, row);
     }
-    const journal = { signature: stamp, rows, completeBytes };
+    const journal = { ...journalState(stats, rows), completeBytes };
     this.remember(file, journal);
     return journal;
   }
@@ -227,4 +288,8 @@ export class QqTimeline {
     if (!this.incomplete.has(directory)) this.logger.warn('QQ 消息流水写入或读取失败，记录可能不完整。');
     this.incomplete.add(directory);
   }
+}
+
+function* journalLines(rows: Iterable<StoredEntry>): Iterable<string> {
+  for (const row of rows) yield JSON.stringify(row) + '\n';
 }

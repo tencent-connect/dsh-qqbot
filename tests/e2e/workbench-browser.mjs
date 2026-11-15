@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { DUMMY_APP_ID } from './command-protocol.mjs';
 
 const workbench = '/api/qqbot/workbench/';
@@ -254,20 +254,39 @@ async function verifyToolPicker(page, client, until) {
     visibleCombinationCreation: true, appliedToolChanges: true };
 }
 
-async function verifyPromptPaths(page, client, until, { path, initial, edited, word }) {
+async function verifyPromptPaths(page, client, until, { path, initial, edited, word, plain }) {
   const defaults = () => client.get(workbench + 'defaults?appId=' + DUMMY_APP_ID);
   const conversation = async () => (await client.get(workbench + 'conversations?appId=' + DUMMY_APP_ID))
     .conversations.find(row => row.openId === directId && row.scope === 'c2c');
   const bind = async (panel, label, file) => {
     await panel.getByRole('tablist', { name: label + '来源' }).getByRole('tab', { name: '文件路径', exact: true }).click();
     const input = panel.getByRole('textbox', { name: label + '文件路径', exact: true });
-    await input.fill(file.path);
+    await button(panel, '选择文件').click();
+    const picker = page.getByRole('dialog', { name: '选择提示词文件' });
+    await picker.getByRole('list', { name: '宿主目录内容' }).waitFor();
+    await picker.getByRole('textbox', { name: '宿主目录路径' }).fill(dirname(dirname(file.path)));
+    await button(picker, '前往').click();
+    await picker.getByRole('button', { name: /^prompt documents/ }).click();
+    await button(picker, basename(file.path)).click();
+    assert.equal(await button(picker, 'hidden-from-picker.pdf').count(), 0);
+    await button(picker, '使用此文件').click();
+    await picker.waitFor({ state: 'hidden' });
+    assert.equal(await input.inputValue(), file.path);
     const preview = button(panel, '预览' + label + '文件');
     const text = panel.getByLabel(label + '预览', { exact: true });
-    await preview.click();
     await text.filter({ hasText: file.initial.trim() }).waitFor();
     assert.equal(await text.textContent(), file.initial);
     return { input, preview, text };
+  };
+  const editFile = async (panel, value) => {
+    await button(panel, '编辑原文件').click();
+    const dialog = page.getByRole('dialog', { name: '编辑提示词原文件' });
+    const field = dialog.getByRole('textbox', { name: '原文件正文' });
+    await field.fill(value);
+    await dialog.getByRole('tab', { name: '预览', exact: true }).click();
+    assert.equal(await dialog.getByLabel('原文件编辑预览').textContent(), value);
+    await button(dialog, '保存到原文件').click();
+    return { dialog, field };
   };
 
   await button(page, '设置主机器人').click();
@@ -275,13 +294,24 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   const defaultsForm = page.getByRole('tabpanel', { name: '新会话默认设置' });
   const baseline = await defaults();
   await bind(defaultsForm, '群聊补充提示词', word);
+  assert.equal(await button(defaultsForm, '编辑原文件').count(), 0);
+  if (word.openLog) {
+    await button(defaultsForm, '打开原文编辑').click();
+    await until(async () => (await readFile(word.openLog, 'utf8').catch(() => '')).split('\n').includes(word.path),
+      'Host opened the original Word document');
+  }
+  await defaultsForm.getByRole('tablist', { name: '补充提示词场景' }).getByRole('tab', { name: '私聊' }).click();
+  await bind(defaultsForm, '私聊补充提示词', plain);
+  const plainEdit = await editFile(defaultsForm, plain.edited);
+  await plainEdit.dialog.waitFor({ state: 'hidden' });
+  assert.equal(await readFile(plain.path, 'utf8'), plain.edited);
   assert.deepEqual(await defaults(), baseline);
   await button(defaultsForm, '保存').click();
   await defaultsForm.getByText('默认设置已保存。', { exact: true }).waitFor();
   const savedDefaults = await defaults();
   const source = { kind: 'file', path };
   assert.deepEqual(savedDefaults.settings.groupPrompt, { kind: 'file', path: word.path });
-  assert.deepEqual(savedDefaults.settings.directPrompt, baseline.settings.directPrompt);
+  assert.deepEqual(savedDefaults.settings.directPrompt, { kind: 'file', path: plain.path });
   await button(page, '返回会话').click();
 
   await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
@@ -298,10 +328,24 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   }, 'saved conversation prompt path');
   assert.deepEqual(saved.agent.directPrompt, source);
   assert.deepEqual(saved.agent.groupPrompt, prior.agent.groupPrompt);
-  await writeFile(path, edited, { mode: 0o600 });
-  await preview.click();
+  const markdownEdit = await editFile(settings, edited);
+  await markdownEdit.dialog.waitFor({ state: 'hidden' });
+  assert.equal(await readFile(path, 'utf8'), edited);
   await text.filter({ hasText: edited.trim() }).waitFor();
   assert.equal(await text.textContent(), edited);
+  await button(settings, '编辑原文件').click();
+  const conflict = page.getByRole('dialog', { name: '编辑提示词原文件' });
+  const draft = conflict.getByRole('textbox', { name: '原文件正文' });
+  await draft.fill('页面还未写入的草稿');
+  const external = edited + '外部编辑\n';
+  await writeFile(path, external);
+  await button(conflict, '保存到原文件').click();
+  await conflict.getByRole('alert').filter({ hasText: '文件已被外部修改' }).waitFor();
+  assert.equal(await draft.inputValue(), '页面还未写入的草稿');
+  assert.equal(await readFile(path, 'utf8'), external);
+  await button(conflict, '取消').click();
+  await preview.click();
+  await text.filter({ hasText: '外部编辑' }).waitFor();
   await input.fill(path + '.missing.md');
   await preview.click();
   await settings.getByText('找不到补充提示词文件。', { exact: true }).waitFor();
@@ -309,10 +353,83 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   await input.fill(path);
   assert.equal((await conversation()).revision, saved.revision);
   assert.deepEqual(await defaults(), savedDefaults);
-  return { botDefaultsDocxPath: true, conversationPath: true, latestPreview: true, storedOnlyPath: true, missingPreview: true };
+  return { hostPicker: true, filteredExtensions: true, editedMarkdown: true, editedText: true, externalEditConflict: true,
+    botDefaultsDocxPath: true, openedDocx: word.openLog ? true : 'not exercised on this platform',
+    conversationPath: true, latestPreview: true, storedOnlyPath: true, missingPreview: true };
 }
 
-export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt }) {
+async function verifyRetention(page, client, until, { older, recent, pausedId, timelineOnlyId, file, startupExpiryFile }) {
+  const startup = await readFile(startupExpiryFile, 'utf8');
+  assert(!startup.includes('QQ_EXPIRE_WITHOUT_OPENING'));
+  assert(startup.includes('QQ_KEEP_ON_STARTUP'));
+  const query = new URLSearchParams({ appId: DUMMY_APP_ID });
+  const conversations = async () => (await client.get(workbench + 'conversations?' + query)).conversations;
+  const current = async () => (await conversations()).find(peer => peer.openId === directId);
+  const entries = async () => (await client.get(workbench + 'timeline?' + scopeQuery)).entries;
+  const before = await conversations();
+  const original = before.find(peer => peer.openId === directId);
+  assert.equal(original.retention, 'forever');
+  assert.equal(before.find(peer => peer.openId === pausedId).retention, 'paused');
+  assert.equal(before.find(peer => peer.openId === groupId).retention, '7d');
+  assert.equal(before.find(peer => peer.openId === timelineOnlyId).retention, 'forever');
+  const otherQuery = new URLSearchParams({ appId: DUMMY_APP_ID, scope: 'c2c', openId: timelineOnlyId });
+  const readOther = () => client.get(workbench + 'timeline?' + otherQuery);
+  const otherBefore = await readOther();
+  assert.equal(otherBefore.entries.length, 1);
+
+  const settings = page.getByRole('complementary', { name: '会话设置', exact: true });
+  const pane = page.getByRole('region', { name: '当前 QQ 会话' });
+  const history = pane.getByRole('region', { name: 'QQ 消息', exact: true });
+  const policy = settings.getByRole('button', { name: /^本机消息记录：/ });
+  if (!(await policy.isVisible())) await settings.locator('summary').filter({ hasText: '消息记录' }).click();
+  await history.getByText(older, { exact: true }).waitFor();
+  const choose = async label => {
+    await policy.click();
+    await page.getByRole('menuitem', { name: label, exact: true }).click();
+  };
+  const save = () => button(settings, '保存').click();
+  const shorten = page.getByRole('dialog', { name: '缩短消息保留期？' });
+  await choose('保留最近 30 天');
+  await save();
+  await shorten.getByText(/超过 30 天/).waitFor();
+  await button(shorten, '取消').click();
+  assert.equal((await current()).retention, 'forever');
+  assert((await readFile(file, 'utf8')).includes(older));
+  await save();
+  await button(shorten, '确认缩短并保存').click();
+  await until(async () => (await current()).retention === '30d', '30-day policy');
+  await history.getByText(older, { exact: true }).waitFor({ state: 'hidden' });
+  await history.getByText(recent, { exact: true }).waitFor();
+  assert(!(await readFile(file, 'utf8')).includes(older));
+
+  await choose('保留最近 7 天');
+  await save();
+  await button(shorten, '确认缩短并保存').click();
+  await until(async () => (await current()).retention === '7d', '7-day policy');
+  await history.getByText(recent, { exact: true }).waitFor({ state: 'hidden' });
+  assert(!(await readFile(file, 'utf8')).includes(recent));
+
+  await choose('暂停记录');
+  await save();
+  await history.getByText('已暂停记录新消息', { exact: true }).waitFor();
+  assert.equal((await current()).retention, 'paused');
+  const prior = (await entries()).map(entry => entry.id);
+  assert(prior.length > 0);
+  const clear = page.getByRole('dialog', { name: '清空本会话记录？' });
+  await button(settings, '清空本会话记录').click();
+  await button(clear, '取消').click();
+  assert.deepEqual((await entries()).map(entry => entry.id), prior);
+  await button(settings, '清空本会话记录').click();
+  await button(clear, '确认清空').click();
+  await history.getByText('还没有已保存的 QQ 消息。', { exact: true }).waitFor();
+  assert.deepEqual(await entries(), []);
+  assert.equal(await readFile(file, 'utf8'), '');
+  assert.deepEqual(await readOther(), otherBefore);
+  assert.deepEqual((await current()).sessions, original.sessions);
+  return { newDefault: true, legacyPolicies: true, startupExpiry: true, physicalExpiry: true, canceledDeletion: true, clearOneTimeline: true };
+}
+
+export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt, historyFixture }) {
   const require = createRequire(join(source, 'apps/web/package.json'));
   const { chromium } = require('playwright');
   const login = (await readFile(hostLog, 'utf8')).match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9._~%+-]+/g)?.at(-1);
@@ -339,7 +456,8 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     const messages = await verifyMessages(page, client, fixture, until);
     const toolPicker = await verifyToolPicker(page, client, until);
     const promptPaths = await verifyPromptPaths(page, client, until, prompt);
-    return { messages, toolPicker, promptPaths };
+    const retention = await verifyRetention(page, client, until, historyFixture);
+    return { messages, toolPicker, promptPaths, retention };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));

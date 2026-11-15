@@ -3,14 +3,15 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { AccessControlConfig } from '../config.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import {
-  WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, type WorkbenchConversation, type WorkbenchConversationPatch,
+  WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, retentionDays, shortensRetention,
+  type MessageRetention, type WorkbenchConversation, type WorkbenchConversationPatch,
   type WorkbenchNewSession, type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { allowsConversation } from './account-service.ts';
 import { robotAppId, robotObject, robotRevision } from './robot-config.ts';
 import type { RobotRuntimes } from './robot-runtimes.ts';
-import { MAX_TIMELINE_IMAGES, QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH, type TimelineEntry } from '../shared/workbench-timeline-protocol.ts';
+import { MAX_TIMELINE_IMAGES, QQ_MANUAL_ATTACHMENT_LIMIT, QQ_MANUAL_MESSAGE_LIMIT, WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_CLEAR_PATH, WORKBENCH_TIMELINE_PATH, type TimelineEntry } from '../shared/workbench-timeline-protocol.ts';
 import { registerWorkbenchFetch, workbenchJson, WorkbenchRequestError } from './workbench-routes.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import type { WorkbenchAgentSettings, WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -21,11 +22,12 @@ import type { ManualAttachment } from '../transport/manual-send.ts';
 interface PeerSettings {
   alias: string;
   receiving: boolean;
-  recording: boolean;
+  retention: MessageRetention;
   revision: number;
   agent?: WorkbenchAgentSettings;
 }
-const defaults: Readonly<PeerSettings> = Object.freeze({ alias: '', receiving: true, recording: true, revision: 0 });
+const defaults: Readonly<PeerSettings> = Object.freeze({ alias: '', receiving: true, retention: '7d', revision: 0 });
+const legacyDefaults: Readonly<PeerSettings> = Object.freeze({ ...defaults, retention: 'forever' });
 export const peerKey = (appId: string, scope: ChatScope, openId: string): string => `qqbot:${appId}:${scope}:${openId}`;
 
 export function validOpenId(value: unknown): value is string {
@@ -60,6 +62,38 @@ export class ConversationSettingsStore {
     return this.read().peers.get(key) ?? defaults;
   }
 
+  recordedDays(key: string): number | undefined {
+    const settings = this.read().peers.get(key);
+    return settings && retentionDays(settings.retention);
+  }
+
+  remember(key: string): Readonly<PeerSettings> {
+    const data = this.read();
+    const existing = data.peers.get(key);
+    if (existing) return existing;
+    this.write({ ...data, peers: new Map(data.peers).set(key, defaults) });
+    return defaults;
+  }
+
+  preserveLegacy(keys: Iterable<string>): void {
+    const data = this.read();
+    const peers = new Map(data.peers);
+    for (const key of keys) if (!peers.has(key)) peers.set(key, legacyDefaults);
+    if (peers.size !== data.peers.size) this.write({ ...data, peers });
+  }
+
+  expiringPeers(): QqConversationRef[] {
+    const targets: QqConversationRef[] = [];
+    for (const [key, settings] of this.read().peers) {
+      if (retentionDays(settings.retention) === undefined) continue;
+      const [, appId] = key.split(':', 2);
+      if (!appId) continue;
+      const peer = parsePeer(appId, key);
+      if (peer) targets.push({ appId, ...peer });
+    }
+    return targets;
+  }
+
   keys(appId: string): string[] {
     return [...this.read().peers.keys()].filter(key => key.startsWith(`qqbot:${appId}:`));
   }
@@ -68,7 +102,8 @@ export class ConversationSettingsStore {
     return this.read().templates.get(appId);
   }
 
-  initialize(key: string, settings: WorkbenchAgentSettings): void {
+  initialize(key: string, settings: WorkbenchAgentSettings, existingSession = false): void {
+    if (existingSession) this.preserveLegacy([key]);
     const current = this.get(key);
     if (!current.agent) this.save(key, { revision: current.revision, agent: settings });
   }
@@ -80,7 +115,7 @@ export class ConversationSettingsStore {
     }
     const peers = new Map(current.peers);
     for (const [key, settings] of established) {
-      const peer = peers.get(key) ?? defaults;
+      const peer = peers.get(key) ?? legacyDefaults;
       if (!peer.agent) peers.set(key, { ...peer, agent: settings, revision: robotRevision(peer.revision + 1) });
     }
     const saved = { revision: robotRevision(next.revision + 1), settings: next.settings };
@@ -94,10 +129,12 @@ export class ConversationSettingsStore {
     const peers = new Map(data.peers);
     const current = peers.get(key) ?? defaults;
     if (patch.revision !== current.revision) throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
+    const retention = patch.retention ?? (patch.recording === false ? 'paused'
+      : patch.recording === true && current.retention === 'paused' ? 'forever' : current.retention);
     const next = Object.freeze({
       alias: patch.alias ?? current.alias,
       receiving: patch.receiving ?? current.receiving,
-      recording: patch.recording ?? current.recording,
+      retention,
       revision: robotRevision(current.revision + 1),
       ...(patch.agent ?? current.agent ? { agent: patch.agent ?? current.agent } : {}),
     });
@@ -126,8 +163,10 @@ export class ConversationSettingsStore {
     const root = robotObject(JSON.parse(readFileSync(this.path, 'utf8')), ['version', 'peers', 'templates']);
     if (root.version !== 1 || !root.peers || typeof root.peers !== 'object' || Array.isArray(root.peers)) throw new Error('QQ 会话设置格式无效。');
     const peers = new Map(Object.entries(root.peers).map(([key, raw]) => {
-      const value = robotObject(raw, ['alias', 'receiving', 'recording', 'revision', 'agent']);
-      return [key, Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), recording: value.recording === undefined ? true : recordingValue(value.recording), revision: robotRevision(value.revision),
+      const value = robotObject(raw, ['alias', 'receiving', 'recording', 'retention', 'revision', 'agent']);
+      const retention = value.retention !== undefined ? retentionValue(value.retention)
+        : value.recording !== undefined && !recordingValue(value.recording) ? 'paused' : 'forever';
+      return [key, Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), retention, revision: robotRevision(value.revision),
         ...(value.agent === undefined ? {} : { agent: parseAgentSettings(value.agent) }),
       })];
     }));
@@ -150,6 +189,11 @@ interface SettingsData {
 function recordingValue(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new Error('QQ 消息保存开关无效。');
   return value;
+}
+
+function retentionValue(value: unknown): MessageRetention {
+  if (value === '7d' || value === '30d' || value === 'forever' || value === 'paused') return value;
+  throw new Error('QQ 消息保留策略无效。');
 }
 
 interface ConversationAccount {
@@ -224,7 +268,7 @@ async function projectConversations(
       const agent = account.agentSettings?.(scope, openId, sessions.length > 0);
       return {
         scope, openId, name: account.peerName(scope, openId),
-        ...settings, agent,
+        ...settings, recording: settings.retention !== 'paused', agent,
         ...(!settings.agent && agent && sessions.length === 0
           ? { defaultsRevision: robots.conversationSettings.template(appId)?.revision ?? 0 } : {}),
         admitted: allowsConversation(account.access, scope, openId),
@@ -239,15 +283,23 @@ async function projectConversations(
 async function parsePatch(request: Request): Promise<WorkbenchConversationPatch> {
   const text = await request.text();
   if (Buffer.byteLength(text) > 512 * 1024) throw new Error('会话设置请求过大。');
-  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'defaultsRevision', 'alias', 'receiving', 'recording', 'agent']);
+  const value = robotObject(JSON.parse(text), ['appId', 'scope', 'openId', 'revision', 'defaultsRevision', 'alias', 'receiving', 'recording', 'retention', 'confirmRetention', 'agent']);
   if ((value.scope !== 'c2c' && value.scope !== 'group') || !validOpenId(value.openId)) throw new Error('QQ 会话地址无效。');
-  if (value.alias === undefined && value.receiving === undefined && value.recording === undefined && value.agent === undefined) throw new Error('缺少要保存的会话设置。');
+  if (value.alias === undefined && value.receiving === undefined && value.recording === undefined && value.retention === undefined && value.agent === undefined) {
+    throw new Error('缺少要保存的会话设置。');
+  }
+  if ((value.retention !== undefined && value.recording !== undefined)
+    || (value.confirmRetention !== undefined && (value.confirmRetention !== true || value.retention === undefined))) {
+    throw new Error('QQ 消息保留策略请求无效。');
+  }
   return {
     appId: robotAppId(value.appId), scope: value.scope, openId: value.openId, revision: robotRevision(value.revision),
     ...(value.defaultsRevision === undefined ? {} : { defaultsRevision: robotRevision(value.defaultsRevision) }),
     ...(value.alias === undefined ? {} : { alias: aliasValue(value.alias) }),
     ...(value.receiving === undefined ? {} : { receiving: receivingValue(value.receiving) }),
     ...(value.recording === undefined ? {} : { recording: recordingValue(value.recording) }),
+    ...(value.retention === undefined ? {} : { retention: retentionValue(value.retention) }),
+    ...(value.confirmRetention === true ? { confirmRetention: true as const } : {}),
     ...(value.agent === undefined ? {} : { agent: parseAgentSettings(value.agent) }),
   };
 }
@@ -292,6 +344,29 @@ export function registerWorkbenchConversations(
   logger: Logger,
   timeline = workbenchTimelineService(robots),
 ): void {
+  registerWorkbenchFetch(ctx, WORKBENCH_TIMELINE_CLEAR_PATH, ['POST'], async (request, assertWritable) => {
+    let ref: QqConversationRef;
+    let revision: number;
+    try {
+      const body = await request.text();
+      if (Buffer.byteLength(body) > 8 * 1024) throw new Error();
+      const { appId, scope, openId, revision: version, confirmed } = robotObject(JSON.parse(body),
+        ['appId', 'scope', 'openId', 'revision', 'confirmed']);
+      if ((scope !== 'c2c' && scope !== 'group') || !validOpenId(openId) || confirmed !== true) throw new Error();
+      ref = { appId: robotAppId(appId), scope, openId };
+      revision = robotRevision(version);
+    } catch {
+      throw new WorkbenchRequestError(400, '请选择要清空的 QQ 会话并确认。');
+    }
+    const { appId, scope, openId } = ref;
+    assertWritable();
+    if (!robots.conversationAccount(appId)) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
+    if (robots.conversationSettings.get(peerKey(appId, scope, openId)).revision !== revision) {
+      throw new WorkbenchRequestError(409, '会话设置已更新，请刷新后重新确认清空。');
+    }
+    robots.timeline.clearPeer(appId, { scope, targetId: openId });
+    return workbenchJson({ cleared: true });
+  });
   registerWorkbenchFetch(ctx, WORKBENCH_TIMELINE_PATH, ['GET'], async request => {
     if (request.method !== 'GET') return workbenchJson({ error: '不支持的请求方法。' }, 405);
     const query = new URL(request.url).searchParams;
@@ -381,6 +456,9 @@ export function registerWorkbenchConversations(
     }
     const [conversation] = await projectConversations(robots, patch.appId, persistence, patch);
     if (!conversation) throw new WorkbenchRequestError(404, '这个 QQ 会话尚未登记。');
+    if (patch.retention !== undefined && shortensRetention(conversation.retention, patch.retention) && !patch.confirmRetention) {
+      throw new WorkbenchRequestError(400, '缩短消息保留期前需要确认清理范围。');
+    }
     const key = peerKey(patch.appId, patch.scope, patch.openId);
     const sessionBindings = () => {
       const account = robots.conversationAccount(patch.appId);
@@ -429,8 +507,10 @@ export function registerWorkbenchConversations(
       assertCurrent();
       const settings = robots.conversationSettings.save(key, { ...patch, agent: patch.agent ?? conversation.agent });
       afterSave?.();
+      if (patch.retention !== undefined) robots.timeline.expire(patch.appId, { scope: patch.scope, targetId: patch.openId });
       return workbenchJson({ conversation: {
-        ...conversation, ...settings, defaultsRevision: settings.agent ? undefined : conversation.defaultsRevision,
+        ...conversation, ...settings, recording: settings.retention !== 'paused',
+        defaultsRevision: settings.agent ? undefined : conversation.defaultsRevision,
       } });
     } finally {
       if (patch.agent) robots.toolPolicies?.reconcile(key, sessions);

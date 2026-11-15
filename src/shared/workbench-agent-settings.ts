@@ -3,7 +3,21 @@ import type { ModelRoute } from '../model/types.ts';
 export const WORKBENCH_DEFAULTS_PATH = '/api/qqbot/workbench/defaults';
 export const WORKBENCH_TOOLS_PATH = '/api/qqbot/workbench/tools';
 export const WORKBENCH_PROMPT_PREVIEW_PATH = '/api/qqbot/workbench/prompt-preview';
+export const WORKBENCH_PROMPT_BROWSE_PATH = '/api/qqbot/workbench/prompt-files';
+export const WORKBENCH_PROMPT_WRITE_PATH = '/api/qqbot/workbench/prompt-write';
 export const WORKBENCH_PROMPT_PATH_LIMIT = 4096;
+export const WORKBENCH_PROMPT_EXTENSIONS: ReadonlySet<string> = new Set(['.md', '.txt', '.docx']);
+
+export type WorkbenchPromptPreview =
+  | { kind: 'text'; text: string; revision: string }
+  | { kind: 'docx'; text: string };
+
+export interface WorkbenchPromptFiles {
+  directory: string;
+  parent: string | null;
+  entries: Array<{ kind: 'directory' | 'file'; path: string; name: string }>;
+  truncated: boolean;
+}
 
 export interface WorkbenchToolChoice {
   name: string;

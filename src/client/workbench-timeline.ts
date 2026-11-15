@@ -3,7 +3,7 @@ import { Button, IconEllipsisOutlineRegular, Menu, type MenuEntry } from '@deeps
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
-import { fetchJson } from './http.ts';
+import { fetchJson, HttpError } from './http.ts';
 import { QqComposer, type QqComposerHandle } from './workbench-composer.ts';
 
 const statusLabel: Record<TimelineStatus, string> = {
@@ -47,13 +47,13 @@ function grouped(previous: TimelineEntry | undefined, row: TimelineEntry): boole
 }
 
 function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): TimelinePage {
-  if (!current || !latest.entries.length) return latest;
+  if (!current || current.generation !== latest.generation || !latest.entries.length) return latest;
   const overlap = current.entries.findIndex(row => row.id === latest.entries[0]?.id);
   if (overlap < 0) return latest;
   return {
+    ...latest,
     entries: [...current.entries.slice(0, overlap), ...latest.entries],
     before: overlap > 0 ? current.before : latest.before,
-    incomplete: latest.incomplete,
   };
 }
 
@@ -113,7 +113,9 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
           if (exists.ok) {
             while (visible.before && !visible.entries.some(row => row.id === position.entryId)) {
               const older = await fetchJson<TimelinePage>(params(visible.before), options);
+              if (older.generation !== visible.generation) break;
               visible = {
+                ...visible,
                 entries: [...older.entries, ...visible.entries],
                 before: older.before,
                 incomplete: older.incomplete || visible.incomplete,
@@ -173,14 +175,18 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
       const older = await fetchJson<TimelinePage>(params(before), { signal, cache: 'no-store' });
       if (signal.aborted) return;
       olderHeight.current = list.current?.scrollHeight;
-      setPage(current => current?.before === before ? {
+      setPage(current => current?.before === before && current.generation === older.generation ? {
+        ...current,
         entries: [...older.entries, ...current.entries],
         before: older.before,
         incomplete: current.incomplete || older.incomplete,
       } : current);
       setError('');
     } catch (cause) {
-      if (!signal.aborted) setError(cause instanceof Error ? cause.message : '无法读取更早记录');
+      if (!signal.aborted) {
+        if (cause instanceof HttpError && cause.status === 404) setRefresh(value => value + 1);
+        else setError(cause instanceof Error ? cause.message : '无法读取更早记录');
+      }
     } finally {
       setReadingOlder(false);
     }
@@ -204,7 +210,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
   const entries = page?.entries ?? [];
   return h('section', { className: 'imqw-timeline', 'aria-label': 'QQ 消息' },
     !recording || refreshKey === undefined ? h('div', { className: 'imqw-timeline-notice' },
-      !recording ? h('span', { className: 'imqw-muted' }, '消息保存已关闭') : null,
+      !recording ? h('span', { className: 'imqw-muted' }, '已暂停记录新消息') : null,
       refreshKey === undefined ? h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '刷新消息') : null,
     ) : null,
     error || page?.incomplete ? h('div', { className: 'imqw-timeline-notice' },

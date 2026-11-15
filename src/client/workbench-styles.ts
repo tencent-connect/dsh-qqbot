@@ -336,8 +336,19 @@ export const WORKBENCH_STYLES = `
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
 }
 .imqw-prompt-path { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.imqw-prompt-path input { flex: 1 1 180px; min-width: 0; }
+.imqw-prompt-path-input { flex: 1 1 180px; min-width: 0; }
+.imqw-prompt-path-input > * { width: 100%; }
 .imqw-prompt-path button { flex: none; }
+.imqw-prompt-browser { display: grid; gap: 8px; min-width: 0; }
+.imqw-prompt-browser p { margin: 0; }
+.imqw-prompt-files {
+  display: grid; gap: 2px; max-height: min(45vh, 320px); overflow: auto;
+  margin: 0; padding: 6px; list-style: none;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-sm);
+}
+.imqw-prompt-files button { width: 100%; justify-content: space-between; gap: 12px; min-width: 0; }
+.imqw-prompt-files button[aria-pressed='true'] { background: var(--dsw-alias-bg-layer-4); }
+.imqw-prompt-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .imqw-prompt-surface {
   box-sizing: border-box; height: 128px; min-height: 106px; max-height: 340px;
   overflow: hidden; resize: vertical;
@@ -345,6 +356,7 @@ export const WORKBENCH_STYLES = `
   background: var(--dsw-alias-bg-layer-3);
 }
 .imqw-prompt-surface > [role='tabpanel'] { height: 100%; }
+.imqw-prompt-document { height: min(42vh, 320px); }
 .imqw-prompt-surface :is(textarea, .imqw-prompt-preview) {
   display: block; box-sizing: border-box; width: 100%; height: 100%; margin: 0;
   padding: 9px 10px; overflow: auto; border: 0; background: transparent; color: inherit;

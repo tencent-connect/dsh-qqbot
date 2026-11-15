@@ -4,8 +4,8 @@ import { WORKBENCH_GROUP_GUIDE_IMAGES, WORKBENCH_ROBOT_BIND_PATH, WORKBENCH_ROBO
 import { BindingService } from '../setup/binding-service.ts';
 import type { SetupCredentials } from '../setup/persist.ts';
 import { RobotConfigConflictError, robotAccessPatch, robotAlias, robotAppId, robotEnabled, robotObject, robotRevision, robotSecret } from './robot-config.ts';
-import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_PROMPT_PREVIEW_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
-import { PromptFileError, readPromptFile } from '../prompt/file.ts';
+import { WORKBENCH_DEFAULTS_PATH, WORKBENCH_PROMPT_BROWSE_PATH, WORKBENCH_PROMPT_PREVIEW_PATH, WORKBENCH_PROMPT_WRITE_PATH, WORKBENCH_TOOLS_PATH, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
+import { browsePromptFiles, previewPromptFile, PromptFileConflict, PromptFileError, writePromptFile } from '../prompt/file.ts';
 import { parseAgentSettings } from './workbench-agent-settings.ts';
 import { workbenchToolChoices } from './workbench-tools.ts';
 
@@ -29,18 +29,29 @@ export function registerWorkbenchTools(ctx: Context): void {
   });
 }
 
-export function registerWorkbenchPromptPreview(ctx: Context): void {
-  registerWorkbenchFetch(ctx, WORKBENCH_PROMPT_PREVIEW_PATH, ['POST'], async (request, assertActive) => {
+export function registerWorkbenchPromptFiles(ctx: Context): void {
+  registerPromptOperation(ctx, WORKBENCH_PROMPT_PREVIEW_PATH, ['path'], 32 * 1024,
+    ({ path }, { signal }) => previewPromptFile(path, signal));
+  registerPromptOperation(ctx, WORKBENCH_PROMPT_BROWSE_PATH, ['directory', 'fromFile'], 32 * 1024,
+    ({ directory, fromFile }, { signal }) => browsePromptFiles(directory, fromFile, signal));
+  registerPromptOperation(ctx, WORKBENCH_PROMPT_WRITE_PATH, ['path', 'revision', 'text'], 512 * 1024,
+    ({ path, revision, text }, { signal }, assertActive) => writePromptFile({ path, revision, text }, signal, assertActive));
+}
+
+function registerPromptOperation(ctx: Context, route: string, fields: string[], maxBytes: number,
+  perform: (fields: Record<string, unknown>, request: Request, assertActive: () => void) => Promise<unknown>): void {
+  registerWorkbenchFetch(ctx, route, ['POST'], async (request, assertActive) => {
     try {
       const body = await request.text();
-      if (Buffer.byteLength(body) > 32 * 1024) throw new PromptFileError('预览请求过大。');
-      const { path } = robotObject(JSON.parse(body), ['path']);
-      const text = await readPromptFile(path, request.signal);
+      if (Buffer.byteLength(body) > maxBytes) throw new PromptFileError('提示词文件请求过大。');
+      const result = await perform(robotObject(JSON.parse(body), fields), request, assertActive);
       assertActive();
-      return workbenchJson({ text });
+      return workbenchJson(result);
     } catch (error) {
       assertActive();
-      throw new WorkbenchRequestError(400, error instanceof PromptFileError ? error.message : '提示词预览请求无效。');
+      if (error instanceof PromptFileConflict) throw new WorkbenchRequestError(409, error.message);
+      if (error instanceof WorkbenchRequestError) throw error;
+      throw new WorkbenchRequestError(400, error instanceof PromptFileError ? error.message : '提示词文件请求无效。');
     }
   });
 }

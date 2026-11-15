@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -69,19 +69,47 @@ it('does not report a pending request as successful after restart', async () => 
   expect(new QqTimeline(dir, logger).page('A', target)?.entries).toMatchObject([{ id, status: 'accepted', platformId: 'qq-receipt' }]);
 });
 
-it('ignores an old receipt after clearing or reopening the same account', async () => {
+it.each(['account', 'peer'] as const)('ignores an old receipt after clearing the %s', async clear => {
   const log = new QqTimeline(dir, logger);
   const receipt = Promise.withResolvers<string>();
   const id = 'shared-stream';
   const pending = log.observe('A', target, { id, at: 1, direction: 'outbound', text: 'old', status: 'sending' },
     () => receipt.promise, result => ({ status: 'accepted', platformId: result }));
-  log.clearAccount('A');
+  const other = { id: 'other', at: 1, direction: 'inbound', text: 'other', status: 'received' } as const;
+  const privateTarget = { ...target, scope: 'c2c' } as const;
+  log.record('A', privateTarget, other);
+  log.record('B', target, other);
+  if (clear === 'account') log.clearAccount('A');
+  else log.clearPeer('A', target);
   expect(log.page('A', target)?.entries).toEqual([]);
+  expect(log.page('A', privateTarget)?.entries).toEqual(clear === 'account' ? [] : [other]);
+  expect(log.page('B', target)?.entries).toEqual([other]);
   const fresh = { id, at: 2, direction: 'outbound', text: 'new', status: 'rejected' } as const;
   log.record('A', target, fresh);
   receipt.resolve('obsolete-receipt');
   await pending;
   expect(new QqTimeline(dir, logger).page('A', target)?.entries).toEqual([fresh]);
+});
+
+it('expires complete journal rows and obsolete versions using record time', () => {
+  let cutoff: number | undefined;
+  const log = new QqTimeline(dir, logger, appId => appId === 'A' ? cutoff : undefined);
+  const old = { id: 'old', at: 5, direction: 'outbound', text: 'old body', status: 'sending' } as const;
+  log.record('A', target, old);
+  log.record('A', target, { ...old, status: 'accepted', text: 'old edited body' });
+  log.record('A', target, { ...old, id: 'boundary', at: 10, status: 'accepted', text: 'keep' });
+  log.record('B', target, old);
+  const original = log.page('A', target);
+  cutoff = 10;
+  log.expire('A', target);
+  expect(log.page('A', target)?.generation).not.toBe(original?.generation);
+  expect(log.entry('A', target, 'old')).toBeUndefined();
+  expect(log.page('A', target, 'old')).toBeUndefined();
+  expect(log.entry('B', target, 'old')).toBeDefined();
+  log.record('A', target, old);
+  const file = join(dir, deliveryKey('A'), deliveryKey(target.scope, target.targetId), 'rows.jsonl');
+  expect(readFileSync(file, 'utf8')).not.toContain('old');
+  expect(new QqTimeline(dir, logger).page('A', target)?.entries.map(row => row.id)).toEqual(['boundary']);
 });
 
 it('preserves the real SDK outcome when the display store is unwritable', async () => {

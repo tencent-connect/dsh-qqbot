@@ -113,7 +113,7 @@ export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
   return h('form', { className: 'imqw-form imqw-defaults-form', onSubmit: save },
     h('p', { className: 'imqw-muted' }, '首次建立 QQ 群聊或私聊的配置时采用。'),
     fields ? h(SettingsGroup, { title: 'Agent 设置', defaultOpen: true, children: h(WorkbenchAgentFields, { ...fields, source }) }) : null,
-    fields ? h(SettingsGroup, { title: 'QQ 回复', defaultOpen: true, children: h(WorkbenchReplyFields, fields) }) : null,
+    fields ? h(SettingsGroup, { title: 'QQ 回复', defaultOpen: true, children: h(WorkbenchReplyFields, { ...fields, source }) }) : null,
     error ? h('p', { className: 'imqb-error', role: 'alert' }, error) : null,
     notice ? h('p', { className: 'imqw-muted', role: 'status' }, notice) : null,
     fields ? h('footer', { className: 'imqw-actions imqw-savebar' },

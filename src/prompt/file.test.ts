@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { strToU8, zipSync } from 'fflate';
 import { EXTRA_MAX_CHARS } from './extra.ts';
-import { readPromptFile } from './file.ts';
+import { browsePromptFiles, previewPromptFile, readPromptFile, writePromptFile } from './file.ts';
 
 describe('path-backed prompts', () => {
   let directory: string;
@@ -15,6 +15,53 @@ describe('path-backed prompts', () => {
     await writeFile(path, data);
     return path;
   };
+
+  it('browses Host directories and filters to supported prompt files', async () => {
+    const path = await file('Instructions.MD', 'text');
+    await file('notes.txt', 'text');
+    await file('word.docx', 'document');
+    await file('other.pdf', 'ignored');
+    await mkdir(join(directory, 'subdir'));
+    const files = await browsePromptFiles(undefined, path, new AbortController().signal);
+    expect(files.directory).toBe(directory);
+    expect(files.entries.map(entry => [entry.kind, entry.name])).toEqual([
+      ['directory', 'subdir'], ['file', 'Instructions.MD'], ['file', 'notes.txt'], ['file', 'word.docx'],
+    ]);
+  });
+
+  it('writes the original text file and preserves its format and permissions', async () => {
+    const path = await file('notes.txt', Buffer.from('\uFEFFfirst\r\nsecond\r\n', 'utf16le'));
+    await chmod(path, 0o640);
+    const signal = new AbortController().signal;
+    const preview = await previewPromptFile(path, signal);
+    expect(preview).toMatchObject({ kind: 'text', text: 'first\nsecond\n' });
+    if (preview.kind !== 'text') throw new Error('Expected editable text');
+    const updated = await writePromptFile({ path, revision: preview.revision, text: '第一行\n第二行\n' }, signal, () => {});
+    expect(updated).toMatchObject({ kind: 'text', text: '第一行\n第二行\n' });
+    expect(await readFile(path)).toEqual(Buffer.from('\uFEFF第一行\r\n第二行\r\n', 'utf16le'));
+    expect((await stat(path)).mode & 0o777).toBe(0o640);
+  });
+
+  it('refuses to overwrite externally changed text, a remapped link, or a Word document', async () => {
+    const source = await file('source.md', 'first');
+    const path = join(directory, 'linked.md');
+    await symlink(source, path);
+    const signal = new AbortController().signal;
+    const preview = await previewPromptFile(path, signal);
+    if (preview.kind !== 'text') throw new Error('Expected editable text');
+    const attempted = { path, revision: preview.revision, text: 'draft' };
+    await writeFile(source, 'external replacement');
+    await expect(writePromptFile(attempted, signal, () => {})).rejects.toThrow('外部修改');
+    expect(await readFile(source, 'utf8')).toBe('external replacement');
+    const other = await file('other.md', 'first');
+    await rm(path);
+    await symlink(other, path);
+    await expect(writePromptFile(attempted, signal, () => {})).rejects.toThrow('外部修改');
+    expect(await readFile(other, 'utf8')).toBe('first');
+    const docx = await file('report.docx', 'original document');
+    await expect(writePromptFile({ ...attempted, path: docx }, signal, () => {})).rejects.toThrow('原文编辑器');
+    expect(await readFile(docx, 'utf8')).toBe('original document');
+  });
 
   it('keeps Markdown formatting, template markers and the last line', async () => {
     const source = '# 任务\r\n\r\n- 保留 {{workspace}}\r\n最后一行\r\n';

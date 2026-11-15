@@ -179,7 +179,10 @@ export function apply(ctx: Context): void {
         return () => { profileSettings = undefined; emitSettings(); };
       });
       type AgentRemotes = {
-        session: { modelCatalog(): Promise<unknown> };
+        session: {
+          modelCatalog(): Promise<unknown>;
+          openWorkspacePath?(request: { path: string }): Promise<{ ok: boolean }>;
+        };
         agentPresets: { list(): Promise<unknown> };
         permissionPresets: { catalog(): Promise<unknown> };
       };
@@ -258,6 +261,12 @@ export function apply(ctx: Context): void {
             ? hostLabel('permission.access', builtin.key) : undefined;
         },
         get addWorkspace() { return addWorkspace; },
+        openPromptFile: async path => {
+          const session = getRemote().session;
+          if (!(await session.openWorkspacePath?.({ path }))?.ok) {
+            throw new Error('无法打开原文件，请在 DSH 宿主上编辑此文件。');
+          }
+        },
         workspaces: () => (pageCtx.get('workspaces') as {
           list?: { getSnapshot(): { items: readonly { path: string; title: string }[] } };
         } | undefined)?.list?.getSnapshot().items ?? [],

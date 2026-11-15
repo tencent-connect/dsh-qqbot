@@ -17,6 +17,7 @@ export interface AgentFormSource extends SelectorSource {
   sessionModels?: SessionModelSource;
   workspaces(): readonly { path: string; title: string }[];
   addWorkspace?(): Promise<string | null>;
+  openPromptFile?(path: string): Promise<void>;
   localizePreset?(id: string): string | undefined;
   localizePermission?(id: string, name: string): string | undefined;
 }
@@ -206,7 +207,9 @@ export function WorkbenchAgentFields({ settings, source, disabled, onChange, pla
 
 const promptScopes = [{ value: 'group', label: '群聊' }, { value: 'c2c', label: '私聊' }] as const;
 
-export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: AgentFieldsProps & { scope?: ChatScope }): ReactNode {
+export function WorkbenchReplyFields({ settings, scope, disabled, source, onChange }: AgentFieldsProps & {
+  scope?: ChatScope; source?: AgentFormSource;
+}): ReactNode {
   const scopeId = useId();
   const [promptScope, setPromptScope] = useState<ChatScope>('group');
   const activeScope = scope ?? promptScope;
@@ -214,7 +217,7 @@ export function WorkbenchReplyFields({ settings, scope, disabled, onChange }: Ag
   const label = activeScope === 'group' ? '群聊补充提示词' : '私聊补充提示词';
   const title = scope ? label : '补充提示词';
   const editor = h(PromptEditor, {
-    key, label, value: settings[key], disabled, onChange: value => onChange({ [key]: value }),
+    key, label, value: settings[key], disabled, openPromptFile: source?.openPromptFile, onChange: value => onChange({ [key]: value }),
     hint: scope ? '保存后，下次组装模型请求时读取。' : undefined,
   });
   return h('div', { className: 'imqw-agent-fields' },

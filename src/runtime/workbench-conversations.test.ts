@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
-import { WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
+import { WORKBENCH_SEND_PATH, WORKBENCH_TIMELINE_CLEAR_PATH, WORKBENCH_TIMELINE_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { ConversationSettingsStore, peerKey, registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './workbench-conversations.ts';
@@ -71,6 +71,26 @@ it('copies per-robot defaults once and freezes legacy peers in the same commit a
   expect(restored.get(newPrivate).agent).toMatchObject({ directPrompt: 'A2', groupPrompt: 'A' });
 });
 
+it('keeps legacy recording states and applies seven days to newly recorded peers', () => {
+  const path = join(dir, 'upgrade.json');
+  const [on, off, implicit, timelineOnly, fresh] = ['on', 'off', 'implicit', 'timeline', 'fresh'].map(id => peerKey('A', 'c2c', id));
+  const base = { alias: 'original', receiving: false, revision: 2 };
+  writeFileSync(path, JSON.stringify({ version: 1, peers: {
+    [on!]: { ...base, recording: true }, [off!]: { ...base, recording: false }, [implicit!]: base,
+  } }));
+  const store = new ConversationSettingsStore(path);
+  store.preserveLegacy([timelineOnly!, off!]);
+  expect(store.remember(fresh!).retention).toBe('7d');
+  store.preserveLegacy([fresh!]); // On a restart the new peer also has history.
+  const restored = new ConversationSettingsStore(path);
+  expect(restored.get(on!)).toEqual({ ...base, retention: 'forever' });
+  expect(restored.get(off!)).toEqual({ ...base, retention: 'paused' });
+  expect(restored.get(implicit!)).toEqual({ ...base, retention: 'forever' });
+  expect(restored.get(timelineOnly!).retention).toBe('forever');
+  expect(restored.get(fresh!).retention).toBe('7d');
+  expect(restored.expiringPeers()).toEqual([{ appId: 'A', scope: 'c2c', openId: 'fresh' }]);
+});
+
 async function fixture(withPersistence = true, hooks?: {
   validateAgent: () => Promise<void>;
   sessionChangePending: () => boolean;
@@ -107,12 +127,15 @@ async function fixture(withPersistence = true, hooks?: {
   await plugin.await();
   const route = registered.get(WORKBENCH_CONVERSATIONS_PATH);
   const history = registered.get(WORKBENCH_TIMELINE_PATH);
-  if (!route || !history) throw new Error('QQ workbench route not registered');
+  const clear = registered.get(WORKBENCH_TIMELINE_CLEAR_PATH);
+  if (!route || !history || !clear) throw new Error('QQ workbench route not registered');
   return {
     route, stat, prefs, settingsPath, access, conversationSettings, timeline, mediaRoot,
     history: (query: string) => history.fetch(new Request('http://dsh.internal' + WORKBENCH_TIMELINE_PATH + '?' + query)),
     get: (appId: string) => route.fetch(new Request(url + '?appId=' + appId)),
     post: (body: unknown) => route.fetch(new Request(url, { method: 'POST', body: JSON.stringify(body) })),
+    clear: (body: unknown) => clear.fetch(new Request('http://dsh.internal' + WORKBENCH_TIMELINE_CLEAR_PATH,
+      { method: 'POST', body: JSON.stringify(body) })),
     close: async () => { await plugin.dispose(); await host.dispose(); },
   };
 }
@@ -134,7 +157,7 @@ it('projects only the selected robot and hides reserved Session IDs until the Ho
     const c2c = conversations.find(c => c.scope === 'c2c');
     const group = conversations.find(c => c.scope === 'group');
     expect(c2c).toEqual({
-      scope: 'c2c', openId: 'same', name: '', alias: '', receiving: true, recording: true, admitted: true, revision: 0,
+      scope: 'c2c', openId: 'same', name: '', alias: '', receiving: true, recording: true, retention: '7d', admitted: true, revision: 0,
       sessions: [{ id: 'old-a', createdAt: 5, cwd: '/test/workspace', preset: 'test-preset' }],
     });
     expect(group).toMatchObject({ currentSessionId: 'group-a', admitted: false });
@@ -163,9 +186,9 @@ it('keeps settings durable and scoped with stale-save rejection and separate adm
     expect((await f.post({ ...body, openId: 'a b' })).status).toBe(400);
 
     const restored = new ConversationSettingsStore(f.settingsPath);
-    expect(restored.get(peerKey('A', 'group', 'same'))).toEqual({ alias: '我的群', receiving: true, recording: true, revision: 2 });
-    expect(restored.get(peerKey('A', 'c2c', 'same'))).toEqual({ alias: '', receiving: true, recording: true, revision: 0 });
-    expect(restored.get(peerKey('B', 'group', 'same'))).toEqual({ alias: '', receiving: true, recording: true, revision: 0 });
+    expect(restored.get(peerKey('A', 'group', 'same'))).toEqual({ alias: '我的群', receiving: true, retention: '7d', revision: 2 });
+    expect(restored.get(peerKey('A', 'c2c', 'same'))).toEqual({ alias: '', receiving: true, retention: '7d', revision: 0 });
+    expect(restored.get(peerKey('B', 'group', 'same'))).toEqual({ alias: '', receiving: true, retention: '7d', revision: 0 });
 
     // Even before the first read after a successful save, disappearance must not enable peers.
     rmSync(f.settingsPath);
@@ -269,9 +292,34 @@ it('discovers admitted recorded peers without a Session and reads only the expli
     expect((await f.history('appId=C&scope=group&openId=same')).status).toBe(404);
     expect((await f.history('appId=A&scope=other&openId=same')).status).toBe(400);
     expect((await f.post({ appId: 'A', scope: 'group', openId: 'same', revision: 0, recording: false })).status).toBe(200);
-    expect(f.conversationSettings.get(peerKey('A', 'group', 'same')).recording).toBe(false);
-    expect(f.conversationSettings.get(peerKey('B', 'group', 'same')).recording).toBe(true);
+    expect(f.conversationSettings.get(peerKey('A', 'group', 'same')).retention).toBe('paused');
+    expect(f.conversationSettings.get(peerKey('B', 'group', 'same')).retention).toBe('7d');
     expect((await (await f.history('appId=A&scope=group&openId=same')).json()).entries).toHaveLength(1);
+  } finally { await f.close(); }
+});
+
+it('requires confirmation to shorten retention or clear one conversation', async () => {
+  const f = await fixture();
+  try {
+    const ref = { appId: 'A', scope: 'c2c', openId: 'same' } as const;
+    const key = peerKey(ref.appId, ref.scope, ref.openId);
+    const target = { scope: ref.scope, targetId: ref.openId };
+    f.conversationSettings.preserveLegacy([key]);
+    f.prefs.setSessionId(key, 'old-a');
+    const row = { id: receivedEntryId('platform'), at: 1, direction: 'inbound', text: 'body', status: 'received' } as const;
+    f.timeline.record('A', target, row);
+    f.timeline.record('B', target, row);
+    expect((await f.post({ ...ref, revision: 0, retention: '7d' })).status).toBe(400);
+    expect(f.conversationSettings.get(key).retention).toBe('forever');
+    expect((await f.post({ ...ref, revision: 0, retention: '7d', confirmRetention: true })).status).toBe(200);
+    expect((await f.clear({ ...ref, revision: 1 })).status).toBe(400);
+    expect((await f.clear({ ...ref, revision: 0, confirmed: true })).status).toBe(409);
+    expect(f.timeline.page('A', target)?.entries).toEqual([row]);
+    expect((await f.clear({ ...ref, revision: 1, confirmed: true })).status).toBe(200);
+    expect(f.timeline.page('A', target)?.entries).toEqual([]);
+    expect(f.timeline.page('B', target)?.entries).toEqual([row]);
+    expect(f.prefs.getSessionId(key)).toBe('old-a');
+    expect(f.conversationSettings.get(key).retention).toBe('7d');
   } finally { await f.close(); }
 });
 

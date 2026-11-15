@@ -3,12 +3,16 @@ import { Button, IconChevronDownOutlineRegular, IconEllipsisOutlineRegular, Icon
 import {
   WORKBENCH_CONVERSATIONS_PATH,
   WORKBENCH_NEW_SESSION_PATH,
+  retentionDays,
+  shortensRetention,
+  type MessageRetention,
   type WorkbenchConversation,
   type WorkbenchConversationPatch,
   type WorkbenchNewSession,
   type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
 import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
+import { WORKBENCH_TIMELINE_CLEAR_PATH } from '../shared/workbench-timeline-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { accountName, robotBindingKey, RobotAccounts, ROBOT_STATE_LABELS, type RobotAccountsProps } from './robot-accounts.ts';
 import { BindPanelBody } from './bind-page.ts';
@@ -20,12 +24,13 @@ import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from
 import { readDefaults, WorkbenchDefaultsForm } from './workbench-defaults.ts';
 import { agentSettingsPatch } from './agent-settings-draft.ts';
 import { SettingsGroup } from './workbench-settings-group.ts';
+import { QQSelect } from './qq-select.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 
 type Filter = 'all' | WorkbenchConversation['scope'];
 type SmallPage = 'list' | 'conversation' | 'settings';
 type RobotView = 'conversation' | 'settings' | 'add' | 'bind-primary';
-type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'recording' | 'agent'>;
+type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'retention' | 'agent'>;
 
 interface Draft extends EditableSettings {
   baseline: EditableSettings & Pick<WorkbenchConversation, 'revision' | 'defaultsRevision'>;
@@ -48,6 +53,10 @@ const filters = [
   { value: 'all', label: '全部' }, { value: 'group', label: '群聊' }, { value: 'c2c', label: '私聊' },
 ] satisfies Array<{ value: Filter; label: string }>;
 const sessionPreviewLimit = 5;
+const retentionOptions = [
+  { value: '7d', label: '保留最近 7 天' }, { value: '30d', label: '保留最近 30 天' },
+  { value: 'forever', label: '长期保留' }, { value: 'paused', label: '暂停记录' },
+] as const satisfies ReadonlyArray<{ value: MessageRetention; label: string }>;
 const timeFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
 
 function conversationKey({ scope, openId }: WorkbenchConversation): string {
@@ -99,8 +108,8 @@ function accessLabel(robot: WorkbenchRobot, peer: WorkbenchConversation): string
 }
 
 function selectDraft(peer: WorkbenchConversation): Draft {
-  const { alias, receiving, recording, agent, revision, defaultsRevision } = peer;
-  return { alias, receiving, recording, agent, baseline: { alias, receiving, recording, agent, revision, defaultsRevision } };
+  const { alias, receiving, retention, agent, revision, defaultsRevision } = peer;
+  return { alias, receiving, retention, agent, baseline: { alias, receiving, retention, agent, revision, defaultsRevision } };
 }
 
 function changes(draft: Draft): Partial<EditableSettings> {
@@ -110,7 +119,7 @@ function changes(draft: Draft): Partial<EditableSettings> {
   return {
     ...(draft.alias !== draft.baseline.alias ? { alias: draft.alias } : {}),
     ...(draft.receiving !== draft.baseline.receiving ? { receiving: draft.receiving } : {}),
-    ...(draft.recording !== draft.baseline.recording ? { recording: draft.recording } : {}),
+    ...(draft.retention !== draft.baseline.retention ? { retention: draft.retention } : {}),
     ...(agentChanged ? { agent: draft.agent } : {}),
   };
 }
@@ -360,13 +369,13 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     }
   };
 
-  const save = async (target: WorkbenchConversation, draft: Draft): Promise<void> => {
+  const save = async (target: WorkbenchConversation, draft: Draft, confirmRetention?: true): Promise<void> => {
     if (mutation.current) return;
     const key = scopedKey(appId, target);
     const controller = new AbortController();
     const patch: WorkbenchConversationPatch = {
       appId, scope: target.scope, openId: target.openId, revision: draft.baseline.revision,
-      defaultsRevision: draft.baseline.defaultsRevision, ...changes(draft),
+      defaultsRevision: draft.baseline.defaultsRevision, ...changes(draft), confirmRetention,
     };
     mutation.current = controller;
     generation.current++;
@@ -382,6 +391,7 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
       }
       peerDrafts.delete(key);
       setPeers(rows => rows?.map(item => conversationKey(item) === conversationKey(target) ? result.conversation : item) ?? null);
+      if (patch.retention !== undefined) setViewRefreshKey(value => value + 1);
     } catch (error) {
       if (controller.signal.aborted) return;
       setFeedback({
@@ -392,6 +402,33 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
     } finally {
       if (!controller.signal.aborted) {
         generation.current++;
+        mutation.current = null;
+        setBusyKey(undefined);
+      }
+    }
+  };
+
+  const clearRecords = async (target: WorkbenchConversation): Promise<void> => {
+    if (mutation.current) return;
+    const key = scopedKey(appId, target);
+    const controller = new AbortController();
+    mutation.current = controller;
+    setBusyKey(key);
+    setFeedback(undefined);
+    try {
+      await fetchJson(WORKBENCH_TIMELINE_CLEAR_PATH, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({ appId, scope: target.scope, openId: target.openId, revision: target.revision, confirmed: true }),
+      });
+      if (controller.signal.aborted) return;
+      setViewRefreshKey(value => value + 1);
+      setSessionNotice({ key, text: '已清空此对话的本机 QQ 消息记录。' });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setFeedback({ key, message: error instanceof Error ? error.message : '无法清空本机 QQ 消息记录。' });
+      if (error instanceof HttpError && error.status === 409) setReload(value => value + 1);
+    } finally {
+      if (!controller.signal.aborted) {
         mutation.current = null;
         setBusyKey(undefined);
       }
@@ -617,7 +654,8 @@ function RobotConversations({ robot, agentSource, views, settingsSections, setti
               redraw(value => value + 1);
               setFeedback(undefined);
             },
-            onSave: draft => { void save(peer, draft); },
+            onSave: (draft, confirmed) => { void save(peer, draft, confirmed); },
+            onClearRecords: () => { void clearRecords(peer); },
           }), settingsVisible ? settingsSections.map(section =>
             h(ExtensionSettingsGroup, {
               key: `${peerKey}:${section.id}`, section, appId, scope: peer.scope, openId: peer.openId,
@@ -709,13 +747,15 @@ interface ConversationSettingsProps {
   busy: boolean;
   feedback?: { message: string };
   onEdit: (draft: Draft) => void;
-  onSave: (draft: Draft) => void;
+  onSave: (draft: Draft, confirmRetention?: true) => void;
+  onClearRecords: () => void;
 }
 
-function ConversationSettings({ robot, peer, agentSource, closeButton, archived, workspace, openCurrent, draft, busy, feedback, onEdit, onSave }: ConversationSettingsProps): ReactNode {
+function ConversationSettings({ robot, peer, agentSource, closeButton, archived, workspace, openCurrent, draft, busy, feedback, onEdit, onSave, onClearRecords }: ConversationSettingsProps): ReactNode {
   const [adoptError, setAdoptError] = useState('');
   const [reading, setReading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [confirm, setConfirm] = useState<'shorten' | 'clear'>();
   const edited = changes(draft);
   const dirty = Object.keys(edited).length > 0;
   const stale = dirty && (draft.baseline.revision !== peer.revision || draft.baseline.defaultsRevision !== peer.defaultsRevision);
@@ -745,7 +785,9 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
 
   return h('form', { className: 'imqw-form', onSubmit: (event: FormEvent) => {
     event.preventDefault();
-    if (dirty && !stale && !busy && !reading) onSave(draft);
+    if (!dirty || stale || disabled || confirm) return;
+    if (shortensRetention(draft.baseline.retention, draft.retention)) setConfirm('shorten');
+    else onSave(draft);
   } },
     h('header', { className: 'imqw-column-head' },
       h('div', null, h('h2', null, '会话设置'), h('p', { className: 'imqw-muted', title: peerName(peer) }, peerName(peer))),
@@ -792,13 +834,42 @@ function ConversationSettings({ robot, peer, agentSource, closeButton, archived,
           } : undefined,
         }),
       }),
-      h(SettingsGroup, { title: 'QQ 回复', hint: '当前 Session 也适用', children: h(WorkbenchReplyFields, { ...fields, scope: peer.scope }) }),
+      h(SettingsGroup, { title: 'QQ 回复', hint: '当前 Session 也适用', children: h(WorkbenchReplyFields, { ...fields, source: agentSource, scope: peer.scope }) }),
     ) : null,
-    h(SettingsGroup, { title: '消息记录', children: h('div', { className: 'imqw-receiving' },
-      h('div', null, h('span', null, '保存 QQ 消息'),
-        !draft.recording ? h('p', { className: 'imqw-muted' }, '已有记录保留。') : null),
-      h(Switch, { checked: draft.recording, label: '保存 QQ 消息', disabled, onChange: recording => onEdit({ ...draft, recording }) }),
+    h(SettingsGroup, { title: '消息记录', children: h('div', { className: 'imqw-agent-fields' },
+      h('div', { className: 'imqw-field' },
+        h('span', null, '本机消息记录'),
+        h(QQSelect, {
+          label: '本机消息记录', value: draft.retention, options: retentionOptions, disabled,
+          onChange: value => {
+            const option = retentionOptions.find(item => item.value === value);
+            if (option) onEdit({ ...draft, retention: option.value });
+          },
+        }),
+        h('p', { className: 'imqw-muted' }, draft.retention === 'paused'
+          ? '保存后暂停记录新消息，保留已有记录。'
+          : '保留期限适用于此 QQ 对话的本机收发记录。')),
+      h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled, className: 'imqb-danger',
+        onClick: () => setConfirm('clear'),
+      }, '清空本会话记录'),
     ) }),
+    confirm ? h(Modal, {
+      open: true, title: confirm === 'clear' ? '清空本会话记录？' : '缩短消息保留期？', closeLabel: '关闭',
+      description: confirm === 'clear'
+        ? `将删除「${peerName(peer)}」的全部本机 QQ 消息记录。DSH Session 历史单独保留。`
+        : `保存后将删除「${peerName(peer)}」超过 ${retentionDays(draft.retention)} 天的本机 QQ 消息记录。`,
+      onClose: () => setConfirm(undefined),
+      footer: h(Fragment, null,
+        h(Button, { type: 'button', variant: 'ghost', onClick: () => setConfirm(undefined) }, '取消'),
+        h(Button, { type: 'button', variant: 'outline', className: 'imqb-danger',
+          disabled: disabled || (confirm === 'shorten' && stale),
+          onClick: () => {
+            setConfirm(undefined);
+            if (confirm === 'clear') onClearRecords();
+            else onSave(draft, true);
+          },
+        }, confirm === 'clear' ? '确认清空' : '确认缩短并保存')),
+    }) : null,
     reading ? h('p', { className: 'imqw-muted', role: 'status' }, '正在读取默认值…') : null,
     adoptError ? h('p', { className: 'imqb-error', role: 'alert' }, adoptError) : null,
     stale ? h('div', { className: 'imqw-conflict' },
