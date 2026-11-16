@@ -6,20 +6,19 @@
  *
  * 1. 设置页「QQ Bot」栏目（settings.section 席位）——注册即展示，
  *    无 Session surface 时序依赖，待绑定/已绑定状态常驻可见；
- * 2. 右侧栏「QQ Bot 绑定」页（sidebarRightTabs）——Start 页入口 +
- *    待绑定时自动打开（失败随轮询重试）。
+ * 2. 右侧栏「QQ Bot 绑定」页（sidebarRightTabs）——Start 页入口。
+ *    不自动打开：待绑定状态由用户从 Start 页（或设置页）主动进入。
  *
  * 运行时依赖仅 react（客户端平台种子表提供）；宿主服务经 cordis inject
  * 声明访问（声明缺失时插件保持 inactive，不阻塞浏览器启动）。
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, type ReactNode } from 'react';
-import { BIND_STATE_PATH } from '../shared/bind-protocol.ts';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 
 export const name = 'im-qqbot-client';
-export const inject = ['slots', 'sidebarRight', 'sidebarRightTabs'];
+export const inject = ['slots', 'sidebarRightTabs'];
 
 /** 侧栏 Tab 类型（ui-sidebar-right 契约的局部投影） */
 const TAB_KIND = 'qqbot-bind';
@@ -44,11 +43,6 @@ interface TabRegistryLike {
       icon: unknown;
     }>;
   }): () => void;
-}
-
-/** ui-sidebar-right 的导航控制器服务（局部投影） */
-interface SidebarRightLike {
-  openTab(kind: string, options?: Record<string, unknown>): unknown;
 }
 
 /** ui-slots 的席位系统服务（局部投影） */
@@ -122,7 +116,6 @@ export function apply(ctx: Context): void {
   // 面板样式全局安装：插件详情按钮等面板外渲染的元素也需要可见
   installPanelStyles();
   const tabs = (ctx as unknown as { sidebarRightTabs?: TabRegistryLike }).sidebarRightTabs;
-  const right = (ctx as unknown as { sidebarRight?: SidebarRightLike }).sidebarRight;
   const slots = (ctx as unknown as { slots?: SlotsLike }).slots;
 
   const disposers: Array<() => void> = [];
@@ -144,7 +137,7 @@ export function apply(ctx: Context): void {
     }
   }
 
-  // 2. 侧栏绑定页（快捷展示位：Start 页入口 + 待绑定自动打开）
+  // 2. 侧栏绑定页（快捷展示位：Start 页入口；不自动打开）
   if (tabs !== undefined && slots !== undefined) {
     disposers.push(tabs.register({
       id: TAB_ID,
@@ -162,8 +155,6 @@ export function apply(ctx: Context): void {
       { name: 'sidebar.right.pane.tab', key: TAB_ID },
       BindPanelBody,
     )));
-    // 待绑定检测与自动引导
-    disposers.push(watchAndPrompt(right));
   }
 
   // 3. 主面板 + 插件详情「设置」操作（layout.selectPanel 导航，
@@ -210,57 +201,4 @@ export function apply(ctx: Context): void {
   (ctx as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => () => {
     for (const dispose of disposers.reverse()) dispose();
   }, 'im-qqbot-client.binding');
-}
-
-/**
- * 轮询绑定状态：待绑定时自动打开绑定页。
- *
- * - 页面隐藏时降频轮询（可见时立即恢复节拍）
- * - 404（已绑定/未安装）时退避到 30s，保持低成本常驻探测
- * - 每次页面加载至多打开一次（用户手动关闭后不打扰）；
- *   打开失败（如启动早期 Session surface 尚未挂载）不消费机会，
- *   由下一轮轮询（3s）自动重试
- */
-function watchAndPrompt(right: SidebarRightLike | undefined): () => void {
-  let stopped = false;
-  let opened = right === undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const schedule = (ms: number): void => {
-    timer = setTimeout(() => { void tick(); }, ms);
-  };
-
-  const tick = async (): Promise<void> => {
-    if (stopped) return;
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-      schedule(5000);
-      return;
-    }
-    try {
-      const res = await fetch(BIND_STATE_PATH, { cache: 'no-store' });
-      if (res.ok) {
-        const body = (await res.json()) as { phase?: string };
-        if (body.phase === 'waiting' && !opened && right !== undefined) {
-          try {
-            right.openTab(TAB_KIND);
-            opened = true;
-          } catch (err) {
-            // 启动早期 Session surface 可能尚未挂载：保留机会，3s 后随轮询重试
-            console.error('[im-qqbot] 打开绑定页失败，稍后重试', err);
-          }
-        }
-        schedule(3000);
-        return;
-      }
-      // 404：已绑定或插件未启用
-      schedule(30000);
-      return;
-    } catch {
-      // 宿主暂不可达（启动窗口期）：退避重试
-    }
-    schedule(10000);
-  };
-
-  void tick();
-  return () => { stopped = true; if (timer !== undefined) clearTimeout(timer); };
 }

@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### ⚠️ Behavior Changes
 
+- **The bind page no longer opens by itself**: pending binding no longer auto-opens the sidebar page; enter via the Start-page "QQ Bot binding" card or Settings → QQ Bot to scan or fill in credentials. The always-on pending-binding poller is gone with it — the status endpoint is no longer requested while those pages are closed.
 - **Minimum host raised to 0.2.0-rc.2**: hosts from 0.1.x are no longer supported (their question-channel protocol is incompatible); installing on an older host is now rejected explicitly.
 - **Questions surface on QQ and the desktop at once**: an `ask_user_question` is delivered to both QQ and the desktop/Web, first answer wins — whichever side replies first settles it, and the other side goes inert (a late QQ button press no longer advances; when QQ wins, the stale desktop card disappears).
 - **Slash commands open by default**: `/preset`, `/model`, and other admin commands were previously limited to allowlisted users; with `access.commandMode` they are open to everyone by default — set it to `allowlist` and configure the command roster to keep them restricted.
