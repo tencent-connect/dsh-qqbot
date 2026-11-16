@@ -142,10 +142,10 @@ export async function bootstrapGateway(
       if (parsed !== undefined) outbound.routeStreamFrame(parsed.agentId, parsed.delta);
     }, { global: true });
 
-  // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
+  // ── 问答通道（ask_user_question → QQ 文本 + 按钮，waterfall answerer）──
   const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
-  questionChannel.install(ctx);
+  questionChannel.install(ctx as unknown as Parameters<typeof questionChannel.install>[0]);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
   const approvalChannel = new ApprovalChannel(manager, sender, config, logger, turnTracker);
@@ -210,6 +210,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        questionChannel.uninstall();
         await manager.disposeAll();
         bot.stop();
       };

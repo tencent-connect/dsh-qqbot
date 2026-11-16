@@ -1,8 +1,8 @@
 /**
  * QuestionChannel — 把 dsh 的 ask_user_question 桥接到 QQ 通道。
  *
- * 接入方式：包装 `userQuestions.ask`（而非 registerProvider），按 `request.agent.id`
- * 路由到 QQ 会话；非 QQ 会话委托宿主默认 provider（如 Web 弹出框），多通道共存。
+ * 以 `user-questions/request` waterfall answerer 接入，按 `request.agent.id`
+ * 路由到 QQ 会话，与宿主 answerer（Web）race、先答先赢；非 QQ 会话直接 next()。
  *
  * 每会话一个显式状态机，三态语义：
  *   - 待答（pending 中）：等待当前题的回答
@@ -16,7 +16,7 @@ import { buildKeyboard, formatQuestion } from './question-renderer.ts';
 import { decodeButtonData } from './button-utils.ts';
 import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 
-// ── 最小契约（对齐 dsh-user-questions，避免硬依赖） ──
+// ── 最小契约（user-questions 服务的事件形态，避免硬依赖） ──
 
 export interface UserQuestionOption {
   label: string;
@@ -47,9 +47,13 @@ export interface UserQuestionResult {
   answers: UserQuestionAnswer[];
 }
 
-export interface UserQuestionsServiceLike {
-  ask: (request: UserQuestionRequest) => Promise<UserQuestionResult>;
-  __qqQuestionPatched?: boolean;
+/** 事件宿主的最小投影：on 返回 disposer。监听挂在插件 ctx 上，生命周期随之，无需探测服务。 */
+export interface QuestionChannelHost {
+  on(
+    event: string,
+    handler: (request: unknown, next: () => Promise<UserQuestionResult>) => unknown,
+    options?: { global?: boolean; prepend?: boolean },
+  ): () => void;
 }
 
 // ── 依赖接口（结构化，便于单测） ──
@@ -74,7 +78,7 @@ export interface QuestionChannelConfigLike {
   askTimeoutMs: number;
 }
 
-// ── 错误语义（对齐 dsh-user-questions 的 UserQuestionError code 约定） ──
+// ── 错误语义（code 约定与宿主 user-questions 一致） ──
 
 /** 问答中断错误码：上层（如 plan-mode）按 code 区分「用户未作答」与普通发送/网络错误 */
 const ASK_ABORTED = 'ASK_ABORTED';
@@ -108,8 +112,7 @@ interface PendingEntry {
 
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
-  private uq?: UserQuestionsServiceLike;
-  private origAsk?: UserQuestionsServiceLike['ask'];
+  private offListen?: () => void;
   private readonly manager: QuestionChannelManagerLike;
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
@@ -134,39 +137,21 @@ export class QuestionChannel {
   }
 
   /**
-   * 包装 userQuestions.ask：QQ 会话走 QQ 通道，其余委托原实现。
-   * 幂等（已 patch 则跳过）；服务缺失或 ask 非函数时优雅禁用。
+   * 注册 `user-questions/request` waterfall answerer。
+   * 监听不依赖服务激活：宿主校验完请求才经 waterfall 派发，未挂载时无请求到达。
+   * `global` 必需（事件按 agent 作用域派发）；`prepend` 排链首——route 会替换
+   * request.signal，须先于其他 answerer 收到请求。
    */
-  public install(ctx: { get(name: string): unknown }): void {
-    const uq = ctx.get('userQuestions') as UserQuestionsServiceLike | undefined;
-    if (!uq || uq.__qqQuestionPatched) return;
-    if (typeof uq.ask !== 'function') {
-      this.logger.warn('im-qqbot: userQuestions service lacks ask() — QQ question channel disabled');
-      return;
-    }
-
-    const self = this;
-    this.origAsk = uq.ask.bind(uq);
-    uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
-      const sessionId = request?.agent?.id;
-      const record = sessionId ? self.manager.findBySessionId(sessionId) : undefined;
-      // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 交回宿主默认界面
-      const target = record && sessionId ? self.resolveTarget(sessionId, record) : undefined;
-      if (record && target) return self.askViaQQ(record, target, request);
-      return self.origAsk!(request);
-    };
-    Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
-    this.uq = uq;
+  public install(ctx: QuestionChannelHost): void {
+    this.offListen = ctx.on('user-questions/request', (request: unknown, next: unknown) => {
+      return this.route(request as UserQuestionRequest, next as () => Promise<UserQuestionResult>);
+    }, { global: true, prepend: true });
     this.logger.info('im-qqbot: QQ question channel installed');
   }
 
   public uninstall(): void {
-    if (this.uq && this.origAsk) {
-      this.uq.ask = this.origAsk;
-      delete this.uq.__qqQuestionPatched;
-      this.uq = undefined;
-      this.origAsk = undefined;
-    }
+    this.offListen?.();
+    this.offListen = undefined;
     for (const [, entry] of this.pending) {
       this.clearTimer(entry);
       this.removeAbort(entry);
@@ -239,14 +224,8 @@ export class QuestionChannel {
     if (request.signal?.aborted) {
       throw new QuestionChannelError('ask_user_question was aborted before delivery', ASK_ABORTED);
     }
-    // 同会话已有待答问题（理论上不会发生：回合阻塞在第一个问题上）→ 拒绝旧的
-    const prev = this.pending.get(key);
-    if (prev) {
-      this.pending.delete(key);
-      this.clearTimer(prev);
-      this.removeAbort(prev);
-      prev.reject(new QuestionChannelError('superseded by a new question', ASK_ABORTED));
-    }
+    // 同会话已有待答问题（回合阻塞在第一个问题上，理论上不会发生）→ 拒绝旧的
+    this.dismissPending(key, 'superseded by a new question');
 
     const first = request.questions[0];
     if (!first) throw new Error('ask_user_question with empty questions');
@@ -324,11 +303,90 @@ export class QuestionChannel {
   private onTimeout(key: string): void {
     const entry = this.pending.get(key);
     if (!entry) return;
-    this.pending.delete(key);
-    this.removeAbort(entry);
-    entry.timer = undefined;
+    this.dismissPending(key, 'ask_user_question timed out before the user answered');
     void this.sender.sendMarkdown(entry.target, '⚠️ 提问已超时，未收到回答。').catch(() => {});
-    entry.reject(new QuestionChannelError('ask_user_question timed out before the user answered', ASK_ABORTED));
+  }
+
+  /**
+   * waterfall 路由：QQ 与宿主 answerer（Web）race，先答先赢。
+   *
+   * - 问题持有私有 AbortController：turn signal 为本轮所有工具共享，透传会让
+   *   撤卡误杀同轮其他工具；只转发真实取消进来。request 是 per-call 副本，
+   *   替换 signal 使链上 answerer 与本问题共生命周期——QQ 先答时 abort 即撤宿主卡片。
+   * - NO_PROVIDER / ASK_ABORTED 是预期态（无 Web answerer、撤卡），挂起等 QQ
+   *   作答；其余宿主错误记 warn，问题在 QQ 保持可答。
+   * - QQ 投递失败（普通 Error）不输掉 race：宿主仍可作答；宿主已败则透传其错误，
+   *   避免双挂起。仲裁撤销（uninstall / superseded / 超时）穿透 race，让工具调用如实失败。
+   *
+   * 输方清理（finally，幂等）：宿主先答 → 撤 QQ pending（迟到按钮不再推进）；
+   * QQ 先答 → abort 问题生命周期撤宿主卡片。
+   */
+  private async route(
+    request: UserQuestionRequest,
+    next: () => Promise<UserQuestionResult>,
+  ): Promise<UserQuestionResult> {
+    const sessionId = request?.agent?.id;
+    const record = sessionId ? this.manager.findBySessionId(sessionId) : undefined;
+    // 本回合按策略不投递到 QQ（如桌面发起的群会话回合）→ 委托宿主 answerer
+    const target = record && sessionId ? this.resolveTarget(sessionId, record) : undefined;
+    if (!record || !target) return next();
+
+    const turnSignal = request.signal;
+    if (turnSignal?.aborted) {
+      throw new QuestionChannelError('ask_user_question was aborted before delivery', ASK_ABORTED);
+    }
+
+    const question = new AbortController();
+    const forwardAbort = (): void => { question.abort(turnSignal?.reason); };
+    turnSignal?.addEventListener('abort', forwardAbort, { once: true });
+    request.signal = question.signal;
+
+    const key = record.sessionKey;
+    let imAvailable = true;
+    let nativeError: unknown;
+    const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+    const imPromise = this.askViaQQ(record, target, request).then(
+      (value) => value,
+      (err: unknown) => {
+        if (err instanceof QuestionChannelError) throw err;
+        imAvailable = false;
+        if (nativeError !== undefined) throw nativeError;
+        return new Promise<UserQuestionResult>(() => {});
+      },
+    );
+    const native = Promise.resolve().then(() => next()).catch((err: unknown) => {
+      nativeError = err;
+      if (!imAvailable) throw err;
+      const code = (err as { code?: string }).code;
+      if (code !== 'NO_PROVIDER' && code !== 'ASK_ABORTED') {
+        this.logger.warn(`im-qqbot: host question answerer failed, waiting for QQ answer: ${errorText(err)}`);
+      }
+      return new Promise<UserQuestionResult>(() => {});
+    });
+
+    let answeredByIm = false;
+    try {
+      return await Promise.race([
+        native,
+        imPromise.then((value) => { answeredByIm = true; return value; }),
+      ]);
+    } finally {
+      this.dismissPending(key, 'another client answered this question');
+      turnSignal?.removeEventListener('abort', forwardAbort);
+      if (answeredByIm) {
+        question.abort(new QuestionChannelError('the question was answered on QQ', ASK_ABORTED));
+      }
+    }
+  }
+
+  /** 撤销指定会话的待答问题（race 输方 / 仲裁复用）；幂等。 */
+  private dismissPending(key: string, reason: string): void {
+    const entry = this.pending.get(key);
+    if (!entry) return;
+    this.pending.delete(key);
+    this.clearTimer(entry);
+    this.removeAbort(entry);
+    entry.reject(new QuestionChannelError(reason, ASK_ABORTED));
   }
 
   /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */

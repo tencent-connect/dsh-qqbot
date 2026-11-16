@@ -15,7 +15,7 @@ const ID = (JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 
 
 /**
  * 平台种子表：宿主 PLATFORM_MODULES 在全部已声明 dshReleases 上的交集
- * （platform.ts @ 0.1.0-rc.8 / 0.2.0-rc.2 / 0.2.2-rc.1）。
+ * （platform.ts @ 0.2.0-rc.2 / 0.2.2-rc.1；下限 0.2.0-rc.2）。
  * 表内模块经注入 require 解析，属宿主隐式契约，勿在 dsh.client.external 重复声明。
  */
 const SEED_TABLE = [
@@ -24,8 +24,10 @@ const SEED_TABLE = [
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ];
 
 const isSeedModule = (specifier: string): boolean =>
@@ -37,8 +39,6 @@ const isSeedModule = (specifier: string): boolean =>
  * 抬升 dshReleases 下限并全版本重验后，可升入 SEED_TABLE。
  */
 const MODERN_SEED_MINIMUM = new Map<string, string>([
-  ['@deepseek-ai/dsh-client-store', '0.2.0-rc.2'],
-  ['@deepseek-ai/dsh-client-ui-dockkit', '0.2.0-rc.2'],
   ['zod', '0.2.2-rc.1'],
   ['@tanstack/react-virtual', '0.2.2-rc.1'],
 ]);
