@@ -15,10 +15,10 @@ import {
   type ClaimedMember, type ManualPairResult, type PairChallenge, type PairClaimResult, type PairPurpose, type PairStatusWire,
 } from '../shared/pairing-protocol.ts';
 
-/** 配对状态轮询间隔（进行中的码需要实时反映"已认领"）。 */
+/** 配对状态轮询间隔：进行中的配对码需要实时反映「已认领」。 */
 const POLL_MS = 2000;
 
-function usePairStatus(active: boolean): { status: PairStatusWire | null; error: string | null; reload: () => void } {
+function usePairStatus(active: boolean, live: boolean): { status: PairStatusWire | null; error: string | null; reload: () => void } {
   const [status, setStatus] = useState<PairStatusWire | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -33,9 +33,15 @@ function usePairStatus(active: boolean): { status: PairStatusWire | null; error:
       setError(msg || '读取认领状态失败');
     }); };
     load();
-    const timer = setInterval(load, POLL_MS);
+    // 无进行中的配对码不轮询：名单只在主动动作（生成/添加/移除/改名）后经 reload() 刷新；
+    // 轮询仅服务「用户正盯着配对 Modal、码在等认领」这一窗口，页面隐藏时跳过
+    if (!live) return () => { stopped = true; };
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      load();
+    }, POLL_MS);
     return () => { stopped = true; clearInterval(timer); };
-  }, [active, tick]);
+  }, [active, live, tick]);
   return { status, error, reload };
 }
 
@@ -44,13 +50,14 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean; onChange?: () => void;
 }): ReactNode {
   usePairingStyles();
-  const { status, error, reload } = usePairStatus(enabled);
-  const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
+  // hooks 依次声明后按需短路（见下），code/addOpen 供 usePairStatus 判定轮询窗口
   const [code, setCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const { status, error, reload } = usePairStatus(enabled, addOpen && code !== null);
+  const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [manualOpenid, setManualOpenid] = useState('');
-  const [addOpen, setAddOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [results, setResults] = useState<PairClaimResult[]>([]);
   const [windowCodes, setWindowCodes] = useState<string[]>([]);
