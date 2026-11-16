@@ -68,6 +68,8 @@ test('command routes and presets are configurable, and messages stay on the fixe
   assert.throws(() => parseFixtureMessage({ command: 'anything' }, commands), /Unsupported fixture command/);
   assert.throws(() => parseFixtureMessage({ content: 'free text' }, commands), /Unsupported fixture message option/);
   assert.throws(() => parseFixtureMessage({ identity: 'real-user' }, commands), /Unsupported fixture identity/);
+  assert.throws(() => parseFixtureMessage({ groupIdentity: 'real-group' }, commands), /Invalid fixture group identity/);
+  assert.throws(() => parseFixtureMessage({ scope: 'c2c', groupIdentity: 'allowed' }, commands), /Invalid fixture group identity/);
   assert.throws(() => parseFixtureMessage({ command: 'smoke' }, commands), /model requests are disabled/);
   assert.throws(() => parseFixtureMessage({ command: 'compact' }, commands), /model requests are disabled/);
   assert.equal(parseFixtureMessage({ command: 'smoke' }, commands, true).content, commands.smoke);
@@ -124,10 +126,21 @@ test('WebSocket dispatch covers READY, heartbeat, synthetic identities and menti
 
   const mentioned = packet(ws, (value) => value.t === 'GROUP_AT_MESSAGE_CREATE');
   await request(fixture.origin, '/__fixture/message', { command: 'preset-minimal', scope: 'group', identity: 'allowed' });
-  assert.equal((await mentioned).d.content, '/preset preset-b');
+  const mentionedPacket = await mentioned;
+  assert.equal(mentionedPacket.d.content, '/preset preset-b');
+
+  const sameGroup = packet(ws, (value) => value.t === 'GROUP_AT_MESSAGE_CREATE');
+  const secondSender = await request(fixture.origin, '/__fixture/message',
+    { command: 'preset-minimal', scope: 'group', identity: 'denied', groupIdentity: 'allowed' });
+  assert.equal(secondSender.status, 200);
+  const secondPacket = await sameGroup;
+  assert.equal(secondPacket.d.group_openid, mentionedPacket.d.group_openid);
+  assert.equal(secondPacket.d.author.member_openid, 'local-fixture-denied-user');
+
   const observations = (await request(fixture.origin, '/__fixture/observations')).value;
   assert.deepEqual(observations.commands.map((item) => [item.command, item.scope, item.identity, item.mention]), [
     ['model-primary', 'c2c', 'allowed', true], ['help', 'group', 'denied', false], ['preset-minimal', 'group', 'allowed', true],
+    ['preset-minimal', 'group', 'denied', true],
   ]);
 });
 

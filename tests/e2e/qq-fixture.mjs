@@ -67,7 +67,7 @@ export async function createQQFixture(options = {}) {
       dispatch(ws, 'C2C_MESSAGE_CREATE', { ...envelope, author: { user_openid: `local-fixture-${allowed ? 'allowed' : 'denied'}-user` } });
     } else {
       dispatch(ws, selected.mention ? 'GROUP_AT_MESSAGE_CREATE' : 'GROUP_MESSAGE_CREATE', {
-        ...envelope, group_openid: `local-fixture-${allowed ? 'allowed' : 'denied'}-group`,
+        ...envelope, group_openid: `local-fixture-${selected.groupIdentity}-group`,
         author: { member_openid: `local-fixture-${allowed ? 'allowed' : 'denied'}-user` },
       });
     }

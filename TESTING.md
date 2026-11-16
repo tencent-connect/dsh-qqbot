@@ -79,6 +79,19 @@ node tests/e2e/upgrade-055.mjs /absolute/dsh/lib/bin.js \
 
 使用 RC3 时运行默认模式。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
 
+## 隔离 Host 回放斜杠授权与队列编辑
+
+按[双包安装说明](docs/workbench/extensions.md)准备同版本安装包。使用支持 `session/updateQueue` 的 DSH 源码目录、Node 22.19+ 或 24+，并在 PATH 中提供 pnpm。输出目录使用全新的绝对路径。
+
+```bash
+node tests/e2e/access-delivery-host.mjs /absolute/dsh-source \
+  /absolute/dsh-qqbot.tgz /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+脚本在独立 profile 安装候选包，使用回环 QQ 网关和模型。两位发送者分别私聊机器人，并在同一个已获准接入的群里发消息，其中一人进入斜杠命令白名单。逐一验证「所有人」「白名单」「关闭」下的 `/model`、`/preset` 和 `/bot-ping`。每种模式下四条普通消息都应收到回复，服务范围、命令白名单和 Session 关联保持原值。
+
+队列用例先让网页请求占住群 Session 的当前轮，再用宿主 RPC 编辑排队的 QQ 消息并恢复原文。核对相同 ID、相同正文和已完成的原生答复。回环网关应只收到网页轮次和未编辑的排队消息对应的答复。结果写入 `report.json`。
+
 ## 本地协议夹具
 
 验证入口要求 Node 22.19+ 或 Node 24+（不支持 Node 23）及 Python 3.10+。请先确认当前终端使用的版本。

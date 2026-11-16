@@ -42,17 +42,21 @@ export function createFixtureCommands(config = {}) {
 
 export function parseFixtureMessage(value = {}, commands = createFixtureCommands(), allowModelRequests = false) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid fixture message');
-  const allowedKeys = new Set(['scope', 'identity', 'mention', 'command']);
+  const allowedKeys = new Set(['scope', 'identity', 'groupIdentity', 'mention', 'command']);
   if (Object.keys(value).some((key) => !allowedKeys.has(key))) throw new Error('Unsupported fixture message option');
   const { scope = 'group', identity = 'denied', command = 'help' } = value;
   if (!['c2c', 'group'].includes(scope)) throw new Error('Unsupported fixture scope');
   if (!['allowed', 'denied'].includes(identity)) throw new Error('Unsupported fixture identity');
+  if (value.groupIdentity !== undefined && (scope !== 'group' || !['allowed', 'denied'].includes(value.groupIdentity))) {
+    throw new Error('Invalid fixture group identity');
+  }
   if (value.mention !== undefined && typeof value.mention !== 'boolean') throw new Error('Invalid fixture mention flag');
   if (typeof command !== 'string' || !Object.hasOwn(commands, command)) throw new Error('Unsupported fixture command');
   if (['smoke', 'compact'].includes(command) && !allowModelRequests) {
     throw new Error('Fixture model requests are disabled');
   }
-  return { scope, identity, command, mention: value.mention !== false, content: commands[command] };
+  return { scope, identity, groupIdentity: value.groupIdentity ?? identity, command,
+    mention: value.mention !== false, content: commands[command] };
 }
 
 export function isFixtureOutboundPath(path) {
