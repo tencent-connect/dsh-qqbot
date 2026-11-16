@@ -61,9 +61,10 @@
     "compatibility": {
       "dshReleases": {
         "0.1.0-rc.8": "compatible",
-        "0.2.0-rc.2": "compatible"
+        "0.2.0-rc.2": "compatible",
+        "0.2.2-rc.1": "compatible"
       },
-      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛。客户端依赖 settings.section / sidebarRightTabs / sidebar.right.pane.tab 席位契约与 dsh.client 模块系统，宿主大版本升级后请重新验收席位行为。"
+      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码/手动/解绑全流程、终端二维码与端内绑定页；0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定页（settings.section 与侧栏）、HMR 重载收敛；0.2.2-rc.1 运行时冒烟通过：凭据写盘与 HMR 重载（Include journal 化后绑定/解绑/重绑不丢凭据）、席位行为（settings.section、settings.section.icon、sidebarRightTabs、插件详情操作）。验证矩阵：类型与单测基线为 0.2.2-rc.3（devDependencies 精确锁定，抬版本须先跑对照回归），运行时验收为 0.2.2-rc.1，rc.2/rc.3 依据升级指南逐条核对与类型检查。peer 范围按 dsh 宿主兼容性检查语义书写（semver includePrerelease）：dsh 宿主包仅有预发布版，npm/pnpm 默认 semver 会判为未满足 peer，在 dsh profile（nodeLinker hoisted、autoInstallPeers false）中属预期行为。宿主大版本升级后请重新验收席位行为。"
     }
   },
   "dependencies": {
@@ -103,13 +104,13 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6",
-    "@deepseek-ai/schemastery": "3.18.1",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.3",
+    "@deepseek-ai/schemastery": "3.19.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^26.2.0",
     "@types/qrcode": "^1.5.5",

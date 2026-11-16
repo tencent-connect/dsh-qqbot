@@ -133,6 +133,15 @@ export function apply(ctx: Context): void {
       { name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人' },
       QQBotSettingsSection,
     )));
+    // 1.5 设置页导航图标
+    try {
+      disposers.push(slots.inject('settings.section.icon', () => slots.register(
+        { name: 'settings.section.icon', id: 'qqbot' },
+        QqBotSidebarIcon,
+      )));
+    } catch {
+      // 旧宿主注入失败：仅失去自定义图标，设置栏目本身不受影响
+    }
   }
 
   // 2. 侧栏绑定页（快捷展示位：Start 页入口 + 待绑定自动打开）
