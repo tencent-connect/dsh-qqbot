@@ -158,7 +158,7 @@ class CommandAPI:
         return json_request(self.qq + '/__fixture/' + path, data)
 
     def prefs(self):
-        path = Path(self.settings['dataDir']) / 'model-prefs.json'
+        path = Path(self.settings['dataDir']) / 'session-preferences.json'
         value = json.loads(path.read_text()) if path.exists() else {}
         return {key: value.get(key, {}) for key in ('overrides', 'presets', 'sessionIds')}
 

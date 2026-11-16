@@ -3,10 +3,11 @@ import type { Context } from '@deepseek-ai/cordis';
 import { AccessControlSchema, ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { describeCommands } from '../commands/index.ts';
 import { bootstrapGateway, openDeliveryLedger, type GatewayRuntime } from '../gateway/bootstrap.ts';
+import { sessionIdentityReader } from '../host/adapter.ts';
 import { registerSendFileTool } from '../media/send-file-tool.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
-import type { DshAgentRegistry } from '../session/index.ts';
-import { PLUGIN_HOME, resolveRobotWorkspace } from '../shared/dirs.ts';
+import type { DshAgent, DshAgentRegistry } from '../session/index.ts';
+import { PLUGIN_HOME, resolveRobotWorkspace, SESSION_PREFERENCES_FILE } from '../shared/dirs.ts';
 import type { WorkbenchRobot, WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { registerAccountRoutes } from './account-routes.ts';
@@ -26,11 +27,8 @@ import type { WorkbenchRobotRemoval } from '../shared/workbench-protocol.ts';
 import { WorkbenchToolPolicies } from './workbench-tools.ts';
 import { ManualQqSender, ManualSendConflict, type ManualAttachment } from '../transport/manual-send.ts';
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
-import { MEDIA_ROOT } from '../media/media-cleaner.ts';
-
-function robotMediaRoot(appId: string, kind: BoundRobotConfig['kind']): string {
-  return kind === 'primary' ? MEDIA_ROOT : join(PLUGIN_HOME, 'robots', appId, 'media');
-}
+import { importLegacyPreferences } from './legacy-preferences.ts';
+import { legacyPreferencesPath } from './data-directory.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -50,26 +48,30 @@ export class RobotRuntimes {
   private readonly changes = new Map<string, Promise<void>>();
   private primary?: { config: ImQQBotConfig; access: AccountAccessService };
   private closed = false;
+  private closing?: Promise<void>;
 
   constructor(
     private readonly ctx: Context,
     private readonly agents: DshAgentRegistry,
     private readonly logger: Logger,
     private readonly store?: RobotConfigStore,
+    private readonly dataDir = PLUGIN_HOME,
   ) {
-    this.prefs = new PrefsStore(undefined, { onError: message => logger.warn(message) });
-    this.conversationSettings = new ConversationSettingsStore(join(PLUGIN_HOME, 'conversation-settings.json'));
-    this.timeline = new QqTimeline(join(PLUGIN_HOME, 'timeline'), logger, (appId, { scope, targetId }) => {
+    this.prefs = new PrefsStore(undefined, { path: join(dataDir, SESSION_PREFERENCES_FILE), onError: message => logger.warn(message) });
+    this.conversationSettings = new ConversationSettingsStore(join(dataDir, 'conversation-settings.json'));
+    this.timeline = new QqTimeline(join(dataDir, 'timeline'), logger, (appId, { scope, targetId }) => {
       const days = this.conversationSettings.recordedDays(peerKey(appId, scope, targetId));
       return days === undefined ? undefined : Date.now() - days * 86_400_000;
     });
-    this.names = new QqDisplayNames(join(PLUGIN_HOME, 'qq-display-names.json'), logger);
+    this.names = new QqDisplayNames(join(dataDir, 'qq-display-names.json'), logger);
     this.toolPolicies = new WorkbenchToolPolicies(ctx, agents,
-      key => this.conversationSettings.get(key).agent, id => this.prefs.findKnownSessionKey(id));
-    ctx.effect(() => () => {
-      this.closed = true;
-      for (const slot of this.slots.values()) this.deactivate(slot);
-    });
+      key => this.conversationSettings.get(key).agent, id => {
+        const key = this.prefs.findKnownSessionKey(id);
+        const appId = key?.split(':', 2)[1];
+        return this.records().some(record => record.enabled && record.appId === appId) ? key : undefined;
+      }, logger,
+      (agent, key) => this.retireInbox(agent, key));
+    ctx.effect(() => () => this.close());
     ctx.effect(() => {
       const timer = setInterval(() => this.expireHistory(), 60 * 60_000);
       timer.unref();
@@ -99,10 +101,55 @@ export class RobotRuntimes {
     }, logger);
   }
 
+  close(): Promise<void> {
+    this.closed = true;
+    for (const slot of this.slots.values()) this.deactivate(slot);
+    this.toolPolicies.close();
+    return this.closing ??= Promise.allSettled([
+      ...this.changes.values(),
+      ...[...this.slots.values()].map(slot => slot.fiber?.dispose()),
+    ]).then(results => {
+      this.timeline.close();
+      if (results.some(result => result.status === 'rejected')) this.logger.warn('QQBot could not completely dispose a gateway.');
+    });
+  }
+
+  get active(): boolean { return !this.closed; }
+
+  private retireInbox(agent: DshAgent, key: string): void {
+    const appId = key.split(':', 2)[1];
+    if (!appId || !agent.inbox) return;
+    const messages = [...agent.inbox.nextStep, ...agent.inbox.nextTurn];
+    if (messages.length === 0) return;
+    const ledger = openDeliveryLedger(appId, this.dataDir);
+    for (const message of messages) {
+      if (!ledger.knowsInput(message.id)) continue;
+      ledger.discardInput(agent.id, message.id);
+      agent.inbox.remove(message.id);
+    }
+  }
+
+  async prepareLegacy(appId: string): Promise<void> {
+    const ownsSession = await sessionIdentityReader(this.ctx).catch(() => {
+      this.logger.warn('QQBot could not read the Session identities for 0.5.5 import.');
+      return undefined;
+    });
+    if (!ownsSession) return;
+    await importLegacyPreferences({
+      source: legacyPreferencesPath, directory: this.dataDir, appId,
+      prefs: this.prefs, logger: this.logger, active: () => this.active,
+      ownsSession,
+    });
+  }
+
+  private mediaDirectory(appId: string): string {
+    return join(this.dataDir, 'robots', appId, 'media');
+  }
+
   bindPrimary(config: ImQQBotConfig): void {
     if (this.closed || this.primary) return;
     this.store?.activatePrimary(config.appId);
-    const access = new AccountAccessService(config, this.logger);
+    const access = new AccountAccessService(config, this.logger, {}, this.dataDir);
     this.primary = { config, access };
   }
 
@@ -116,15 +163,11 @@ export class RobotRuntimes {
         this.logger.warn('QQ 消息记录清理尚未完成。');
       }
     }
-    for (const robot of this.records()) for (const binding of this.prefs.listSessionBindings(robot.appId)) {
-      for (const id of [...binding.history, ...(binding.current ? [binding.current] : [])]) {
-        const agent = this.agents.get(id);
-        if (agent) await this.toolPolicies.attach(agent, binding.key);
-      }
-    }
+    for (const robot of this.records()) if (!robot.enabled) this.toolPolicies.detachAccount(robot.appId);
     await this.toolPolicies.restoreLive();
+    if (this.closed) return;
     await Promise.all(this.records().map(record => this.sync(record.appId)));
-    this.expireHistory();
+    if (!this.closed) this.expireHistory();
   }
 
   private expireHistory(): void {
@@ -184,7 +227,8 @@ export class RobotRuntimes {
     const profiles = members.memberProfiles();
     const config = this.configFor(appId);
     return {
-      mediaRoot: robotMediaRoot(appId, record.kind),
+      mediaRoot: this.mediaDirectory(appId),
+      executionBlocked: (scope: ChatScope, openId: string) => this.toolPolicies.blocked(peerKey(appId, scope, openId)),
       access: record.kind === 'additional' ? record.access : this.primary!.access.currentAccess(),
       liveSessionId: (scope: ChatScope, openId: string) => manager?.getSessionRecord(scope, openId)?.sessionId,
       sessionChangePending: (scope: ChatScope, openId: string) => manager?.sessionChangePending(scope, openId) ?? false,
@@ -279,7 +323,7 @@ export class RobotRuntimes {
   manualStatus(appId: string, target: ReplyTarget, operation: string) {
     this.configFor(appId);
     const runtime = this.slots.get(appId)?.runtime;
-    return runtime ? runtime.manual.status(target, operation) : ManualQqSender.status(openDeliveryLedger(appId), appId, target, operation);
+    return runtime ? runtime.manual.status(target, operation) : ManualQqSender.status(openDeliveryLedger(appId, this.dataDir), appId, target, operation);
   }
 
   async manualSend(appId: string, target: ReplyTarget, operation: string, text: string, assertWritable: () => void,
@@ -355,7 +399,7 @@ export class RobotRuntimes {
           kind: 'additional',
           appSecret: patch.appSecret ?? (record?.kind === 'additional' ? record.appSecret : ''),
           access: {
-            ...(savedAccess ?? AccessControlSchema()),
+            ...(savedAccess ?? { ...AccessControlSchema(), commandMode: 'open' }),
             ...patch.access,
             ...(unboundAccess && patch.access?.c2cAllow ? {
               c2cMode: unboundAccess.c2cMode,
@@ -366,6 +410,7 @@ export class RobotRuntimes {
     if (bindingChanges) this.additionalAccess.delete(saved.appId);
     const slot = this.slots.get(saved.appId);
     if (slot && !this.matches(slot, saved)) this.deactivate(slot);
+    if (bindingChanges) this.toolPolicies.detachAccount(saved.appId);
     const sync = this.sync(saved.appId);
     if (saved.enabled) await sync;
     else void sync.catch(() => this.logger.warn(`无法完成 QQ 网关清理（AppID ${saved.appId}）。`));
@@ -395,7 +440,7 @@ export class RobotRuntimes {
       if (record.kind === 'primary') {
         // Fence old requests before removing the binding from the profile.
         const access = this.accountAccess(record).currentAccess();
-        this.store.save({ ...record, unboundAccess: { ...access, commandMode: access.commandMode ?? 'open' } });
+        this.store.save({ ...record, unboundAccess: access });
         if (!unbindProfileCredentials(profileDir, this.logger, appId)) {
           throw new WorkbenchRequestError(409, '无法解绑主机器人，请检查当前 profile 的凭据配置。');
         }
@@ -410,6 +455,7 @@ export class RobotRuntimes {
     }
     const slot = this.slots.get(appId);
     if (slot) this.deactivate(slot);
+    this.toolPolicies.detachAccount(appId);
     // Admission stops synchronously. Fiber disposal (including a profile
     // reload for the primary) can wait for work unrelated to this request.
     void this.sync(appId).catch(() => this.logger.warn(`无法完成 QQ 网关清理（AppID ${appId}）。`));
@@ -417,6 +463,7 @@ export class RobotRuntimes {
   }
 
   prepareBinding(appId: string): void {
+    if (this.closed) throw new WorkbenchRequestError(503, 'QQ 机器人正在停用。');
     const revision = this.store?.pendingClears().get(appId);
     if (revision !== undefined) this.finishClear(appId, revision);
   }
@@ -499,12 +546,13 @@ export class RobotRuntimes {
     }
     if (!record.enabled) return;
     try {
+      if (this.toolPolicies.enableAccount(appId)) await this.toolPolicies.restoreLive();
       if (record.kind === 'primary') {
         const primary = this.primary!;
-        await this.mount(primary.config, primary.access);
+        await this.mount(primary.config, primary.access, this.mediaDirectory(appId));
         return;
       }
-      await this.mount(this.configFor(appId), this.accountAccess(record), robotMediaRoot(appId, record.kind));
+      await this.mount(this.configFor(appId), this.accountAccess(record), this.mediaDirectory(appId));
     } catch {
       this.logger.error(`QQ 网关初始化失败（AppID ${appId}）`);
     }
@@ -528,7 +576,7 @@ export class RobotRuntimes {
         const current = read();
         this.store!.save({ ...current, access: change(current.access) });
       },
-    } });
+    } }, this.dataDir);
     this.additionalAccess.set(appId, service);
     return service;
   }
@@ -542,7 +590,8 @@ export class RobotRuntimes {
         if (this.closed || slot.stopped) return;
         const receiving = ({ scope, targetId }: ReplyTarget): boolean => {
           try {
-            return this.conversationSettings.get(peerKey(config.appId, scope, targetId)).receiving;
+            const key = peerKey(config.appId, scope, targetId);
+            return this.conversationSettings.get(key).receiving && this.toolPolicies.blocked(key) === undefined;
           } catch {
             this.logger.warn('im-qqbot: peer settings unavailable; QQ conversation denied');
             return false;
@@ -578,7 +627,7 @@ export class RobotRuntimes {
               return true;
             },
           },
-        });
+        }, this.dataDir);
       },
     });
     await slot.fiber.await();

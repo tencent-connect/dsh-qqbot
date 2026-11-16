@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@tencent-connect/dsh-qqbot-workbench-history':
+        specifier: 0.5.6
+        version: link:plugins/workbench-history
       '@tencent-connect/qqbot-connector':
         specifier: 1.2.0
         version: 1.2.0
@@ -63,6 +66,9 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      lightningcss:
+        specifier: 1.33.0
+        version: 1.33.0
       react:
         specifier: ^18.2.0
         version: 18.3.1
@@ -75,6 +81,8 @@ importers:
       vitest:
         specifier: ^4.1.8
         version: 4.1.10(@types/node@26.2.0)(vite@8.2.1(@types/node@26.2.0)(yaml@2.8.1))
+
+  plugins/workbench-history: {}
 
 packages:
 

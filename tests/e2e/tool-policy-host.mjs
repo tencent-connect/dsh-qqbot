@@ -9,7 +9,10 @@ import { strToU8, zipSync } from 'fflate';
 import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost } from './host.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { QqTimeline } from '../../lib/runtime/qq-timeline.js';
 import { deliveryKey } from '../../lib/transport/delivery-ledger.js';
+import { stageHistoryPackage } from './history-registry.mjs';
 
 const [source, corePackage, historyPackage, dir, expected = 'fixed', browser] = process.argv.slice(2);
 assertNodeVersion();
@@ -39,9 +42,11 @@ const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks));
-    const child = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('DELEGATED_POLICY_PROBE'));
-    const isTest = payload.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('QQ_CMD_OK')) || child;
-    const plan = isTest ? pending.get(child ? 'child' : 'root')?.shift() : undefined;
+    const users = payload.messages.filter(message => message.role === 'user').map(message => JSON.stringify(message.content));
+    const child = users.some(content => content.includes('DELEGATED_POLICY_PROBE'));
+    const prompt = users.findLast(content => content.includes('QQ_CMD_OK'));
+    const actor = child ? 'child' : prompt?.includes('(@you)') ? 'group' : 'c2c';
+    const plan = prompt || child ? pending.get(actor)?.shift() : undefined;
     if (plan) {
       requests.push({ name: plan.name, tools: (payload.tools ?? []).map(tool => tool.function.name).sort() });
       if (plan.name.startsWith('file-prompt-')) {
@@ -67,6 +72,7 @@ const server = createServer(async (req, res) => {
   }
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+const registry = await stageHistoryPackage(historyPackage, '0.5.6');
 let host;
 const controls = [];
 try {
@@ -83,7 +89,8 @@ try {
   const select = ['--profile', profile];
   const install = { cwd: source, env, logPath: join(dir, 'install.log') };
   await runLogged(process.execPath, [...cli, ...select, '--from-default-profile', 'web', '--dump-config'], install);
-  await runLogged(process.execPath, [...cli, 'plugin', ...select, 'add', 'file:' + corePackage, 'file:' + historyPackage], install);
+  const companion = expected === 'baseline' ? ['file:' + historyPackage] : ['--registry=' + registry.origin];
+  await runLogged(process.execPath, [...cli, 'plugin', ...select, 'add', 'file:' + corePackage, ...companion], install);
   const profileDir = join(home, 'profiles', profile);
   const barrier = fileURLToPath(new URL('./tool-policy-barrier.mjs', import.meta.url));
   await writeFile(join(profileDir, 'cordis.patch.yml'), JSON.stringify([
@@ -114,19 +121,28 @@ try {
     }), { mode: 0o600 });
     const older = 'QQ_TIMELINE_BEYOND_30_DAYS';
     const recent = 'QQ_TIMELINE_BETWEEN_7_AND_30_DAYS';
-    const seed = async (openId, entries) => {
-      const peer = join(qqData, 'timeline', deliveryKey(DUMMY_APP_ID), deliveryKey('c2c', openId));
-      await mkdir(peer, { recursive: true });
-      await writeFile(join(peer, 'peer.json'), JSON.stringify({ scope: 'c2c', openId }));
-      const file = join(peer, 'rows.jsonl');
-      await writeFile(file, entries.map(([text, age]) => JSON.stringify({
-        id: deliveryKey(text), text, at: Date.now() - age * 86_400_000, direction: 'inbound', status: 'received',
-      })).join('\n') + '\n');
-      return file;
+    const timelineDir = join(qqData, 'timeline');
+    const timeline = new QqTimeline(timelineDir, { warn: message => { throw new Error(message); } });
+    const seed = (openId, entries) => {
+      for (const [text, age] of entries) {
+        timeline.record(DUMMY_APP_ID, { scope: 'c2c', targetId: openId }, {
+          id: deliveryKey(text), text, at: Date.now() - age * 86_400_000, direction: 'inbound', status: 'received',
+        });
+      }
     };
-    historyFixture = { older, recent, pausedId, timelineOnlyId, file: await seed(directId, [[older, 35], [recent, 12]]) };
-    historyFixture.startupExpiryFile = await seed(timedId, [['QQ_EXPIRE_WITHOUT_OPENING', 9], ['QQ_KEEP_ON_STARTUP', 2]]);
-    await seed(timelineOnlyId, [['QQ_LEGACY_TIMELINE_WITHOUT_SETTINGS', 35]]);
+    const storedMessages = openId => {
+      const db = new DatabaseSync(join(timelineDir, 'messages.sqlite'), { readOnly: true });
+      try {
+        return db.prepare("SELECT body FROM messages WHERE app_id = ? AND scope = 'c2c' AND target_id = ?")
+          .all(DUMMY_APP_ID, openId).map(row => JSON.parse(row.body).text);
+      } finally { db.close(); }
+    };
+    seed(directId, [[older, 35], [recent, 12]]);
+    seed(timedId, [['QQ_EXPIRE_WITHOUT_OPENING', 9], ['QQ_KEEP_ON_STARTUP', 2]]);
+    seed(timelineOnlyId, [['QQ_LEGACY_TIMELINE_WITHOUT_SETTINGS', 35]]);
+    seed('local-fixture-paged-messages', Array.from({ length: 105 }, (_, index) => ['QQ_PAGE_' + (index + 1), 1]));
+    timeline.close();
+    historyFixture = { older, recent, pausedId, timelineOnlyId, storedMessages, timedId };
     if (process.platform === 'darwin') {
       openLog = join(dir, 'native-open.log');
       const bin = join(dir, 'bin');
@@ -150,6 +166,10 @@ try {
       revision: row.revision, agent: { ...row.agent, ...config } })).conversation;
   };
   const dispatch = async (scope, command = 'smoke') => {
+    if (command === 'smoke') {
+      const next = pending.get('root')?.shift();
+      if (next) pending.set(scope, [...pending.get(scope) ?? [], next]);
+    }
     const res = await fetch(qq.origin + '/__fixture/message', { method: 'POST', body: JSON.stringify({ scope, command, identity: 'allowed' }) });
     assert(res.ok, command);
   };
@@ -316,6 +336,22 @@ try {
   assert.deepEqual((await observed('after-native-switch-restored')).tools, ['read', 'write']);
   assert.equal(await readFile(join(workspace, 'native-restored.txt'), 'utf8'), 'fixture only\n');
   report.cases.nativeSwitchRestored = 'A fresh turn can write after the native permission returns within the cap';
+  if (expected === 'fixed') {
+    await save('group', { tools: undefined });
+    const outbound = async () => (await fetch(qq.origin + '/__fixture/observations').then(result => result.json())).outbound;
+    const before = (await outbound()).at(-1)?.sequence ?? 0;
+    plan('recover-after-ptc-error', [{ name: 'run_code', args: { code: "throw new Error('private PTC fixture')", description: 'Fail in PTC' } }]);
+    await dispatch('group');
+    const completed = await finish(group, 11);
+    assert(completed.some(event => event.type === 'tool/result' && event.data.turn === 11 &&
+      (event.data.error !== undefined || event.data.message?.isError)), 'the real run_code tool failed');
+    const sent = await until(async () => {
+      const rows = (await outbound()).filter(row => row.sequence > before);
+      return rows.some(row => row.content === 'QQ_CMD_OK') ? rows : undefined;
+    }, 'PTC recovery after tool failure');
+    assert.deepEqual(sent.map(row => row.content), ['QQ_CMD_OK']);
+    report.cases.ptcRecoveryDelivery = { toolFailed: true, finalAnswerOnly: true };
+  }
   report.sessions = { group, direct, child };
   if (browser === '--browser') {
     const { verifyWorkbenchBrowser } = await import('./workbench-browser.mjs');
@@ -366,13 +402,34 @@ try {
     const stopped = await finish(direct, turnCount + 3);
     assert.equal(stopped.filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'error');
     assert(!promptRequests.has('file-prompt-missing'), 'a missing file cannot fall back to old prompt text');
+    assert.equal(pending.get('c2c').shift()?.name, 'file-prompt-missing');
     report.cases.livePromptFile = { modelSawLatest: true, sameSession: true, noConfigRewrite: true, missingFileStoppedTurn: true };
+  }
+  if (expected === 'fixed') {
+    const robots = async () => (await client.get(base + 'robots')).robots;
+    const bot = (await robots()).find(row => row.appId === DUMMY_APP_ID);
+    await client.post(base + 'robots/remove', {
+      appId: DUMMY_APP_ID, revision: bot.revision, bindingRevision: bot.bindingRevision, mode: 'retain',
+    });
+    await until(async () => qq.state.activeConnections === 0 &&
+      !(await robots().catch(() => [bot])).some(row => row.appId === DUMMY_APP_ID), 'QQ unbound and routes reloaded');
+    const before = (await fetch(qq.origin + '/__fixture/observations').then(result => result.json())).outbound.length;
+    const previousTurns = (await events(direct)).filter(event => event.type === 'turn/end').length;
+    plan('native-after-unbind', [write('native-after-unbind.txt')], 'c2c');
+    const receipt = await client.rpc('session/prompt', { request: { sessionId: direct, requestId: crypto.randomUUID(),
+      mode: 'queue', content: [{ type: 'text', text: 'QQ_CMD_OK native followup' }] } });
+    assert.equal(receipt.accepted, true);
+    assert((await observed('native-after-unbind')).tools.includes('write'));
+    await finish(direct, previousTurns + 1);
+    assert.equal(await readFile(join(workspace, 'native-after-unbind.txt'), 'utf8'), 'fixture only\n');
+    assert.equal((await fetch(qq.origin + '/__fixture/observations').then(result => result.json())).outbound.length, before);
+    report.cases.nativeAfterUnbind = { sameSession: true, nativeWriteRestored: true, noQqDelivery: true };
   }
   assert.equal(qq.state.unexpectedRequests, 0);
 } finally {
   for (const gate of controls) gate.resolve([]);
   await host?.stop();
   server.closeAllConnections();
-  await Promise.all([qq.close(), new Promise(resolve => server.close(resolve))]);
+  await Promise.all([qq.close(), registry.close(), new Promise(resolve => server.close(resolve))]);
   await writeFile(join(dir, 'report.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
 }

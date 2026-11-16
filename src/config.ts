@@ -10,7 +10,7 @@ export interface AccessControlConfig {
   c2cAllow: string[];
   /** 群聊访问模式 */
   groupMode: 'open' | 'allowlist' | 'disabled';
-  /** QQ 斜杠命令模式，缺省所有获准接入的发送者可用 */
+  /** QQ 斜杠命令模式，缺省沿用 0.5.5 的授权 */
   commandMode?: 'open' | 'allowlist' | 'disabled';
   /** 群聊白名单（group openid） */
   groupAllow: string[];
@@ -57,8 +57,8 @@ export interface SendFileConfig {
 /**
  * 非 QQ 读者输入（如桌面端续聊 QQ 会话）的回合是否主动推送到 QQ。
  * - off：不推送，回复只留在发起的界面；
- * - c2c：只推送私聊会话（默认，避免桌面上的私人操作出现在群里）；
- * - all：私聊和群聊都推送。
+ * - c2c：只推送私聊会话；
+ * - all：私聊和群聊都推送（默认）。
  */
 export type ExternalTurnDelivery = 'off' | 'c2c' | 'all';
 
@@ -118,7 +118,7 @@ export interface ImQQBotConfig {
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
   c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式（默认开放）'),
-  commandMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('斜杠命令模式（所有人／白名单／关闭）'),
+  commandMode: Schema.union(['open', 'allowlist', 'disabled']).description('斜杠命令模式（省略时沿用旧版授权）'),
   c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单（QQ OpenID）'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),
@@ -187,9 +187,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxFiles: 4,
   }).description('附件发送配置'),
   proactiveDelivery: Schema.object({
-    externalTurns: Schema.union(['off', 'c2c', 'all']).default('c2c')
+    externalTurns: Schema.union(['off', 'c2c', 'all']).default('all')
       .description('非 QQ 输入（如桌面续聊）的回合是否推送到 QQ：off=不推送，c2c=仅私聊，all=私聊和群聊'),
   }).default({
-    externalTurns: 'c2c',
+    externalTurns: 'all',
   }).description('主动推送策略（定时任务等服务回合始终推送）'),
 });

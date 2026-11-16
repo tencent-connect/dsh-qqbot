@@ -1,9 +1,10 @@
-/** QQ 工作台、设置和原生会话操作的客户端入口。 */
+import { t, useQqLocale } from './qq-locale.ts';
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Button, IconChevronLeftOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, IconChevronLeftOutlineRegular, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import { QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
-import { hasQqSessionOrigin, QQWorkbench, restoreQqSessionOrigin } from './workbench.ts';
+import { QQWorkbench } from './workbench.ts';
+import { WorkbenchState } from './workbench-state.ts';
 import { WorkbenchExtensions } from './workbench-extensions.ts';
 import { QqAnswerAction } from './workbench-answer.ts';
 import type { AgentFormSource, SessionModelSource } from './workbench-agent-form.ts';
@@ -68,10 +69,10 @@ function OpenProfileConfig({ remote }: { remote?: ProfileSettingsRemote }): Reac
     }
   };
   return createElement('div', { className: 'imqw-actions' },
-    error ? createElement('span', { className: 'imqb-error', role: 'alert' }, '无法打开配置文件。') : null,
+    error ? createElement('span', { className: 'imqb-error', role: 'alert' }, t("无法打开配置文件。")) : null,
     createElement(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: opening,
-      title: '打开当前 DSH 配置的 cordis.patch.yml', onClick: () => { void open(); },
-    }, '打开配置文件'),
+      title: t("打开当前 DSH 配置的 cordis.patch.yml"), onClick: () => { void open(); },
+    }, t("打开配置文件")),
   );
 }
 
@@ -94,14 +95,14 @@ function OpenQqBotAction({ subject, packageName, onOpen }: {
   if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
   return createElement('button', {
     type: 'button', className: 'imqb-pluginOpen', onClick: onOpen,
-  }, '设置');
+  }, t("设置"));
 }
 
 export function apply(ctx: Context): void {
   const extensions = new WorkbenchExtensions();
+  const state = new WorkbenchState();
   ctx.provide('qqbotWorkbench', extensions);
-  // 面板样式全局安装：插件详情按钮等面板外渲染的元素也需要可见
-  installPanelStyles();
+  ctx.effect(() => installPanelStyles());
   const slots = (ctx as unknown as { slots?: SlotsLike }).slots;
 
   const disposers: Array<() => void> = [];
@@ -243,7 +244,7 @@ export function apply(ctx: Context): void {
         ['auto', { key: 'auto.label', nativeName: 'Auto review' }],
       ]);
       const getRemote = (): AgentRemotes => {
-        if (!remote) throw new Error('DSH 目录服务尚未就绪。');
+        if (!remote) throw new Error(t("DSH 目录服务尚未就绪。"));
         return remote;
       };
       const agentSource: AgentFormSource = {
@@ -264,7 +265,7 @@ export function apply(ctx: Context): void {
         openPromptFile: async path => {
           const session = getRemote().session;
           if (!(await session.openWorkspacePath?.({ path }))?.ok) {
-            throw new Error('无法打开原文件，请在 DSH 宿主上编辑此文件。');
+            throw new Error(t("无法打开原文件，请在 DSH 宿主上编辑此文件。"));
           }
         },
         workspaces: () => (pageCtx.get('workspaces') as {
@@ -272,6 +273,7 @@ export function apply(ctx: Context): void {
         } | undefined)?.list?.getSnapshot().items ?? [],
       };
       const QQBotPage = (): ReactNode => {
+        useQqLocale();
         const openSettings = useSyncExternalStore(subscribeSettings, () => settingsPending);
         const documentRemote = useSyncExternalStore(subscribeSettings, () => profileSettings);
         const workspace = pageCtx.get('uiWorkspace') as {
@@ -294,8 +296,11 @@ export function apply(ctx: Context): void {
           useCallback(listener => list?.subscribe?.(listener) ?? noop, [list]),
           () => list?.getSnapshot().archivedSessionIds ?? emptyArchived,
         );
+        if (!SegmentedControl || !Switch) {
+          return createElement('p', { role: 'status' }, t("请更新 DSH 以打开 QQ 工作台。已绑定机器人仍可在 QQ 收发。"));
+        }
         return createElement(QQWorkbench, {
-          extensions,
+          extensions, state,
           settingsRequest: openSettings ? dismissSettingsRequest : undefined,
           configFileAction: createElement(OpenProfileConfig, { remote: documentRemote }),
           agentSource, archivedSessionIds,
@@ -306,7 +311,7 @@ export function apply(ctx: Context): void {
           },
           openSession: open ? id => {
             if (workspaces?.list?.getSnapshot().archivedSessionIds?.includes(id)) {
-              throw new Error('这个 Session 已归档，请先在 DSH 工作区取消归档。');
+              throw new Error(t("这个 Session 已归档，请先在 DSH 工作区取消归档。"));
             }
             open(id);
           } : undefined,
@@ -332,10 +337,10 @@ export function apply(ctx: Context): void {
         },
         OpenQqBotAction,
       ));
-      const ReturnToQq = ({ sessionId }: { sessionId: string }): ReactNode => hasQqSessionOrigin(sessionId) ? createElement(
+      const ReturnToQq = ({ sessionId }: { sessionId: string }): ReactNode => state.sessionOrigins.has(sessionId) ? createElement(
         Button, { type: 'button', variant: 'toolbar', size: 'sm', onClick: () => {
-          if (restoreQqSessionOrigin(sessionId)) layout.selectPanel(IM_MAIN_PANEL_ID);
-        } }, createElement(IconChevronLeftOutlineRegular, { size: 14 }), '返回 QQ 对话',
+          if (state.restoreQqSessionOrigin(sessionId)) layout.selectPanel(IM_MAIN_PANEL_ID);
+        } }, createElement(IconChevronLeftOutlineRegular, { size: 14 }), t("返回 QQ 对话"),
       ) : null;
       const stopReturn = ['conversation.session.header.utilities', 'conversation.hero.options'].map(slot =>
         pageSlots.inject(slot, () => pageSlots.register({ name: slot, id: 'im-qqbot-return', order: 10 }, ReturnToQq)),
@@ -344,7 +349,7 @@ export function apply(ctx: Context): void {
       const stopSidebar = pageSlots.inject('sidebar.panellist', () => pageSlots.register(
         {
           name: 'sidebar.panellist', id: IM_MAIN_PANEL_ID,
-          order: 10, label: 'QQ 机器人',
+          order: 10, label: t("QQ 机器人"),
         },
         QqBotSidebarIcon,
       ));

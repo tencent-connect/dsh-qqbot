@@ -101,8 +101,10 @@ it.each([
   const id = 'qq-session';
   ledger.registerInput({ key: 'receipt', messageId: 'qq', sessionId: id, senderId: peer.targetId,
     target: peer, contentHash: deliveryKey(body) });
+  const inputs = new QqInputRegistry({ ledger });
+  inputs.register('qq');
   const tracker = new TurnTracker({ findBySessionId: () => undefined, deliveryAddress: () => peer },
-    new QqInputRegistry({ ledger }), { appId: 'fixture-app', externalTurns: 'c2c' }, logger);
+    inputs, { appId: 'fixture-app', externalTurns: 'c2c' }, logger);
   tracker.begin(id, 1);
   const note = (source: 'qq' | 'web') => tracker.note(id, {
     id: source, source: { kind: 'user' }, content: source === 'qq' ? body : [{ type: 'text', text: 'Private steering' }],

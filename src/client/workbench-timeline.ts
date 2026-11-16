@@ -1,32 +1,40 @@
+import { locale, t, useQqLocale } from './qq-locale.ts';
 import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Button, IconEllipsisOutlineRegular, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
-import { QqComposer, type QqComposerHandle } from './workbench-composer.ts';
+import { ComposerState, QqComposer, type QqComposerHandle } from './workbench-composer.ts';
 
-const statusLabel: Record<TimelineStatus, string> = {
-  received: '已收到', sending: '发送中', partial: 'QQ 已接受部分内容',
-  accepted: 'QQ 接口已接受', rejected: 'QQ 拒绝', unknown: '结果未知',
-};
-const inboundLabel: Record<TimelineInboundOutcome, string> = {
-  'mention-required': '已收到，未 @ 机器人',
-  'rate-limited': '触发频率限制',
-  'queue-full': '处理队列已满',
-  empty: '没有可提交给 DSH 的内容',
-  submitted: '已提交到 DSH',
-  'submit-failed': '提交到 DSH 失败',
-  'session-archived': '当前 Session 已归档，消息未提交',
-};
-const sourceLabel: Record<NonNullable<TimelineEntry['source']>, string> = {
-  automatic: '自动回复', agent: 'Agent 投递', manual: '网页直发', answer: 'Session 回答',
-};
-const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
-const timeFormat = new Intl.DateTimeFormat('zh-CN', { timeStyle: 'short' });
+function statusLabel(status: TimelineStatus): string {
+  return {
+  received: t("已收到"), sending: t("发送中"), partial: t("QQ 已接受部分内容"),
+  accepted: t("QQ 接口已接受"), rejected: t("QQ 拒绝"), unknown: t("结果未知"),
+  }[status];
+}
+function inboundLabel(outcome: TimelineInboundOutcome): string {
+  return {
+  'mention-required': t("已收到，未 @ 机器人"),
+  'rate-limited': t("触发频率限制"),
+  'queue-full': t("处理队列已满"),
+  empty: t("没有可提交给 DSH 的内容"),
+  submitted: t("已提交到 DSH"),
+  'submit-failed': t("提交到 DSH 失败"),
+  'session-archived': t("当前 Session 已归档，消息未提交"),
+  }[outcome];
+}
+function sourceLabel(source: NonNullable<TimelineEntry['source']>): string {
+  return {
+  automatic: t("自动回复"), agent: t("Agent 投递"), manual: t("网页直发"), answer: t("Session 回答"),
+  }[source];
+}
 
 interface TimelinePosition { entryId: string; offset: number }
-const readingPositions = new Map<string, TimelinePosition>();
+export class TimelineState {
+  readonly readingPositions = new Map<string, TimelinePosition>();
+  readonly composer = new ComposerState();
+}
 
 function rowOffset(list: HTMLElement, row: HTMLElement): number {
   return row.getBoundingClientRect().top - list.getBoundingClientRect().top;
@@ -57,7 +65,10 @@ function updateLatest(current: TimelinePage | undefined, latest: TimelinePage): 
   };
 }
 
-export function QqTimelineView({ appId, peer, robotName, disabledReason, openSession, refreshKey }: QqWorkbenchViewProps): ReactNode {
+export function QqTimelineView({ state, appId, peer, robotName, disabledReason, openSession, refreshKey }: QqWorkbenchViewProps & { state: TimelineState }): ReactNode {
+  const language = useQqLocale();
+  const dateFormat = new Intl.DateTimeFormat(language, { dateStyle: 'medium' });
+  const { readingPositions } = state;
   const { scope, openId, recording } = peer;
   const key = JSON.stringify([appId, scope, openId]);
   const [resume] = useState(() => readingPositions.get(key));
@@ -130,7 +141,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
         setPage(previous => position ? visible : updateLatest(previous, latest));
         setError('');
       } catch (cause) {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '无法读取 QQ 流水');
+        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : t("无法读取 QQ 流水"));
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(() => { void read(); }, 4000);
       }
@@ -185,7 +196,7 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
     } catch (cause) {
       if (!signal.aborted) {
         if (cause instanceof HttpError && cause.status === 404) setRefresh(value => value + 1);
-        else setError(cause instanceof Error ? cause.message : '无法读取更早记录');
+        else setError(cause instanceof Error ? cause.message : t("无法读取更早记录"));
       }
     } finally {
       setReadingOlder(false);
@@ -208,14 +219,14 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
     if (list.current) list.current.scrollTop = list.current.scrollHeight;
   };
   const entries = page?.entries ?? [];
-  return h('section', { className: 'imqw-timeline', 'aria-label': 'QQ 消息' },
+  return h('section', { className: 'imqw-timeline', 'aria-label': t("QQ 消息") },
     !recording || refreshKey === undefined ? h('div', { className: 'imqw-timeline-notice' },
-      !recording ? h('span', { className: 'imqw-muted' }, '已暂停记录新消息') : null,
-      refreshKey === undefined ? h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '刷新消息') : null,
+      !recording ? h('span', { className: 'imqw-muted' }, t("已暂停记录新消息")) : null,
+      refreshKey === undefined ? h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, t("刷新消息")) : null,
     ) : null,
     error || page?.incomplete ? h('div', { className: 'imqw-timeline-notice' },
-      h('p', { role: 'alert', className: 'imqb-error' }, error || '消息记录可能不完整。'),
-      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, '重试'),
+      h('p', { role: 'alert', className: 'imqb-error' }, error || t("消息记录可能不完整。")),
+      h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: reload }, t("重试")),
     ) : null,
     h('div', { className: 'imqw-timeline-scroll', ref: list, onScroll: () => {
       const node = list.current;
@@ -223,11 +234,11 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
       follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
       if (follow.current) setNewMessages(false);
     } },
-      !page && !error ? h('p', { role: 'status', className: 'imqw-timeline-empty imqw-muted' }, '正在读取消息…') : null,
-      page?.entries.length === 0 ? h('p', { className: 'imqw-timeline-empty imqw-muted' }, '还没有已保存的 QQ 消息。') : null,
+      !page && !error ? h('p', { role: 'status', className: 'imqw-timeline-empty imqw-muted' }, t("正在读取消息…")) : null,
+      page?.entries.length === 0 ? h('p', { className: 'imqw-timeline-empty imqw-muted' }, t("还没有已保存的 QQ 消息。")) : null,
       page?.before ? h('div', { className: 'imqw-timeline-older' },
         h(Button, { variant: 'ghost', size: 'sm', disabled: readingOlder, onClick: () => { void loadOlder(); } },
-          readingOlder ? '正在读取…' : '加载更早消息')) : null,
+          readingOlder ? t("正在读取…") : t("加载更早消息"))) : null,
       h('ol', { className: 'imqw-timeline-list' }, entries.flatMap((row, index) => {
         const previous = entries[index - 1];
         const newDay = !previous || dateFormat.format(previous.at) !== dateFormat.format(row.at);
@@ -238,8 +249,8 @@ export function QqTimelineView({ appId, peer, robotName, disabledReason, openSes
         return newDay ? [h('li', { key: 'date-' + row.id, className: 'imqw-message-day' }, dateFormat.format(row.at)), message] : [message];
       })),
     ),
-    newMessages ? h('div', { className: 'imqw-message-jump' }, h(Button, { variant: 'outline', size: 'sm', onClick: jump }, '查看最新消息 ↓')) : null,
-    h(QqComposer, { ref: composer, appId, peer, robotName, disabledReason, onUpdate: reload }),
+    newMessages ? h('div', { className: 'imqw-message-jump' }, h(Button, { variant: 'outline', size: 'sm', onClick: jump }, t("查看最新消息 ↓"))) : null,
+    h(QqComposer, { state: state.composer, ref: composer, appId, peer, robotName, disabledReason, onUpdate: reload }),
   );
 }
 
@@ -262,26 +273,26 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
   const menuButton = useRef<HTMLButtonElement>(null);
   const outbound = row.direction === 'outbound';
   const sender = outbound ? robotName : peerName || row.senderName
-    || (scope === 'c2c' ? `私聊 ${openId.slice(-8)}` : row.senderId ? `成员 ${row.senderId.slice(-8)}` : 'QQ 成员');
+    || (scope === 'c2c' ? t("私聊 {0}", openId.slice(-8)) : row.senderId ? t("成员 {0}", row.senderId.slice(-8)) : t("QQ 成员"));
   const errorCode = [row.httpStatus && `HTTP ${row.httpStatus}`, row.platformCode && `QQ ${row.platformCode}`].filter(Boolean).join(' · ');
   const linkedSession = row.sessionId;
   const actions: MenuEntry[] = [];
-  if (onReply) actions.push({ id: 'quote', label: '引用回复' });
-  if (linkedSession && openLinked) actions.push({ id: 'session', label: '打开关联 Session' });
-  actions.push({ id: 'details', label: detailsOpen ? '收起响应详情' : '响应详情' });
+  if (onReply) actions.push({ id: 'quote', label: t("引用回复") });
+  if (linkedSession && openLinked) actions.push({ id: 'session', label: t("打开关联 Session") });
+  actions.push({ id: 'details', label: detailsOpen ? t("收起响应详情") : t("响应详情") });
   const queryReceipt = async (): Promise<void> => {
     setChecking(true);
     setReceiptNote('');
     try {
       const latest = await refreshEntry(row.id);
-      if (latest?.status === 'unknown') setReceiptNote('记录仍未确认结果，请在 QQ 核对。');
+      if (latest?.status === 'unknown') setReceiptNote(t("记录仍未确认结果，请在 QQ 核对。"));
     } catch (error) {
-      setReceiptNote(error instanceof Error ? error.message : '无法查询发送记录。');
+      setReceiptNote(error instanceof Error ? error.message : t("无法查询发送记录。"));
     } finally {
       setChecking(false);
     }
   };
-  const detail = row.inboundOutcome ? inboundLabel[row.inboundOutcome] : statusLabel.received;
+  const detail = row.inboundOutcome ? inboundLabel(row.inboundOutcome) : statusLabel('received');
   const pendingReceipt = outbound && (row.status === 'unknown' || row.status === 'sending');
   const showStatus = outbound && row.status !== 'accepted';
   const submissionFailed = !outbound && row.inboundOutcome === 'submit-failed';
@@ -291,19 +302,19 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
     h('span', { className: 'imqw-message-avatar', 'aria-hidden': true }, !compact && [...sender][0]?.toUpperCase()),
     h('div', { className: 'imqw-message-body' },
       compact ? null : h('div', { className: 'imqw-timeline-meta' },
-        h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, timeFormat.format(row.at))),
+        h('strong', { title: sender }, sender), h('time', { dateTime: new Date(row.at).toISOString() }, new Intl.DateTimeFormat(locale(), { timeStyle: 'short' }).format(row.at))),
       h('div', { className: 'imqw-message-line' }, h('div', { className: 'imqw-timeline-bubble' },
         row.quote ? h('blockquote', null,
           row.quote.senderName ? h('strong', null, row.quote.senderName) : null,
           row.quote.text ? h('div', null, row.quote.displayText ?? row.quote.text) : null,
-          row.quote.attachments ? h('span', { className: 'imqw-muted' }, `引用附件 · ${row.quote.attachments} 项`) : null) : null,
+          row.quote.attachments ? h('span', { className: 'imqw-muted' }, t("引用附件 · {0} 项", row.quote.attachments)) : null) : null,
         row.text ? h('div', { className: 'imqw-timeline-text' }, row.displayText ?? row.text) : null,
         imageCount > 0 ? h('div', { className: 'imqw-message-images' },
           Array.from({ length: imageCount }, (_, index) => {
             const query = new URLSearchParams({ appId, scope, openId, entryId: row.id, image: String(index) });
             return h(MessageImage, { key: index, url: `${WORKBENCH_TIMELINE_PATH}?${query}`, number: index + 1 });
           })) : null,
-        remaining > 0 ? h('div', { className: 'imqw-muted' }, row.attachmentName ? `附件 · ${row.attachmentName}` : `附件 · ${remaining} 项`) : null),
+        remaining > 0 ? h('div', { className: 'imqw-muted' }, row.attachmentName ? t("附件 · {0}", row.attachmentName) : t("附件 · {0} 项", remaining)) : null),
         h(Menu, {
           open: menuOpen, items: actions, portal: true, align: outbound ? 'end' : 'start', compact: true, autoFocus: true,
           onClose: () => setMenuOpen(false),
@@ -314,20 +325,20 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
             if (id === 'details') setDetailsOpen(value => !value);
           },
           anchor: h(Button, { ref: menuButton, type: 'button', size: 'sm', variant: 'ghost', className: 'imqw-message-action',
-            'aria-label': `${sender}的消息操作`, title: '消息操作', 'aria-haspopup': 'menu', 'aria-expanded': menuOpen,
+            'aria-label': t("{0}的消息操作", sender), title: t("消息操作"), 'aria-haspopup': 'menu', 'aria-expanded': menuOpen,
             onClick: () => setMenuOpen(open => !open),
           }, h(IconEllipsisOutlineRegular, { size: 14 })),
         }),
       ),
       showStatus || submissionFailed ? h('div', { className: 'imqw-timeline-meta' },
-        h('span', { 'data-status': submissionFailed ? 'rejected' : row.status }, submissionFailed ? detail : statusLabel[row.status]),
+        h('span', { 'data-status': submissionFailed ? 'rejected' : row.status }, submissionFailed ? detail : statusLabel(row.status)),
         pendingReceipt ? h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: checking,
-          onClick: () => { void queryReceipt(); } }, checking ? '查询中…' : '查询回执') : null,
+          onClick: () => { void queryReceipt(); } }, checking ? t("查询中…") : t("查询回执")) : null,
       ) : null,
-      detailsOpen ? h('div', { className: 'imqw-response-detail', role: 'region', 'aria-label': '响应详情' },
+      detailsOpen ? h('div', { className: 'imqw-response-detail', role: 'region', 'aria-label': t("响应详情") },
         outbound
-          ? h('p', null, row.source ? `来源 · ${sourceLabel[row.source]}` : '来源未记录',
-            h('br'), statusLabel[row.status], errorCode ? ` · ${errorCode}` : '')
+          ? h('p', null, row.source ? t("来源 · {0}", sourceLabel(row.source)) : t("来源未记录"),
+            h('br'), statusLabel(row.status), errorCode ? ` · ${errorCode}` : '')
           : h('p', null, detail),
       ) : null,
       receiptNote ? h('p', { className: 'imqw-response-detail', role: 'status' }, receiptNote) : null,
@@ -337,7 +348,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
 
 function MessageImage({ url, number }: { url: string; number: number }): ReactNode {
   const [unavailable, setUnavailable] = useState(false);
-  if (unavailable) return h('span', { className: 'imqw-muted' }, '图片已过期或无法预览');
-  return h('a', { className: 'imqw-message-image', href: url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `打开原图 ${number}` },
-    h('img', { src: url, alt: `QQ 图片 ${number}`, loading: 'lazy', decoding: 'async', onError: () => setUnavailable(true) }));
+  if (unavailable) return h('span', { className: 'imqw-muted' }, t("图片已过期或无法预览"));
+  return h('a', { className: 'imqw-message-image', href: url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': t("打开原图 {0}", number) },
+    h('img', { src: url, alt: t("QQ 图片 {0}", number), loading: 'lazy', decoding: 'async', onError: () => setUnavailable(true) }));
 }

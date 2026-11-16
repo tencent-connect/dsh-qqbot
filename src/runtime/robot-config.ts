@@ -83,7 +83,7 @@ export function robotAccessPatch(input: unknown): Partial<AccessControlConfig> {
 
 function parseAccess(input: unknown): AccessControlConfig {
   const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = robotAccessPatch(input);
-  if (!c2cMode || !groupMode || !commandMode || !c2cAllow || !groupAllow) throw new Error('机器人访问配置不完整。');
+  if (!c2cMode || !groupMode || !c2cAllow || !groupAllow) throw new Error('机器人访问配置不完整。');
   return { c2cMode, groupMode, commandMode, c2cAllow, groupAllow };
 }
 
@@ -194,14 +194,12 @@ export class RobotConfigStore {
     if (!rebind && (record.revision !== (current?.revision ?? 0) || (current && current.kind !== record.kind))) {
       throw new RobotConfigConflictError();
     }
-    const access = record.kind === 'additional' ? { ...record.access, commandMode: record.access.commandMode ?? 'open' } : undefined;
     const revision = record.revision === 0 ? lastRevision + 1 : record.revision + 1;
     const bindingRevision = rebind ? revision
       : current ? current.bindingRevision ?? current.revision
       : record.kind === 'primary' ? 0 : revision;
     const next = parseRecord({
       ...record,
-      ...(access ? { access } : {}),
       revision,
       bindingRevision: bindingRevision === revision ? undefined : bindingRevision,
     });

@@ -10,6 +10,8 @@
  * 仅保留外部插件所需的最小集。
  */
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { transform } from 'lightningcss';
 import { defineConfig } from 'tsdown';
 
 /** 浏览器模块 id：从 package.json 的 name 动态读取。
@@ -33,6 +35,25 @@ const BASELINE_EXTERNALS = [
 const isBaseline = (specifier: string): boolean =>
   BASELINE_EXTERNALS.some((name) => specifier === name || specifier.startsWith(`${name}/`));
 
+const cssModulePrefix = '\\0qqbot-css:';
+
+const cssModules = {
+  name: 'qqbot-css-modules',
+  resolveId: {
+    order: 'pre' as const,
+    handler(source: string, importer?: string) {
+      if (importer && source.endsWith('.module.css')) return cssModulePrefix + resolve(dirname(importer), source) + '.js';
+    },
+  },
+  load(id: string) {
+    if (!id.startsWith(cssModulePrefix)) return undefined;
+    const path = id.slice(cssModulePrefix.length, -3);
+    const result = transform({ filename: path, code: readFileSync(path), cssModules: true, minify: true });
+    const classes = Object.fromEntries(Object.entries(result.exports ?? {}).map(([key, value]) => [key, value.name]));
+    return 'export const sheet = ' + JSON.stringify(result.code.toString()) + '; export default ' + JSON.stringify(classes);
+  },
+};
+
 function clientConfig(id: string, entry: string, outDir: string) {
   return defineConfig({
     name: `${id}/client`,
@@ -44,6 +65,7 @@ function clientConfig(id: string, entry: string, outDir: string) {
     dts: false,
     clean: false,
     sourcemap: true,
+    plugins: [cssModules],
     deps: {
       // 平台种子表内的说明符保持外部引用（经注入 require 解析）
       neverBundle: isBaseline,

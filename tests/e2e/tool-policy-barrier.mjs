@@ -1,8 +1,19 @@
 // Isolated Host fixture. Pause after the real tools.guard stage, before write's body.
+import https from 'node:https';
+
 export const name = 'qqbot-tool-policy-barrier';
 export const inject = ['agents', 'connection', 'permissionPresets'];
 
 export function apply(ctx) {
+  // Unbinding reopens the scanner. Keep the fixture off the real QR service.
+  const request = https.request;
+  https.request = (options, ...args) => {
+    if (options?.hostname === 'q.qq.com' || options?.host === 'q.qq.com') {
+      throw new Error('The isolated fixture does not start real QQ pairing.');
+    }
+    return request(options, ...args);
+  };
+  ctx.effect(() => () => { https.request = request; });
   const gates = new Map();
   const children = new Map();
   ctx.on('agent/created', ({ agent }) => {

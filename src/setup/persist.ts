@@ -25,7 +25,7 @@ export class AccessConfigConflict extends Error {
 
 export function accessRevision(access: AccessControlConfig, appId = ''): string {
   return createHash('sha256').update(JSON.stringify([
-    appId, access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? 'open',
+    appId, access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? null,
   ])).digest('hex');
 }
 

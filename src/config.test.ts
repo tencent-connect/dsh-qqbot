@@ -5,20 +5,20 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
   it('完全省略 access → c2cMode open（子 schema 默认生效）', () => {
     const cfg = ConfigSchema({});
     expect(cfg.access.c2cMode).toBe('open');
-    expect(cfg.access.commandMode).toBe('open');
+    expect(cfg.access.commandMode).toBeUndefined();
     expect(cfg.access.groupMode).toBe('open');
   });
 
   it('access: {} → 子字段默认填充 open', () => {
     const cfg = ConfigSchema({ access: {} });
     expect(cfg.access.c2cMode).toBe('open');
-    expect(cfg.access.commandMode).toBe('open');
+    expect(cfg.access.commandMode).toBeUndefined();
   });
 
   it('access 空值（YAML access: 后无内容）→ open', () => {
     const cfg = ConfigSchema({ access: null });
     expect(cfg.access.c2cMode).toBe('open');
-    expect(cfg.access.commandMode).toBe('open');
+    expect(cfg.access.commandMode).toBeUndefined();
   });
 
   it('显式配置不受默认影响', () => {
@@ -37,9 +37,9 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
   });
 
   it.each([
-    [{}, 'c2c'],
-    [{ proactiveDelivery: {} }, 'c2c'],
-    [{ proactiveDelivery: null }, 'c2c'],
+    [{}, 'all'],
+    [{ proactiveDelivery: {} }, 'all'],
+    [{ proactiveDelivery: null }, 'all'],
     [{ proactiveDelivery: { externalTurns: 'off' } }, 'off'],
     [{ proactiveDelivery: { externalTurns: 'all' } }, 'all'],
   ])('proactiveDelivery.externalTurns：%j → %s', (input, expected) => {

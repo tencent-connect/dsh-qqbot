@@ -58,7 +58,7 @@ function setup(opts?: {
     findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
   } as unknown as SessionManager;
   const outbound = createOutboundHandler(
-    manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer,
+    manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer, undefined, async () => true,
   );
   return { outbound, bot, session };
 }
@@ -142,17 +142,20 @@ describe('OutboundRouter.routeStreamFrame', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it('群聊不流式：帧累积后由 assistant/message 静态发送', async () => {
+  it('群聊在轮末发送完整答复', async () => {
     const { outbound, bot } = setup({ record: createRecord(groupTarget) });
 
     outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, { type: 'turn/start', data: { turn: 1 } });
     outbound.routeStreamFrame('sess-qq', delta('a1', 'group reply'));
     await vi.advanceTimersByTimeAsync(200);
 
     outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
       type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'group reply' }] } },
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'group reply' }] } },
     });
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(bot.openStream).not.toHaveBeenCalled();
@@ -488,18 +491,20 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
     } as unknown as SessionManager;
     const config = createConfig(externalTurns ? { proactiveDelivery: { externalTurns } } : undefined);
-    const outbound = createOutboundHandler(manager, bot, config, createLogger());
+    const outbound = createOutboundHandler(manager, bot, config, createLogger(), undefined, undefined, undefined, async () => true);
 
     outbound.routeSessionEvent(sid, { type: 'turn/start', data: { turn: 7 } });
     outbound.routeSessionEvent(sid, externalInput);
     outbound.routeSessionEvent(sid, reply('from desktop'));
+    outbound.routeSessionEvent(sid, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } });
     await vi.advanceTimersByTimeAsync(0);
     return bot;
   }
 
   it.each([
-    ['c2c 默认策略：私聊外部回合主动推送', c2cTarget, undefined, true],
-    ['c2c 默认策略：群聊外部回合不推送', groupTarget, undefined, false],
+    ['默认策略：私聊外部回合主动推送', c2cTarget, undefined, true],
+    ['默认策略：群聊外部回合主动推送', groupTarget, undefined, true],
+    ['c2c：群聊外部回合不推送', groupTarget, 'c2c' as const, false],
     ['all：群聊外部回合也推送', groupTarget, 'all' as const, true],
     ['off：私聊外部回合不推送', c2cTarget, 'off' as const, false],
   ])('%s', async (_name, target, policy, delivered) => {

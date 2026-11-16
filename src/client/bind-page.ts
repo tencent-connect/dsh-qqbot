@@ -28,20 +28,10 @@ import { fetchJson } from './http.ts';
 const ACTIVE_POLL_MS = 2000;
 const RETRY_POLL_MS = 3000;
 
-/** 样式注入标记（幂等） */
-const STYLE_ID = 'im-qqbot-bind-panel-styles';
-
-/**
- * 注入面板样式（全局一次，幂等）。交互态（hover/active/focus）无法用 inline
- * style 表达，统一收敛到类；DSW 主题变量缺失时用中性值兜底。
- * 插件激活时即安装：插件详情按钮渲染在面板之外，需提前可见；
- * 安装后不再随挂载移除，避免多个展示位互相清掉样式。
- */
-export function installPanelStyles(): void {
-  if (typeof document === 'undefined') return;
-  if (document.getElementById(STYLE_ID) !== null) return;
+export function installPanelStyles(): () => void {
+  if (typeof document === 'undefined') return () => {};
   const style = document.createElement('style');
-  style.id = STYLE_ID;
+  style.dataset.qqbotCss = 'binding';
   style.textContent = `
 .imqb-panel {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -106,11 +96,9 @@ export function installPanelStyles(): void {
 .imqb-cardTitle { margin: 14px 0 4px; font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .imqb-cardHint { margin: 0 0 8px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary); }`;
   document.head.appendChild(style);
+  return () => style.remove();
 }
 
-function usePanelStyles(): void {
-  useEffect(() => { installPanelStyles(); }, []);
-}
 
 /**
  * 绑定状态轮询 hook。
@@ -441,7 +429,6 @@ interface BindPanelBodyProps {
 }
 
 export function BindPanelBody(props: BindPanelBodyProps = {}): ReactNode {
-  usePanelStyles();
   const injected = props.state !== undefined;
   const internal = useBindState(!injected);
   const state = injected ? (props.state ?? null) : internal.state;

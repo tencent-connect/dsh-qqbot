@@ -158,6 +158,7 @@ it('projects only the selected robot and hides reserved Session IDs until the Ho
     const group = conversations.find(c => c.scope === 'group');
     expect(c2c).toEqual({
       scope: 'c2c', openId: 'same', name: '', alias: '', receiving: true, recording: true, retention: '7d', admitted: true, revision: 0,
+      sessionCount: 2,
       sessions: [{ id: 'old-a', createdAt: 5, cwd: '/test/workspace', preset: 'test-preset' }],
     });
     expect(group).toMatchObject({ currentSessionId: 'group-a', admitted: false });

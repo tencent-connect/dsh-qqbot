@@ -199,6 +199,7 @@ function retentionValue(value: unknown): MessageRetention {
 interface ConversationAccount {
   access: AccessControlConfig;
   mediaRoot?: string;
+  executionBlocked?(scope: ChatScope, openId: string): string | undefined;
   agentSettings?(scope: ChatScope, openId: string, existing: boolean): WorkbenchAgentSettings;
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
@@ -227,6 +228,7 @@ async function projectConversations(
   appId: string,
   persistence?: SessionPersistence,
   target?: Pick<WorkbenchConversation, 'scope' | 'openId'>,
+  summary = false,
 ): Promise<WorkbenchConversation[]> {
   const account = robots.conversationAccount(appId);
   if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
@@ -258,22 +260,29 @@ async function projectConversations(
       const current = account.liveSessionId(scope, openId) ?? binding?.current ?? robots.prefs.legacySessionId(key);
       const ids = new Set(binding?.history ?? []);
       if (current !== undefined) ids.add(current);
+      const sessionCount = ids.size;
       const sessions: WorkbenchSession[] = [];
+      if (summary) ids.clear();
+      if (summary && current !== undefined) ids.add(current);
       for (const id of ids) {
         const session = await readSession(id);
         if (session) sessions.push(session);
       }
       sessions.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
       const settings = robots.conversationSettings.get(key);
-      const agent = account.agentSettings?.(scope, openId, sessions.length > 0);
+      const historyCount = binding?.history.length ?? 0;
+      const established = sessions.length > 0 || (summary && historyCount > 0);
+      const agent = account.agentSettings?.(scope, openId, established);
       return {
         scope, openId, name: account.peerName(scope, openId),
         ...settings, recording: settings.retention !== 'paused', agent,
-        ...(!settings.agent && agent && sessions.length === 0
+        ...(!settings.agent && agent && !established
           ? { defaultsRevision: robots.conversationSettings.template(appId)?.revision ?? 0 } : {}),
         admitted: allowsConversation(account.access, scope, openId),
+        executionBlocked: account.executionBlocked?.(scope, openId),
         currentSessionId: sessions.some(session => session.id === current) ? current : undefined,
         sessions,
+        sessionCount,
       };
     })));
   }
@@ -432,16 +441,24 @@ export function registerWorkbenchConversations(
   registerWorkbenchFetch(ctx, WORKBENCH_CONVERSATIONS_PATH, ['GET', 'POST'], async (request, assertWritable) => {
     const persistence = getPersistence(ctx);
     if (request.method === 'GET') {
+      const query = new URL(request.url).searchParams;
+      const scope = query.get('scope');
+      const openId = query.get('openId');
       let appId: string;
+      let target: { scope: ChatScope; openId: string } | undefined;
       try {
-        const ids = new URL(request.url).searchParams.getAll('appId');
+        const ids = query.getAll('appId');
         if (ids.length !== 1) throw new Error();
         appId = robotAppId(ids[0]);
+        if (scope !== null || openId !== null) {
+          if ((scope !== 'group' && scope !== 'c2c') || !validOpenId(openId)) throw new Error();
+          target = { scope, openId };
+        }
       } catch {
-        return workbenchJson({ error: '请指定一个有效的 AppID。' }, 400);
+        return workbenchJson({ error: '请指定一个有效的 AppID 和会话。' }, 400);
       }
       try {
-        return workbenchJson({ conversations: await projectConversations(robots, appId, persistence) });
+        return workbenchJson({ conversations: await projectConversations(robots, appId, persistence, target, !target && query.get('summary') === '1') });
       } catch (error) {
         if (!(error instanceof WorkbenchRequestError)) logger.warn('QQ 工作台无法读取会话或宿主持久化。');
         throw error;

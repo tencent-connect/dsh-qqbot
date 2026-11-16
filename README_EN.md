@@ -47,6 +47,8 @@ No command line needed — everything happens inside the app:
 
 Credentials are saved automatically after the scan; later launches need no re-scan.
 
+The main package installs the matching QQ Message History component. You can turn off its UI under **Plugins → QQ Bot → Included components**. The bot continues to record messages according to the conversation's retention setting.
+
 ### Method 2: Manual
 
 ```bash
@@ -86,6 +88,26 @@ npx @deepseek-ai/dsh --profile qqbot
 export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
+
+### Upgrade from the official 0.5.5 release
+
+Stop the Host and back up the profile's `cordis.patch.yml` and `~/.dsh-qqbot/model-prefs.json`. Install the new version in the same profile and start it again. QQBot reuses the binding and access lists and imports model, preset, and current Session preferences for that AppID. It checks Session IDs against the Host's configured storage. Existing Sessions and their working directories remain accessible from DSH.
+
+With **Use legacy authorization**, the previous private-chat allowlist still controls who can use `/model` and `/preset`, including in admitted groups. Choose and save a different slash command mode to change that rule.
+
+QQBot stores settings, history, and delivery state in `qqbot-state/` under the profile by default. Set `QQBOT_DATA_DIR` to an absolute path to choose a separate directory. If another Host owns the same directory, stop it or choose a separate profile and directory.
+
+To roll back, stop the Host, reinstall `@tencent-connect/dsh-qqbot@0.5.5`, restore the backed-up profile configuration, and restart. Version 0.5.5 can still read its original preferences file.
+
+### Host capabilities
+
+| Tested Host | QQ messaging | Workbench and history | Custom tools in standard and PTC modes |
+| --- | --- | --- | --- |
+| Official `0.1.0-rc.8` with its release's Cordis dependencies | Supported | Requires the Host Fetch and UI interfaces | Upgrade needed |
+| Official `0.2.2-rc.3` | Supported | Supported | Upgrade needed |
+| Host with reversible scoped executors and dispatch guards | Supported | Supported | Supported |
+
+When the Host lacks the required tool interfaces, the workbench shows why affected QQ conversations are paused. Switch the conversation to native tools or upgrade the Host to resume it.
 
 ## Configuration
 
@@ -149,7 +171,9 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 
 | Config | Type | Default | Description |
 |------|------|--------|------|
-| `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` never push; `c2c` push direct chats only; `all` push direct and group chats |
+| `proactiveDelivery.externalTurns` | `off` / `c2c` / `all` | `all` | Controls automatic delivery of Web replies and answers to agent questions. Choose off, direct chats only, or direct and group chats. |
+
+Groups receive the final answer once the turn is saved, or one short notice if the turn fails. Web input mixed into a QQ turn stops further automatic delivery. Editing, deleting, or re-queuing a QQ input revokes its delivery receipt. If a manual send has an unknown result, check QQ before sending again.
 
 ### Rich media (media)
 

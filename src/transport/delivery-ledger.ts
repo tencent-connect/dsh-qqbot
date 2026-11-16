@@ -16,6 +16,7 @@ export interface InputReceipt {
   target: ReplyTarget;
   contentHash: string;
   turn?: number;
+  discarded?: true;
 }
 
 export type DeliveryState = 'sending' | 'accepted' | 'unknown' | 'not-sent';
@@ -29,25 +30,38 @@ interface DeliveryReceipt {
 }
 type Receipt = InputReceipt | DeliveryReceipt;
 
-/** Only identities and submission states are retained here; this is not a chat log.
- * Synchronous refresh/write fences stale instances within one Host. Sharing the
- * directory between independent processes remains unsupported.
- */
+/** The profile's data lease covers the journal. Instances refresh before
+ * reserving and recording a submission so overlapping callbacks see its state. */
 export class DeliveryLedger {
   private receipts = new Map<string, Receipt>();
   private signature: string | undefined;
   private initialized = false;
+  private closed = false;
 
   constructor(private readonly file?: string) { this.refresh(); }
 
+  close(): void { this.closed = true; }
+
   hasInput(key: string): boolean { this.refresh(); return this.receipts.get(key)?.kind === 'input'; }
+
+  discardInput(sessionId: string, messageId: string): void {
+    if (this.closed) return;
+    this.refresh();
+    const receipt = this.inputByMessageId(messageId);
+    if (receipt?.sessionId === sessionId && !receipt.discarded) this.put({ ...receipt, discarded: true });
+  }
+
+  private inputByMessageId(messageId: string): InputReceipt | undefined {
+    return [...this.receipts.values()].find((entry): entry is InputReceipt => entry.kind === 'input' && entry.messageId === messageId);
+  }
 
   knowsInput(messageId: string): boolean {
     this.refresh();
-    return [...this.receipts.values()].some(r => r.kind === 'input' && r.messageId === messageId);
+    return this.inputByMessageId(messageId) !== undefined;
   }
 
   registerInput(input: Omit<InputReceipt, 'kind'>): boolean {
+    if (this.closed) return false;
     this.refresh();
     if (this.receipts.has(input.key)) return false;
     this.put({ ...input, target: { ...input.target }, kind: 'input' });
@@ -57,18 +71,21 @@ export class DeliveryLedger {
   claimInput(messageId: string, sessionId: string, content: unknown, turn: number,
     peer: Pick<ReplyTarget, 'scope' | 'targetId'>,
   ): InputReceipt | undefined {
+    if (this.closed) return undefined;
     this.refresh();
-    const input = [...this.receipts.values()].find((r): r is InputReceipt => r.kind === 'input' && r.messageId === messageId);
-    if (!input || input.sessionId !== sessionId || input.contentHash !== deliveryKey(content)) return undefined;
+    const input = this.inputByMessageId(messageId);
+    if (!input || input.discarded || input.sessionId !== sessionId || input.contentHash !== deliveryKey(content)) return undefined;
     if (input.target.scope !== peer.scope || input.target.targetId !== peer.targetId) return undefined;
     if (input.turn !== undefined && input.turn !== turn) return undefined;
     if (input.turn === undefined) this.put({ ...input, turn });
     return input;
   }
 
-  begin(key: string, fingerprint?: string): boolean {
+  begin(key: string, fingerprint?: string, retryNotSent = false): boolean {
+    if (this.closed) return false;
     this.refresh();
-    if (this.receipts.has(key)) return false;
+    const prior = this.receipts.get(key);
+    if (prior && !(retryNotSent && prior.kind === 'delivery' && prior.state === 'not-sent' && prior.fingerprint === fingerprint)) return false;
     this.put({ kind: 'delivery', key, state: 'sending', fingerprint });
     return true;
   }
@@ -84,6 +101,7 @@ export class DeliveryLedger {
   }
 
   settle(key: string, state: Exclude<DeliveryState, 'sending'>, detail?: Pick<DeliveryReceipt, 'httpStatus' | 'platformCode'>): void {
+    if (this.closed) return;
     const previous = this.delivery(key);
     this.put({ ...previous, kind: 'delivery', key, state, ...detail });
   }
@@ -173,6 +191,7 @@ function isReceipt(raw: unknown): raw is Receipt {
   if (!('kind' in raw) || raw.kind !== 'input') return false;
   if (!('messageId' in raw) || typeof raw.messageId !== 'string' || !('sessionId' in raw) || typeof raw.sessionId !== 'string'
     || !('senderId' in raw) || typeof raw.senderId !== 'string' || !('contentHash' in raw) || typeof raw.contentHash !== 'string') return false;
+  if ('discarded' in raw && raw.discarded !== true) return false;
   if ('turn' in raw && (typeof raw.turn !== 'number' || !Number.isSafeInteger(raw.turn))) return false;
   if (!('target' in raw) || !raw.target || typeof raw.target !== 'object') return false;
   return 'scope' in raw.target && (raw.target.scope === 'c2c' || raw.target.scope === 'group')

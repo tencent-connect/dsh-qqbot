@@ -47,6 +47,7 @@ export interface HostAdapter {
 
 /** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
 export interface SessionHeaderLike {
+  id?: string;
   agentPreset?: string;
   cwd?: string;
 }
@@ -71,7 +72,8 @@ export interface WorkspaceRegistryLike {
  * `list`（全量扫描）。
  */
 interface SessionPersistenceLike {
-  stat(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+  stat?(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+  list?(): Promise<readonly SessionHeaderLike[]>;
 }
 
 /**
@@ -80,9 +82,23 @@ interface SessionPersistenceLike {
  * 宿主服务是版本漂移点，必须探测方法是否存在再调用：直接调用缺失的方法会抛
  * `TypeError`，与「后端故障」混在一起，让调用方误以为求证过了。
  */
-function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
+function sessionPersistence(ctx: Context): SessionPersistenceLike | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
-  return typeof persistence?.stat === 'function' ? persistence : undefined;
+  return typeof persistence?.stat === 'function' || typeof persistence?.list === 'function' ? persistence : undefined;
+}
+
+async function readSessionHeader(persistence: SessionPersistenceLike, id: string): Promise<SessionHeaderLike | undefined> {
+  return persistence.stat ? (await persistence.stat(id))?.header
+    : (await persistence.list?.())?.find(header => header.id === id);
+}
+
+/** Older Hosts expose only a metadata list. Take it once for the upgrade. */
+export async function sessionIdentityReader(ctx: Context): Promise<((id: string) => Promise<boolean>) | undefined> {
+  const persistence = sessionPersistence(ctx);
+  if (!persistence) return undefined;
+  if (persistence.stat) return async id => (await readSessionHeader(persistence, id))?.id === id;
+  const ids = new Set((await persistence.list?.())?.map(header => header.id));
+  return async id => ids.has(id);
 }
 
 /** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
@@ -118,9 +134,9 @@ export function createHostAdapter(
   capabilities.push('sessionEvents(s自适应)');
 
   // 可能在插件启动后才注册，sessionExists/sessionHeader 内每次重新探测；此处仅记录启动时形态
-  capabilities.push(statCapablePersistence(ctx)
-    ? 'sessionPersistence.stat(可用)'
-    : 'sessionPersistence.stat(不可用，会话存在性判定降级)');
+  const persistence = sessionPersistence(ctx);
+  capabilities.push(persistence?.stat ? 'sessionPersistence.stat'
+    : persistence?.list ? 'sessionPersistence.list' : 'sessionPersistence(unavailable)');
   capabilities.push(workspaceRegistry(ctx)
     ? 'workspaceRegistry.create(可用)'
     : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
@@ -169,19 +185,20 @@ export function createHostAdapter(
     },
 
     async sessionHeader(sessionId) {
-      const persistence = statCapablePersistence(ctx);
+      const persistence = sessionPersistence(ctx);
       if (!persistence) return undefined;
       try {
-        return (await persistence.stat(sessionId))?.header;
+        return await readSessionHeader(persistence, sessionId);
       } catch {
         return undefined; // 读不到 preset 不该阻断会话打开，回落到当前 effective preset
       }
     },
 
     async sessionExists(sessionId) {
-      const persistence = statCapablePersistence(ctx);
+      const persistence = sessionPersistence(ctx);
       if (!persistence) return undefined;
-      return (await persistence.stat(sessionId)) !== undefined;
+      return persistence.stat ? (await persistence.stat(sessionId)) !== undefined
+        : (await readSessionHeader(persistence, sessionId)) !== undefined;
     },
 
     async attachSessionToWorkspace(sessionId, cwd) {

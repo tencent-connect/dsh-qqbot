@@ -1,4 +1,4 @@
-import { commandAccessError } from '../commands/auth.ts';
+import { commandAccessError, usesLegacyCommandWhitelist } from '../commands/auth.ts';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { MemberStore } from './member-store.ts';
@@ -38,13 +38,13 @@ export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
   private readonly accessBackend?: AccountAccessDeps['access'];
-  constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}) {
+  constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}, dataDir = PLUGIN_HOME) {
     this.accessBackend = deps.access;
     this.pairing = deps.pairing ?? new PairingService({
-      stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
+      stateFile: join(dataDir, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
       random: deps.random ?? secureRandom,
     });
-    this.store = deps.store ?? new MemberStore(PLUGIN_HOME, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
+    this.store = deps.store ?? new MemberStore(dataDir, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
   }
   // ── 配对码认领（Web 生成码 / QQ 核销） ──────────────────────────────
   /** Web：为一种名单生成限时配对批次，替换时旧码失效。 */
@@ -227,8 +227,12 @@ export class AccountAccessService {
   allowsConversation(scope: ChatScope, openid: string): boolean {
     return allowsConversation(this.currentAccess(), scope, openid);
   }
-  commandAccessError(actor?: string): string | undefined {
-    const mode = this.currentAccess().commandMode;
+  commandAccessError(actor?: string, command?: string): string | undefined {
+    const access = this.currentAccess();
+    const mode = access.commandMode;
+    if (mode === undefined && access.c2cMode === 'allowlist' && usesLegacyCommandWhitelist(command)) {
+      return commandAccessError('allowlist', actor, actor !== undefined && access.c2cAllow.includes(actor));
+    }
     return commandAccessError(mode, actor, mode === 'allowlist' && this.isOwner(actor));
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }

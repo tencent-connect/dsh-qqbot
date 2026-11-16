@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
-import { DUMMY_APP_ID } from './command-protocol.mjs';
+import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
 
 const workbench = '/api/qqbot/workbench/';
 const directId = 'local-fixture-allowed-user';
@@ -358,8 +358,8 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
     conversationPath: true, latestPreview: true, storedOnlyPath: true, missingPreview: true };
 }
 
-async function verifyRetention(page, client, until, { older, recent, pausedId, timelineOnlyId, file, startupExpiryFile }) {
-  const startup = await readFile(startupExpiryFile, 'utf8');
+async function verifyRetention(page, client, until, { older, recent, pausedId, timelineOnlyId, storedMessages, timedId }) {
+  const startup = storedMessages(timedId);
   assert(!startup.includes('QQ_EXPIRE_WITHOUT_OPENING'));
   assert(startup.includes('QQ_KEEP_ON_STARTUP'));
   const query = new URLSearchParams({ appId: DUMMY_APP_ID });
@@ -394,20 +394,20 @@ async function verifyRetention(page, client, until, { older, recent, pausedId, t
   await shorten.getByText(/超过 30 天/).waitFor();
   await button(shorten, '取消').click();
   assert.equal((await current()).retention, 'forever');
-  assert((await readFile(file, 'utf8')).includes(older));
+  assert(storedMessages(directId).includes(older));
   await save();
   await button(shorten, '确认缩短并保存').click();
   await until(async () => (await current()).retention === '30d', '30-day policy');
   await history.getByText(older, { exact: true }).waitFor({ state: 'hidden' });
   await history.getByText(recent, { exact: true }).waitFor();
-  assert(!(await readFile(file, 'utf8')).includes(older));
+  assert(!storedMessages(directId).includes(older));
 
   await choose('保留最近 7 天');
   await save();
   await button(shorten, '确认缩短并保存').click();
   await until(async () => (await current()).retention === '7d', '7-day policy');
   await history.getByText(recent, { exact: true }).waitFor({ state: 'hidden' });
-  assert(!(await readFile(file, 'utf8')).includes(recent));
+  assert(!storedMessages(directId).includes(recent));
 
   await choose('暂停记录');
   await save();
@@ -423,10 +423,50 @@ async function verifyRetention(page, client, until, { older, recent, pausedId, t
   await button(clear, '确认清空').click();
   await history.getByText('还没有已保存的 QQ 消息。', { exact: true }).waitFor();
   assert.deepEqual(await entries(), []);
-  assert.equal(await readFile(file, 'utf8'), '');
+  assert.deepEqual(storedMessages(directId), []);
   assert.deepEqual(await readOther(), otherBefore);
   assert.deepEqual((await current()).sessions, original.sessions);
   return { newDefault: true, legacyPolicies: true, startupExpiry: true, physicalExpiry: true, canceledDeletion: true, clearOneTimeline: true };
+}
+
+async function verifyBotIdentityAndLanguage(page, client) {
+  await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
+  await page.evaluate(() => { document.documentElement.lang = 'en'; });
+  await page.getByRole('complementary', { name: 'QQ conversation list' }).waitFor();
+  await button(page, 'Refresh conversation list').waitFor();
+  await page.evaluate(() => { document.documentElement.lang = 'zh-CN'; });
+  await button(page, '刷新会话列表').waitFor();
+
+  const getRobots = () => client.get(workbench + 'robots');
+  const { robots: [primary] } = await getRobots();
+  const other = '0000000001';
+  const alias = '同名测试机器人';
+  await client.post(workbench + 'robots', { appId: DUMMY_APP_ID, revision: primary.revision, alias });
+  await client.post(workbench + 'robots', { appId: other, revision: null, appSecret: DUMMY_SECRET, enabled: false, alias });
+  const firstRow = page.locator('.imqr-row').filter({ hasText: DUMMY_APP_ID });
+  const secondRow = page.locator('.imqr-row').filter({ hasText: other });
+  for (const row of [firstRow, secondRow]) await row.getByText(alias, { exact: true }).waitFor();
+  await button(secondRow, '解绑' + alias).click();
+  const confirmation = page.getByRole('dialog', { name: '解绑「' + alias + '」？' });
+  await confirmation.getByText('AppID ' + other, { exact: true }).waitFor();
+  assert.equal(await confirmation.getByText('AppID ' + DUMMY_APP_ID, { exact: true }).count(), 0);
+  await button(confirmation, '取消').click();
+  return { bilingualControls: true, identifiesSameNameBots: true, unbindTargetAppId: true };
+}
+
+async function verifyMessagePagination(page) {
+  await page.locator('.imqw-peer-select').filter({ hasText: 'messages' }).click();
+  const region = page.getByRole('region', { name: 'QQ 消息', exact: true });
+  await region.getByText('QQ_PAGE_105', { exact: true }).waitFor();
+  const load = button(region, '加载更早消息');
+  assert.equal(await region.getByText('QQ_PAGE_65', { exact: true }).count(), 0);
+  await load.click();
+  await region.getByText('QQ_PAGE_65', { exact: true }).waitFor();
+  assert.equal(await region.getByText('QQ_PAGE_25', { exact: true }).count(), 0);
+  await load.click();
+  await region.getByText('QQ_PAGE_1', { exact: true }).waitFor();
+  assert.equal(await region.getByText('QQ_PAGE_105', { exact: true }).count(), 1);
+  return true;
 }
 
 export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, client, qq, dir, until, prompt, historyFixture }) {
@@ -457,7 +497,9 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     const toolPicker = await verifyToolPicker(page, client, until);
     const promptPaths = await verifyPromptPaths(page, client, until, prompt);
     const retention = await verifyRetention(page, client, until, historyFixture);
-    return { messages, toolPicker, promptPaths, retention };
+    const pagination = await verifyMessagePagination(page);
+    const identity = await verifyBotIdentityAndLanguage(page, client);
+    return { messages, toolPicker, promptPaths, retention, pagination, identity };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));

@@ -1,3 +1,4 @@
+import { t } from './qq-locale.ts';
 /**
  * 配对码认领 UI —— 有效期内连续添加，在窗口内展示本次结果。
  *
@@ -41,7 +42,7 @@ function usePairStatus(active: boolean, path: string) {
         setError(null);
       }).catch((cause: unknown) => {
         if (!current()) return;
-        setError(cause instanceof Error ? cause.message : '读取认领状态失败');
+        setError(cause instanceof Error ? cause.message : t("读取认领状态失败"));
       });
     };
     load();
@@ -75,13 +76,13 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     catch { /* 剪贴板不可用时静默：码本身可见可手抄 */ }
   }, []);
 
-  const copyOpenIds = async (value: string, message = 'OpenID 已复制。'): Promise<void> => {
+  const copyOpenIds = async (value: string, message = t("OpenID 已复制。")): Promise<void> => {
     try {
-      if (!globalThis.navigator?.clipboard?.writeText) throw new Error('剪贴板不可用，请选择 OpenID 手动复制。');
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error(t("剪贴板不可用，请选择 OpenID 手动复制。"));
       await globalThis.navigator.clipboard.writeText(value);
       setMsg(message);
     } catch (error) {
-      setMsg(error instanceof Error ? error.message : '复制失败，请选择 OpenID 手动复制。');
+      setMsg(error instanceof Error ? error.message : t("复制失败，请选择 OpenID 手动复制。"));
     }
   };
 
@@ -97,15 +98,15 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       codeSeen.current = false;
       const expired = Date.now() > code.expiresAt;
       setCodeEnded(true);
-      if (expired) { setMsg('配对码已过期，请重新生成'); }
-      else { setMsg('配对码已结束，请核对名单；未加入时请重新生成。'); onChange?.(); }
+      if (expired) { setMsg(t("配对码已过期，请重新生成")); }
+      else { setMsg(t("配对码已结束，请核对名单；未加入时请重新生成。")); onChange?.(); }
     }
   }, [status, code, windowCodes, onChange]);
 
   // 所有 hooks 之后再按绑定态短路，避免 hook 数量不一致（React #310）。
   if (!enabled) return h('div', { className: 'imqq-pair' },
     h('div', { className: 'imqq-pairHeader' }, h('div', { className: 'imqq-pairTitle' }, h('strong', null, title))),
-    h('p', { className: 'imqq-pairHint' }, '先完成 QQ 机器人绑定，才能配置认领。'));
+    h('p', { className: 'imqq-pairHint' }, t("先完成 QQ 机器人绑定，才能配置认领。")));
 
   const issue = (): void => {
     if (busy || !canPair) return;
@@ -116,7 +117,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
         setCode({ code: r.code, expiresAt: r.expiresAt }); setCodeEnded(false); codeSeen.current = false;
         setWindowCodes(previous => [...previous, r.code]); reload();
       })
-      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '生成配对码失败'))
+      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : t("生成配对码失败")))
       .finally(() => setBusy(false));
   };
   const revoke = (openid: string): void => {
@@ -125,10 +126,10 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     void fetchJson<PairStatusWire>(endpoint(PAIR_REVOKE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
       .then((snapshot) => {
         applyStatus(snapshot);
-        setMsg(`已从${title}移除。`);
+        setMsg(t("已从{0}移除。", title));
         onChange?.();
       })
-      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '移除失败'))
+      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : t("移除失败")))
       .finally(() => setBusy(false));
   };
 
@@ -139,10 +140,10 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
       .then((snapshot) => {
         applyStatus(snapshot);
         setEditing(null);
-        setMsg('昵称已更新。');
+        setMsg(t("昵称已更新。"));
         onChange?.();
       })
-      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '修改失败'))
+      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : t("修改失败")))
       .finally(() => setBusy(false));
   };
   const addManual = (): void => {
@@ -156,7 +157,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
         setMsg(r.errors.length ? [r.message, ...r.errors.map(error => `${error.input}：${error.message}`)].join('\n') : r.message);
         onChange?.();
       })
-      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : '添加失败'))
+      .catch((c: unknown) => setMsg(c instanceof Error ? c.message : t("添加失败")))
       .finally(() => setBusy(false));
   };
   const secs = code ? Math.max(0, Math.round((code.expiresAt - Date.now()) / 1000)) : 0;
@@ -167,80 +168,80 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     setBusy(true); setMsg(null);
     void fetchJson(endpoint(PAIR_END_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, code: code.code }) })
       .then(() => { setAddOpen(false); setCode(null); codeSeen.current = false; reload(); onChange?.(); })
-      .catch((error: unknown) => setMsg(error instanceof Error ? error.message : '结束配对失败，请重试'))
+      .catch((error: unknown) => setMsg(error instanceof Error ? error.message : t("结束配对失败，请重试")))
       .finally(() => setBusy(false));
   };
   return h('div', { className: 'imqq-pair' },
     h('div', { className: 'imqq-pairHeader' },
       h('div', { className: 'imqq-pairTitle' }, h('strong', null, title), status ? h('span', { className: 'imqq-pairCount' }, `(${members.length})`) : null),
       h('div', { className: 'imqq-pairToolbar' },
-      h(Button, { variant: 'outline', size: 'sm', icon: h(IconPlusOutlineRegular, { size: 14 }), disabled: busy, onClick: openAdd }, '添加'),
-      h(Button, { variant: 'outline', size: 'sm', icon: h(IconCopyOutlineRegular, { size: 14 }), 'aria-label': `复制${title}全部 OpenID 和昵称`, title: '每行一个 OpenID:昵称，可直接粘贴到批量添加', disabled: members.length === 0 || status === null || error !== null, onClick: () => { void copyOpenIds(whitelistEntries(members), '名单已复制（OpenID:昵称，每行一个）。'); } }, '复制全部'),
+      h(Button, { variant: 'outline', size: 'sm', icon: h(IconPlusOutlineRegular, { size: 14 }), disabled: busy, onClick: openAdd }, t("添加")),
+      h(Button, { variant: 'outline', size: 'sm', icon: h(IconCopyOutlineRegular, { size: 14 }), 'aria-label': t("复制{0}全部 OpenID 和昵称", title), title: t("每行一个 OpenID:昵称，可直接粘贴到批量添加"), disabled: members.length === 0 || status === null || error !== null, onClick: () => { void copyOpenIds(whitelistEntries(members), t("名单已复制（OpenID:昵称，每行一个）。")); } }, t("复制全部")),
       h(Button, { variant: 'outline', size: 'sm', icon: h(IconDownloadOutlineRegular, { size: 14 }), disabled: members.length === 0 || status === null || error !== null, onClick: () => {
         try { downloadWhitelist(members, purpose); }
-        catch (error) { setMsg(error instanceof Error ? error.message : '导出失败'); }
-      } }, '导出 CSV'))),
+        catch (error) { setMsg(error instanceof Error ? error.message : t("导出失败")); }
+      } }, t("导出 CSV")))),
     description ? h('p', { className: 'imqq-pairHint' }, description) : null,
     hint ? h('p', { className: 'imqq-pairHint' }, hint) : null,
-    h('p', { className: 'imqq-pairHint' }, '名单修改即时保存。'),
+    h('p', { className: 'imqq-pairHint' }, t("名单修改即时保存。")),
     msg ? h('p', { className: 'imqq-pairHint', role: 'status' }, msg) : null,
     error ? h('p', { className: 'imqq-pairError', role: 'alert' }, error) : null,
     members.length === 0
-      ? h('p', { className: 'imqq-pairHint' }, '尚未添加任何成员。')
+      ? h('p', { className: 'imqq-pairHint' }, t("尚未添加任何成员。"))
       : h('ul', { className: 'imqq-pairMembers' }, ...members.map((m) => {
           const isEditing = editing?.openid === m.openid;
           return h('li', { className: 'imqq-pairMember', key: `${m.openid}:${m.scene}` },
             h('div', { className: 'imqq-pairMemberMain' },
-              h('span', { className: 'imqq-pairMemberName' }, m.nickname || '（未命名）'),
+              h('span', { className: 'imqq-pairMemberName' }, m.nickname || t("（未命名）")),
               purpose === 'owner' ? h('span', { className: 'imqq-pairMemberMeta' },
-                m.scene === 'group' ? `群成员${m.sceneName ? ` · ${m.sceneName}` : ''}` : '私聊用户') : null,
+                m.scene === 'group' ? t("群成员{0}", m.sceneName ? ` · ${m.sceneName}` : '') : t("私聊用户")) : null,
               h('div', { className: 'imqq-pairIdentity' },
                 h('code', { className: 'imqq-pairMemberOpenId' }, m.openid),
-                h(Button, { variant: 'ghost', size: 'sm', className: 'imqq-pairCopy', disabled: busy, 'aria-label': `复制 ${m.nickname || m.openid} 的 OpenID`, title: '复制 OpenID', onClick: () => { void copyOpenIds(m.openid); } }, h(IconCopyOutlineRegular, { size: 14 })))),
+                h(Button, { variant: 'ghost', size: 'sm', className: 'imqq-pairCopy', disabled: busy, 'aria-label': t("复制 {0} 的 OpenID", m.nickname || m.openid), title: t("复制 OpenID"), onClick: () => { void copyOpenIds(m.openid); } }, h(IconCopyOutlineRegular, { size: 14 })))),
             isEditing
               ? h('div', { className: 'imqq-pairMemberEdit' },
-                  h(Input, { value: editing.nickname, disabled: busy, placeholder: '昵称', 'aria-label': '修改昵称', onChange: (e: { currentTarget: { value: string } }) => setEditing({ openid: m.openid, nickname: e.currentTarget.value }) }),
-                  h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: () => saveRename(m.openid, editing.nickname) }, '保存'),
-                  h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setEditing(null) }, '取消'))
+                  h(Input, { value: editing.nickname, disabled: busy, placeholder: t("昵称"), 'aria-label': t("修改昵称"), onChange: (e: { currentTarget: { value: string } }) => setEditing({ openid: m.openid, nickname: e.currentTarget.value }) }),
+                  h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: () => saveRename(m.openid, editing.nickname) }, t("保存")),
+                  h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setEditing(null) }, t("取消")))
               : h('div', { className: 'imqq-pairMemberActions' },
-                  h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => setEditing({ openid: m.openid, nickname: m.nickname }) }, '改名'),
-                  h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => revoke(m.openid) }, '移除')));
+                  h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: () => setEditing({ openid: m.openid, nickname: m.nickname }) }, t("改名")),
+                  h(Button, { variant: 'ghost', size: 'sm', disabled: busy, onClick: () => revoke(m.openid) }, t("移除"))));
         })),
     addOpen ? h(Modal, {
-      open: true, title: `添加${title}`, closeLabel: '关闭并停止配对', onClose: finish, className: 'imqq-pairModal',
+      open: true, title: t("添加{0}", title), closeLabel: t("关闭并停止配对"), onClose: finish, className: 'imqq-pairModal',
       footer: h('div', { className: 'imqq-pairFooter' },
-        h('span', { className: 'imqq-pairHint' }, '完成后配对码失效，已添加的成员保留。'),
-        h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: finish }, '完成')),
+        h('span', { className: 'imqq-pairHint' }, t("完成后配对码失效，已添加的成员保留。")),
+        h(Button, { variant: 'primary', size: 'sm', disabled: busy, onClick: finish }, t("完成"))),
       children: h('div', { className: 'imqq-pairDialog' },
         h('p', { className: 'imqq-pairHint' }, purpose === 'allow-group'
-          ? '在需要添加的群里 @机器人后发送此码，有效期内可连续添加多个群。'
-          : '让需要添加的用户在私聊里发送此码，有效期内可连续添加多人。'),
+          ? t("在需要添加的群里 @机器人后发送此码，有效期内可连续添加多个群。")
+          : t("让需要添加的用户在私聊里发送此码，有效期内可连续添加多人。")),
         code ? h('div', { className: 'imqq-pairCodeCard' },
           h('div', { className: 'imqq-pairCodeMain' },
             h('code', { className: 'imqq-pairCodeValue' }, code.code),
-            h('span', { className: 'imqq-pairCodeMeta' }, codeEnded || secs === 0 ? '已结束，请重新生成' : `剩余 ${Math.floor(secs / 60).toString().padStart(2, '0')}:${(secs % 60).toString().padStart(2, '0')}`)),
+            h('span', { className: 'imqq-pairCodeMeta' }, codeEnded || secs === 0 ? t("已结束，请重新生成") : t("剩余 {0}:{1}", Math.floor(secs / 60).toString().padStart(2, '0'), (secs % 60).toString().padStart(2, '0')))),
           h('div', { className: 'imqq-pairCodeActions' },
-            h(Button, { variant: 'outline', size: 'sm', disabled: busy || codeEnded || secs === 0, onClick: () => { void copyPairCode(code.code); } }, copied ? '已复制' : '复制配对码'),
-            h(Button, { variant: 'primary', size: 'sm', disabled: busy || !canPair, onClick: issue }, busy ? '生成中…' : '重新生成')))
-          : canPair ? h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? '生成中…' : '生成配对码')
-            : h('p', { className: 'imqq-pairHint' }, '启用机器人后可生成配对码。'),
-        h(DisclosureRow, { title: `通过 OpenID 批量添加（非${purpose === 'allow-group' ? '群号' : ' QQ 号'}）`, icon: h(IconChevronDownOutlineRegular), open: manualOpen, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: () => setManualOpen(value => !value) },
+            h(Button, { variant: 'outline', size: 'sm', disabled: busy || codeEnded || secs === 0, onClick: () => { void copyPairCode(code.code); } }, copied ? t("已复制") : t("复制配对码")),
+            h(Button, { variant: 'primary', size: 'sm', disabled: busy || !canPair, onClick: issue }, busy ? t("生成中…") : t("重新生成"))))
+          : canPair ? h(Button, { variant: 'outline', size: 'sm', disabled: busy, onClick: issue }, busy ? t("生成中…") : t("生成配对码"))
+            : h('p', { className: 'imqq-pairHint' }, t("启用机器人后可生成配对码。")),
+        h(DisclosureRow, { title: t("通过 OpenID 批量添加（非{0}）", purpose === 'allow-group' ? '群号' : ' QQ 号'), icon: h(IconChevronDownOutlineRegular), open: manualOpen, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: () => setManualOpen(value => !value) },
         h('div', { className: 'imqq-pairManual' },
-        h('p', { className: 'imqq-pairHint' }, '用户 OpenID 不是 QQ 号，群 OpenID 也不是群号，不能直接填写 QQ 号或群号。请使用当前机器人对应的 OpenID；没有 OpenID 时，请使用上方配对码添加。'),
-        h('p', { className: 'imqq-pairHint' }, '每行一个 OpenID 或 OpenID:昵称。简单条目也可用逗号分隔；昵称含逗号时用双引号包住。'),
+        h('p', { className: 'imqq-pairHint' }, t("用户 OpenID 不是 QQ 号，群 OpenID 也不是群号，不能直接填写 QQ 号或群号。请使用当前机器人对应的 OpenID；没有 OpenID 时，请使用上方配对码添加。")),
+        h('p', { className: 'imqq-pairHint' }, t("每行一个 OpenID 或 OpenID:昵称。简单条目也可用逗号分隔；昵称含逗号时用双引号包住。")),
         h('pre', { className: 'imqq-pairExample' }, 'ABCD1234EFGH:小明\nWXYZ5678:Alice Zhang'),
-        h('textarea', { className: 'imqq-pairTextarea', rows: 4, value: manualOpenid, disabled: busy, 'aria-label': `${title} openID 列表`, placeholder: 'OpenID 或 OpenID:昵称，每行一个；不能填写 QQ 号或群号', onChange: (e: { currentTarget: { value: string } }) => setManualOpenid(e.currentTarget.value) }),
-        h('div', { className: 'imqq-pairToolbar' }, h(Button, { variant: 'outline', size: 'sm', disabled: busy || manualOpenid.trim() === '', onClick: () => { addManual(); } }, '添加'),
-          h('span', { className: 'imqq-pairHint' }, '添加后可继续填写，配对码保持有效。')))),
-        h('section', { className: 'imqq-pairResults', 'aria-label': '本次添加结果' },
-          h('h4', { className: 'imqq-pairSectionTitle' }, `本次添加结果（${results.filter(result => result.state === 'added').length} 项新增）`),
-          results.length === 0 ? h('p', { className: 'imqq-pairHint' }, '等待认领，成功结果会显示在这里。') : null,
+        h('textarea', { className: 'imqq-pairTextarea', rows: 4, value: manualOpenid, disabled: busy, 'aria-label': t("{0} openID 列表", title), placeholder: t("OpenID 或 OpenID:昵称，每行一个；不能填写 QQ 号或群号"), onChange: (e: { currentTarget: { value: string } }) => setManualOpenid(e.currentTarget.value) }),
+        h('div', { className: 'imqq-pairToolbar' }, h(Button, { variant: 'outline', size: 'sm', disabled: busy || manualOpenid.trim() === '', onClick: () => { addManual(); } }, t("添加")),
+          h('span', { className: 'imqq-pairHint' }, t("添加后可继续填写，配对码保持有效。"))))),
+        h('section', { className: 'imqq-pairResults', 'aria-label': t("本次添加结果") },
+          h('h4', { className: 'imqq-pairSectionTitle' }, t("本次添加结果（{0} 项新增）", results.filter(result => result.state === 'added').length)),
+          results.length === 0 ? h('p', { className: 'imqq-pairHint' }, t("等待认领，成功结果会显示在这里。")) : null,
           h('ul', { className: 'imqq-pairResultList', 'aria-live': 'polite' }, ...results.map(result => h('li', { className: 'imqq-pairResult', key: `${result.scene}:${result.openid}` },
             h('div', { className: 'imqq-pairResultTitle' },
-              h('span', { className: 'imqq-pairMemberName' }, result.nickname || (result.scene === 'group' ? '未命名群聊' : '未命名用户')),
-              h('span', { className: 'imqq-pairResultState' }, result.state !== 'revoked' ? h(IconCheckOutlineRegular, { size: 14 }) : null, result.state === 'added' ? '已添加' : result.state === 'existing' ? '已在名单中' : '已移除')),
+              h('span', { className: 'imqq-pairMemberName' }, result.nickname || (result.scene === 'group' ? t("未命名群聊") : t("未命名用户"))),
+              h('span', { className: 'imqq-pairResultState' }, result.state !== 'revoked' ? h(IconCheckOutlineRegular, { size: 14 }) : null, result.state === 'added' ? t("已添加") : result.state === 'existing' ? t("已在名单中") : t("已移除"))),
             h('div', { className: 'imqq-pairIdentity' }, h('code', { className: 'imqq-pairMemberOpenId' }, result.openid),
-              h(Button, { variant: 'ghost', size: 'sm', className: 'imqq-pairCopy', 'aria-label': `复制 ${result.nickname || result.openid} 的 OpenID`, onClick: () => { void copyOpenIds(result.openid); } }, h(IconCopyOutlineRegular, { size: 14 }))))))),
+              h(Button, { variant: 'ghost', size: 'sm', className: 'imqq-pairCopy', 'aria-label': t("复制 {0} 的 OpenID", result.nickname || result.openid), onClick: () => { void copyOpenIds(result.openid); } }, h(IconCopyOutlineRegular, { size: 14 }))))))),
         msg ? h('p', { className: 'imqq-pairHint', role: 'status' }, msg) : null,
         error ? h('p', { className: 'imqq-pairError', role: 'alert' }, error) : null),
     }) : null);

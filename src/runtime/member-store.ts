@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWrite } from '../shared/atomic-file.ts';
+import { SESSION_PREFERENCES_FILE } from '../shared/dirs.ts';
 import type { ClaimedMember } from '../shared/pairing-protocol.ts';
 
 type MemberProfile = Omit<ClaimedMember, 'openid'>;
@@ -93,7 +94,7 @@ export class MemberStore {
     return data;
   }
   private hasLegacyPreferences(): boolean {
-    const path = join(this.dataDir, 'model-prefs.json');
+    const path = join(this.dataDir, SESSION_PREFERENCES_FILE);
     if (!existsSync(path)) return false;
     const data = object(JSON.parse(readFileSync(path, 'utf8')));
     return ['sessionIds', 'overrides', 'presets'].some(field => Object.keys(object(data[field] ?? {})).some(key =>

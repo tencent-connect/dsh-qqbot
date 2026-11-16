@@ -101,6 +101,13 @@ export class TurnTracker implements DeliveryTargetResolver {
     return true;
   }
 
+  public discard(sessionId: string, messageId: string): void {
+    const tracked = this.turns.get(sessionId);
+    if (tracked?.inputs.has(messageId)) tracked.invalid = true;
+    this.inputs.release(messageId);
+    this.inputs.ledger?.discardInput(sessionId, messageId);
+  }
+
   /** user/message：按这一条消息归类，不发送 */
   public note(sessionId: string, data: Record<string, unknown>): void {
     const tracked = this.turns.get(sessionId);

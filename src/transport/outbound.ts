@@ -12,7 +12,7 @@ import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from '.
 import type { DeliverablesDelivererLike } from './deliverables.ts';
 import { QqInputRegistry } from './qq-input-origin.ts';
 import { TurnTracker, type DeliveryPlan } from './turn-tracker.ts';
-import { deliveryPart, replyDelivery } from './delivery-context.ts';
+import { assertDeliveryAllowed, deliveryPart, deliveryTrace, replyDelivery } from './delivery-context.ts';
 import {
   parseEvent,
   type MessageEvent,
@@ -35,6 +35,7 @@ export type OutboundHandler = (session: SessionLike, event: RawSessionEvent) => 
 /** 出站事件入口集合：durable 事件 + 实时流式帧 */
 export interface OutboundHandlers {
   dispose(): void;
+  discardInput(sessionId: string, messageId: string): void;
   /** durable session 事件入口（注册到 ctx.on('session/event')） */
   routeSessionEvent(session: SessionLike, event: RawSessionEvent): void;
   /**
@@ -59,7 +60,16 @@ interface ToolCallRecord {
  * 回合归属与投递目标委托给 TurnTracker（与提问/审批/发文件共享）。
  */
 class OutboundRouter {
+  private closed = false;
+  private readonly groupAnswers = new Map<string, { seen: Set<string>; text?: string }>();
+
+  public discardInput(sessionId: string, messageId: string): void {
+    this.tracker.discard(sessionId, messageId);
+  }
+
   public dispose(): void {
+    this.closed = true;
+    this.groupAnswers.clear();
     for (const buffer of this.buffers.values()) buffer.cancel();
     this.buffers.clear();
     this.streamAttempts.clear();
@@ -96,6 +106,7 @@ class OutboundRouter {
     tracker: TurnTracker,
     toolsRegistry: ToolsRegistryLike | undefined,
     deliverer?: DeliverablesDelivererLike,
+    private readonly flushSession?: (session: SessionLike) => Promise<boolean>,
   ) {
     this.manager = manager;
     this.bot = bot;
@@ -108,6 +119,7 @@ class OutboundRouter {
 
   /** 事件分发入口 */
   public route(session: SessionLike, raw: RawSessionEvent): void {
+    if (this.closed) return;
     const sessionId = session.header.id;
     if (raw.type === 'turn/start') {
       if (this.tracker.begin(sessionId, eventTurn(raw.data))) {
@@ -136,11 +148,30 @@ class OutboundRouter {
     const plan = this.tracker.planFor(sessionId);
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
-      this.finishTurn(sessionId, event, plan, session.header.cwd);
+      if (plan?.target.scope === 'group') void this.finishGroup(session, event, plan);
+      else {
+        this.groupAnswers.delete(sessionId);
+        this.finishTurn(sessionId, event, plan, session.header.cwd);
+      }
       this.outputOptions.delete(sessionId);
       return;
     }
     if (plan === undefined) return;
+    if (plan.target.scope === 'group') {
+      if (event.type === 'assistant/message' && (raw.surfaceOp === undefined || raw.surfaceOp === 'append')) {
+        const answer = this.groupAnswers.get(sessionId) ?? { seen: new Set<string>() };
+        const id = event.id;
+        if (id !== undefined && answer.seen.has(id)) return;
+        if (id !== undefined) answer.seen.add(id);
+        const text = messageText(event);
+        answer.text = raw.data.interrupted !== true && !event.content.some(block => block.type === 'tool-call') && text.trim()
+          ? text : undefined;
+        this.groupAnswers.set(sessionId, answer);
+      } else if (event.type === 'deliverables/presented') {
+        this.onPresented(sessionId, event);
+      }
+      return;
+    }
 
     const record = this.manager.findBySessionId(sessionId);
     switch (event.type) {
@@ -201,7 +232,7 @@ class OutboundRouter {
     }
     if (current && delta.revision !== undefined) current.revision = delta.revision;
     const plan = this.tracker.planFor(agentId);
-    if (plan === undefined) return;
+    if (plan === undefined || plan.target.scope === 'group') return;
     plan.target = replyDelivery(plan.target, current?.step ?? 0);
 
     // 已有 buffer：目标在创建时已拍下，直接追加，避免每帧重新解析
@@ -239,6 +270,7 @@ class OutboundRouter {
 
   /** 新回合开始：丢弃上一轮残留的出站状态 */
   private resetTurnState(sessionId: string): void {
+    this.groupAnswers.delete(sessionId);
     this.buffers.get(sessionId)?.cancel();
     this.buffers.delete(sessionId);
     this.streamAttempts.delete(sessionId);
@@ -255,11 +287,7 @@ class OutboundRouter {
       return;
     }
 
-    const textParts: string[] = [];
-    for (const block of event.content) {
-      if (block.type === 'text' && block.text) textParts.push(block.text);
-    }
-    const fullText = textParts.join('\n');
+    const fullText = messageText(event);
     if (!fullText.trim()) return;
 
     this.trackText(sessionId, this.send(plan.target, fullText, 'sendMarkdown'));
@@ -312,6 +340,30 @@ class OutboundRouter {
     this.presentedFiles.set(sessionId, files);
   }
 
+  private async finishGroup(session: SessionLike, end: TurnEndEvent, { target }: DeliveryPlan): Promise<void> {
+    const id = session.header.id;
+    const answer = this.groupAnswers.get(id)?.text;
+    const files = this.presentedFiles.get(id) ?? [];
+    this.resetTurnState(id);
+    if (!end.completed && !end.failed) return;
+    try {
+      if (!await this.flushSession?.(session)) {
+        this.logger.warn('QQ group reply skipped because the Session could not be flushed.');
+        return;
+      }
+      if (this.closed) return;
+      if (deliveryTrace(target) !== undefined) assertDeliveryAllowed(target);
+      if (end.failed) {
+        await sendText(this.bot, target, '⚠️ 本轮处理失败，请稍后重试。', this.config.textChunkLimit);
+        return;
+      }
+      if (answer !== undefined) await sendText(this.bot, target, answer, this.config.textChunkLimit);
+      if (!this.closed && files.length > 0) await this.deliverer?.deliver(target, files, session.header.cwd);
+    } catch (error) {
+      this.logger.warn(`QQ group reply could not be delivered: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /**
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
    * 外层轮次失败不撤销已完成的声明（宿主契约），故失败轮的文件仍投递。
@@ -358,6 +410,10 @@ class OutboundRouter {
   }
 }
 
+function messageText(event: MessageEvent): string {
+  return event.content.flatMap(block => block.type === 'text' && block.text ? [block.text] : []).join('\n');
+}
+
 function eventTurn(data: Record<string, unknown>): number | undefined {
   return Number.isSafeInteger(data.turn) ? data.turn as number : undefined;
 }
@@ -373,7 +429,7 @@ export function createTurnTracker(
   return new TurnTracker(
     manager,
     inputs,
-    { appId: config.appId, externalTurns: config.proactiveDelivery?.externalTurns ?? 'c2c', allowed },
+    { appId: config.appId, externalTurns: config.proactiveDelivery?.externalTurns ?? 'all', allowed },
     logger,
   );
 }
@@ -394,11 +450,13 @@ export function createOutboundHandler(
   toolsRegistry?: ToolsRegistryLike,
   deliverer?: DeliverablesDelivererLike,
   tracker?: TurnTracker,
+  flushSession?: (session: SessionLike) => Promise<boolean>,
 ): OutboundHandlers {
   const turns = tracker ?? createTurnTracker(manager, config, logger);
-  const router = new OutboundRouter(manager, bot, config, logger, turns, toolsRegistry, deliverer);
+  const router = new OutboundRouter(manager, bot, config, logger, turns, toolsRegistry, deliverer, flushSession);
   return {
     dispose: () => router.dispose(),
+    discardInput: (sessionId, messageId) => router.discardInput(sessionId, messageId),
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),
   };

@@ -66,8 +66,8 @@ export interface GatewayRuntime extends SendFileRuntime {
   deactivate(): void;
 }
 
-export function openDeliveryLedger(appId: string): DeliveryLedger {
-  return new DeliveryLedger(join(PLUGIN_HOME, `delivery-${deliveryKey(appId)}.jsonl`));
+export function openDeliveryLedger(appId: string, dataDir = PLUGIN_HOME): DeliveryLedger {
+  return new DeliveryLedger(join(dataDir, `delivery-${deliveryKey(appId)}.jsonl`));
 }
 
 export function bootstrapGateway(
@@ -86,12 +86,13 @@ export function bootstrapGateway(
     agent?: PeerAgentSettings;
     names?: QqDisplayNames;
   },
+  dataDir = PLUGIN_HOME,
 ): GatewayRuntime {
   const manager = new SessionManager(ctx, agents, config, logger, prefs, history?.agent);
 
   manager.accountAccess = accountAccess;
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
-  const ledger = openDeliveryLedger(config.appId);
+  const ledger = openDeliveryLedger(config.appId, dataDir);
   let active = true;
   let state: WorkbenchRobot['state'] = 'connecting';
   const isActive = () => active;
@@ -234,6 +235,10 @@ export function bootstrapGateway(
 
   const outbound = createOutboundHandler(
     manager, sender, config, logger, toolsRegistry, deliverablesDeliverer, turnTracker,
+    async session => {
+      const sessions = ctx.get('sessions') as { flush?(session: unknown): Promise<boolean> } | undefined;
+      return await sessions?.flush?.(session) === true;
+    },
   );
   // session/event 按会话作用域派发。根作用域监听不带 global 收不到
   // 桌面恢复出来的 agent，主动回合的 user/message 会直接丢。
@@ -243,6 +248,11 @@ export function bootstrapGateway(
   };
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
     .on('session/event', routeSessionEvent as (...args: unknown[]) => void, { global: true });
+  (ctx as unknown as { on(event: 'agent/inbox/discarded', handler: (payload: {
+    agent: { session: { header: { id: string } } }; message: { id: string };
+  }) => void, options: { global: true }): void }).on('agent/inbox/discarded', ({ agent, message }) => {
+    if (active) outbound.discardInput(agent.session.header.id, message.id);
+  }, { global: true });
 
   // ── 出站流式：agent/assistant-stream → 流式帧路由 ──
   // 实时流式走瞬态 agent/assistant-stream（chunk 不进 session log）。
@@ -342,6 +352,9 @@ export function bootstrapGateway(
           () => manager.disposeAll(),
         ];
         const results = await Promise.allSettled(cleanups.map(cleanup => Promise.resolve().then(cleanup)));
+        // A transport may still be waiting for a receipt at shutdown. Its
+        // reservation survives, but the retired gateway cannot amend the journal.
+        ledger.close();
         const failed = results.find(result => result.status === 'rejected');
         if (failed) throw failed.reason;
       };

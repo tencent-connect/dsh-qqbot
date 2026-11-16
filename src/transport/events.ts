@@ -9,6 +9,7 @@
 /** 原始 dsh 事件（弱类型，来自 ctx.on('session/event')） */
 export interface RawSessionEvent {
   type: string;
+  surfaceOp?: string;
   data: Record<string, unknown>;
 }
 
@@ -21,6 +22,7 @@ export interface ChunkEvent {
 /** assistant/message 事件 */
 export interface MessageEvent {
   type: 'assistant/message';
+  id?: string;
   content: Array<{ type: string; text?: string }>;
 }
 
@@ -45,6 +47,7 @@ export interface ToolResultEvent {
 export interface TurnEndEvent {
   type: 'turn/end';
   failed: boolean;
+  completed: boolean;
 }
 
 /** present 工具声明的一个交付文件 */
@@ -86,9 +89,9 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'assistant/message': {
-      const message = (raw.data as { message?: { content?: Array<{ type: string; text?: string }> } }).message;
+      const message = (raw.data as { message?: { id?: string; content?: Array<{ type: string; text?: string }> } }).message;
       if (message === undefined || !Array.isArray(message.content)) return undefined;
-      return { type: 'assistant/message', content: message.content };
+      return { type: 'assistant/message', ...(typeof message.id === 'string' ? { id: message.id } : {}), content: message.content };
     }
 
     case 'tool/call': {
@@ -106,7 +109,8 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
 
     case 'turn/end': {
       const reason = raw.data.reason;
-      return { type: 'turn/end', failed: reason !== null && typeof reason === 'object' && 'kind' in reason && reason.kind === 'error' };
+      const kind = reason !== null && typeof reason === 'object' && 'kind' in reason ? reason.kind : undefined;
+      return { type: 'turn/end', failed: kind === 'error', completed: kind === 'completed' };
     }
 
     case 'deliverables/presented': {

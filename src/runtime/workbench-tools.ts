@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
+import type { Logger } from '../types.ts';
 import type { DshAgent, DshAgentRegistry } from '../session/index.ts';
 import { WORKBENCH_BASE_PERMISSIONS, type WorkbenchAgentSettings, type WorkbenchToolChoice } from '../shared/workbench-agent-settings.ts';
 
@@ -10,7 +11,6 @@ interface ToolExecutor {
 interface Tools {
   definitions(scope?: object): readonly ToolDefinition[];
   guard(check: (execution: { name: string; agent?: object }) => string | undefined): () => void;
-  setExecutor?(executor: ToolExecutor): () => void;
   overrideExecutor?(executor: ToolExecutor): () => void;
 }
 interface Permissions {
@@ -21,14 +21,12 @@ interface PresetScope {
   acquireScope(id?: string): Promise<{ key: object } & AsyncDisposable>;
 }
 interface SessionLineage {
-  stat(id: string): Promise<{ header: { parentSession?: string } } | undefined>;
+  stat?(id: string): Promise<{ header: { parentSession?: string } } | undefined>;
 }
 type NativeExecutor = new (ctx: Context) => ToolExecutor;
 const nativeModule = '@deepseek-ai/dsh-tool-executor-native';
-let native: Promise<NativeExecutor> | undefined;
-
 function loadNative(): Promise<NativeExecutor> {
-  return native ??= import(nativeModule).then(module => {
+  return import(nativeModule).then(module => {
     if (typeof module.NativeToolExecutor !== 'function') throw new Error('当前 DSH 缺少原生工具执行器。');
     return module.NativeToolExecutor as NativeExecutor;
   }, () => { throw new Error('当前 DSH 缺少原生工具执行器。'); });
@@ -40,15 +38,18 @@ const excluded = new Set(['run_code', 'subagent', 'spawn_agent', 'send_message',
 const usable = (name: string): boolean => !excluded.has(name) && !name.startsWith('subagent_') && !name.startsWith('schedule_');
 const nativePermissionEvents = new Set(['permission/preset', 'sandbox/mode', 'approval/policy']);
 const definitions = (ctx: Context): Tools | undefined => ctx.get('tools') as Tools | undefined;
-const presetOf = (agent: DshAgent): string | undefined => agent.session.header?.agentPreset;
+const unavailable = '当前 DSH 无法安全恢复原生工具执行器。请更新 DSH，或将此 QQ 会话切回原生工具设置。';
+
+function canRestoreTools(tools: Tools | undefined): tools is Tools & Required<Pick<Tools, 'overrideExecutor'>> {
+  return typeof tools?.guard === 'function' && typeof tools.overrideExecutor === 'function';
+}
 
 export async function workbenchToolChoices(ctx: Context, preset?: string): Promise<WorkbenchToolChoice[]> {
   const tools = definitions(ctx);
-  if (!tools?.guard || !tools.setExecutor) throw new Error('当前 DSH 不支持会话级工具限制。');
+  if (!canRestoreTools(tools)) throw new Error(unavailable);
   const presets = ctx.get('agentPresets') as PresetScope | undefined;
   if (!presets) throw new Error('无法读取 DSH Agent 预设。');
   const id = preset || presets.defaultId;
-  if (!tools.overrideExecutor && id !== 'standard') throw new Error('当前 DSH 仅支持标准模式使用自定义工具。');
   await loadNative();
   await using lease = await presets.acquireScope(id);
   return tools.definitions(lease.key).filter(tool => usable(tool.name)).map(({ name, description }) => ({
@@ -68,18 +69,23 @@ function expands(from: WorkbenchAgentSettings | undefined, to: WorkbenchAgentSet
 }
 
 export class WorkbenchToolPolicies {
-  private readonly installed = new WeakMap<DshAgent, {
+  private readonly installed = new Map<DshAgent, {
     release(): void;
-    replaceable: boolean;
     withinNativeCap(): boolean;
+    failure?: string;
   }>();
-  private readonly owners = new WeakMap<DshAgent, string>();
+  private readonly owners = new Map<DshAgent, string>();
+  private readonly disabled = new Set<string>();
+  private readonly generations = new Map<string, number>();
+  private closed = false;
 
   constructor(
     private readonly ctx: Context,
     private readonly agents: DshAgentRegistry,
     private readonly read: (key: string) => WorkbenchAgentSettings | undefined,
     private readonly owner: (id: string) => string | undefined,
+    private readonly logger?: Logger,
+    private readonly discardPending?: (agent: DshAgent, key: string) => void,
   ) {
     const lifecycle = ctx as unknown as {
       on(event: 'agent/created' | 'agent/disposed', handler: (event: { agent: DshAgent }) => void | Promise<void>, options: { global: true }): void;
@@ -87,11 +93,11 @@ export class WorkbenchToolPolicies {
     };
     lifecycle.on('agent/created', async ({ agent }) => {
       const key = await this.resolveOwner(agent);
-      if (key) await this.attach(agent, key);
+      if (key && this.active(key)) await this.restore(agent, key);
     }, { global: true });
     lifecycle.on('agent/disposed', ({ agent }) => {
+      this.release(agent);
       this.owners.delete(agent);
-      this.installed.delete(agent);
     }, { global: true });
     lifecycle.on('session/event', (session, event) => {
       if (!nativePermissionEvents.has(event.type)) return;
@@ -102,6 +108,75 @@ export class WorkbenchToolPolicies {
         agent.cancel({ kind: 'user' }, { keepInbox: true });
       }
     }, { global: true });
+  }
+
+  private active(key: string): boolean {
+    return !this.closed && !this.disabled.has(accountFor(key));
+  }
+
+  enableAccount(appId: string): boolean {
+    return !this.closed && this.disabled.delete(appId);
+  }
+
+  detachAccount(appId: string): void {
+    this.disabled.add(appId);
+    this.generations.set(appId, (this.generations.get(appId) ?? 0) + 1);
+    for (const [agent, key] of this.owners) {
+      if (accountFor(key) === appId) this.detach(agent, key);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const [agent, key] of this.owners) this.detach(agent, key);
+  }
+
+  blocked(key: string): string | undefined {
+    if (this.read(key)?.tools === undefined) return undefined;
+    if (!canRestoreTools(definitions(this.ctx))) return unavailable;
+    for (const [agent, owner] of this.owners) {
+      const failure = this.installed.get(agent)?.failure;
+      if (owner === key && failure !== undefined) return failure;
+    }
+    return undefined;
+  }
+
+  private release(agent: DshAgent): void {
+    const current = this.installed.get(agent);
+    this.installed.delete(agent);
+    current?.release();
+  }
+
+  private detach(agent: DshAgent, key: string): void {
+    try {
+      this.discardPending?.(agent, key);
+    } catch {
+      this.logger?.warn('QQBot could not retire queued work for a detached Session.');
+    }
+    try {
+      if (this.installed.has(agent) && agent.status === 'running') {
+        agent.cancel({ kind: 'user' }, { keepInbox: true });
+      }
+    } catch {
+      this.logger?.warn('QQBot could not cancel the turn for a detached Session.');
+    } finally {
+      this.owners.delete(agent);
+      this.release(agent);
+    }
+  }
+
+  private async restore(agent: DshAgent, key: string): Promise<void> {
+    try {
+      await this.attach(agent, key);
+    } catch (error) {
+      if (!this.active(key) || this.owners.get(agent) !== key || this.installed.has(agent)) return;
+      const failure = error instanceof Error ? error.message : unavailable;
+      const tools = definitions(agent.ctx);
+      const release = tools?.guard?.(() => failure) ?? (() => {});
+      this.installed.set(agent, { failure, release, withinNativeCap: () => false });
+      if (agent.status === 'running') agent.cancel({ kind: 'user' }, { keepInbox: true });
+      this.logger?.warn('QQBot paused a Session whose saved tool policy could not be restored.');
+    }
   }
 
   private knownOwner(agent: DshAgent): string | undefined {
@@ -119,31 +194,34 @@ export class WorkbenchToolPolicies {
       const key = live ? this.knownOwner(live) : this.owner(parent);
       if (key !== undefined) return key;
       const lineage = this.ctx.get('sessionPersistence') as SessionLineage | undefined;
-      parent = live ? live.session.header?.parentSession : (await lineage?.stat(parent))?.header.parentSession;
+      parent = live ? live.session.header?.parentSession : (await lineage?.stat?.(parent))?.header.parentSession;
     }
     return undefined;
   }
 
-  async restoreLive(onlyKey?: string): Promise<void> {
+  async restoreLive(onlyKey?: string, strict = false): Promise<void> {
     for (const agent of this.agents.list?.() ?? []) {
       const key = await this.resolveOwner(agent);
-      if (key && (onlyKey === undefined || onlyKey === key) && this.agents.get(agent.id) === agent) await this.attach(agent, key);
+      if (!key || !this.active(key) || (onlyKey !== undefined && onlyKey !== key) || this.agents.get(agent.id) !== agent) continue;
+      if (strict) await this.attach(agent, key);
+      else await this.restore(agent, key);
     }
   }
 
   async attach(agent: DshAgent, key: string, force = false): Promise<void> {
+    if (!this.active(key)) throw new Error('QQ 会话关联已停用。');
+    const generation = this.generations.get(accountFor(key));
     this.owners.set(agent, key);
-    if (this.installed.has(agent) || (!force && this.read(key)?.tools === undefined)) return;
+    const existing = this.installed.get(agent);
+    if (existing?.failure !== undefined) throw new Error(existing.failure);
+    if (existing || (!force && this.read(key)?.tools === undefined)) return;
     const tools = definitions(agent.ctx);
     const permission = agent.ctx.get('permissionPresets') as Permissions | undefined;
-    if (!tools?.guard || !permission?.current) throw new Error('当前 DSH 无法约束 QQ 会话的工具执行。');
-    // Older Hosts can supply a scoped executor but cannot restore the previous
-    // executor. Only keep a pass-through replacement for the standard preset.
-    const replaceable = typeof tools.overrideExecutor === 'function';
-    if (!replaceable && (!tools.setExecutor || presetOf(agent) !== 'standard')) {
-      throw new Error('当前 DSH 无法为此 Agent 预设启用自定义工具。');
-    }
+    if (!canRestoreTools(tools) || !permission?.current) throw new Error(unavailable);
     const Native = await loadNative();
+    if (!this.active(key) || this.owners.get(agent) !== key || this.generations.get(accountFor(key)) !== generation) {
+      throw new Error('QQ 会话关联已变化，请重试。');
+    }
     if (this.installed.has(agent)) return;
     const executor = new Native(agent.ctx);
     const withinCap = (policy: WorkbenchAgentSettings): boolean => {
@@ -160,8 +238,7 @@ export class WorkbenchToolPolicies {
       } catch { return '无法验证此 QQ 会话的工具权限。'; }
     });
     try {
-      const select = replaceable ? tools.overrideExecutor! : tools.setExecutor!;
-      const deselect = select.call(tools, {
+      const deselect = tools.overrideExecutor({
         describe: definitions => {
           const policy = this.read(key);
           return executor.describe(definitions.filter(tool => allows(policy, tool.name)));
@@ -169,8 +246,7 @@ export class WorkbenchToolPolicies {
         execute: input => executor.execute(input),
       });
       this.installed.set(agent, {
-        replaceable,
-        release: () => { deselect(); unguard(); },
+        release: () => { try { deselect(); } finally { unguard(); } },
         withinNativeCap: () => {
           try {
             const policy = this.read(key);
@@ -199,7 +275,7 @@ export class WorkbenchToolPolicies {
     const checkIdle = (live: readonly DshAgent[]) => {
       if (widening && live.some(agent => agent.status !== 'idle')) throw new Error('会话正在运行，请在空闲后扩大工具权限。');
     };
-    await this.restoreLive(key);
+    if (next.tools !== undefined) await this.restoreLive(key, true);
     const live = this.live(key, sessions);
     checkIdle(live);
     if (next.tools !== undefined) for (const agent of live) {
@@ -208,7 +284,7 @@ export class WorkbenchToolPolicies {
     return () => {
       const current = this.live(key, sessions);
       checkIdle(current);
-      if (next.tools !== undefined && current.some(agent => !this.installed.has(agent))) {
+      if (next.tools !== undefined && current.some(agent => !this.installed.has(agent) || this.installed.get(agent)?.failure !== undefined)) {
         throw new Error('会话已重新打开，请重试保存。');
       }
       // Host guards run before dispatch wrappers such as the async checkpoint.
@@ -223,12 +299,10 @@ export class WorkbenchToolPolicies {
 
   reconcile(key: string, sessions: readonly string[]): void {
     if (this.read(key)?.tools !== undefined) return;
-    for (const agent of this.live(key, sessions)) {
-      const installed = this.installed.get(agent);
-      if (installed?.replaceable) {
-        installed.release();
-        this.installed.delete(agent);
-      }
-    }
+    for (const agent of this.live(key, sessions)) this.release(agent);
   }
+}
+
+function accountFor(key: string): string {
+  return key.split(':', 2)[1] ?? '';
 }

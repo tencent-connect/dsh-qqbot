@@ -23,7 +23,7 @@ const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const target: ReplyTarget = { scope: 'c2c', targetId: 'synthetic-user', msgId: 'platform-1' };
 const content = [{ type: 'text', text: 'synthetic request' }];
 
-function setup(options: { file?: string; group?: boolean; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
+function setup(options: { file?: string; group?: boolean; flushSession?: () => Promise<boolean>; externalTurns?: ImQQBotConfig['proactiveDelivery']['externalTurns']; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
   const ledger = new DeliveryLedger(options.file);
   const inputs = new QqInputRegistry({ ledger });
   const stream = { update: vi.fn().mockResolvedValue(undefined), complete: vi.fn().mockResolvedValue(undefined) };
@@ -32,7 +32,7 @@ function setup(options: { file?: string; group?: boolean; streaming?: boolean; s
   const record = { sessionId: 'session-1', replyTarget: { ...initial }, agent: {} } as SessionRecord;
   const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined, replyOptions: options.replyOptions } as SessionManager;
   const config = { streaming: options.streaming ?? true, showToolResults: options.showToolResults ?? true,
-    textChunkLimit: 4500, proactiveDelivery: { externalTurns: 'c2c' },
+    textChunkLimit: 4500, proactiveDelivery: { externalTurns: options.externalTurns ?? 'c2c' },
     sendFile: { maxFiles: 4, restrictPaths: false, extraRoots: [], sendPresentedFiles: true } } as ImQQBotConfig;
   let authorized = true;
   const tracker = createTurnTracker(manager, config, logger, inputs, () => authorized);
@@ -44,22 +44,34 @@ function setup(options: { file?: string; group?: boolean; streaming?: boolean; s
   const deliveryFinished = new Promise<void>(resolve => { markDelivered = resolve; });
   const deliver = deliverer.deliver.bind(deliverer);
   vi.spyOn(deliverer, 'deliver').mockImplementation(async (...args) => { try { await deliver(...args); } finally { markDelivered(); } });
-  const outbound = createOutboundHandler(manager, sender, config, logger, undefined, deliverer, tracker);
+  const outbound = createOutboundHandler(manager, sender, config, logger, undefined, deliverer, tracker, options.flushSession ?? (async () => true));
   const emit = (type: string, data: Record<string, unknown> = {}) => outbound.routeSessionEvent({ header: { id: record.sessionId } }, { type, data });
   const input = (id = 'input-1', turn = 1, platformId = 'platform-1') => {
-    ledger.registerInput({ key: deliveryKey('input', initial.scope, initial.targetId, platformId), messageId: id,
+    const registered = ledger.registerInput({ key: deliveryKey('input', initial.scope, initial.targetId, platformId), messageId: id,
       sessionId: record.sessionId, senderId: 'synthetic-member', target: { ...initial, msgId: platformId }, contentHash: deliveryKey(content) });
-    inputs.register(id);
+    if (registered) inputs.register(id);
     emit('turn/start', { turn });
     emit('user/message', { id, source: { kind: 'user' }, content });
   };
   const answer = (text = 'answer', step = 1, turn = 1) => emit('assistant/message', { turn, step, message: { id: `answer-${step}`, content: [{ type: 'text', text }] } });
   const start = (attempt = 1, turn = 1, step = 1) => outbound.routeStreamFrame(record.sessionId, { kind: 'attempt-start', attemptId: `attempt-${attempt}`, revision: attempt * 100, turn, step });
   const chunk = (text: string, index = 0, attempt = 1) => outbound.routeStreamFrame(record.sessionId, { kind: 'text-delta', attemptId: `attempt-${attempt}`, revision: attempt * 100 + index + 1, index, text });
-  return { ledger, inputs, bot, stream, media, record, tracker, emit, input, answer, start, chunk, deliveryFinished, revoke: () => { authorized = false; } };
+  return { ledger, inputs, bot, stream, media, record, tracker, outbound, emit, input, answer, start, chunk, deliveryFinished, revoke: () => { authorized = false; } };
 }
 
 describe('durable delivery identities', () => {
+  it('keeps a late transport receipt from updating a retired gateway journal', async () => {
+    const file = join(directory(), 'shutdown.jsonl');
+    const ledger = new DeliveryLedger(file);
+    const posted = Promise.withResolvers<void>();
+    const delivery = ledger.run('pending', () => posted.promise);
+    ledger.close();
+    posted.resolve();
+    await delivery;
+    const replacement = new DeliveryLedger(file);
+    expect(replacement.state('pending')).toBe('sending');
+    expect(replacement.begin('pending')).toBe(false);
+  });
   it('reserves before sending, suppresses concurrent and restart retries including changed text', async () => {
     const file = join(directory(), 'ledger.json');
     let finish!: () => void;
@@ -282,6 +294,7 @@ describe('verified native output, retaining upstream delivery features', () => {
     const f = setup({ group, streaming: false }); f.input();
     f.record.replyTarget = { scope: 'group', targetId: 'wrong-peer', msgId: 'later-message' };
     f.answer(); f.answer('changed replay');
+    if (group) f.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
     await vi.runAllTimersAsync();
     expect(f.bot.sendMarkdown).toHaveBeenCalledTimes(1);
     expect(f.bot.sendMarkdown).toHaveBeenCalledWith(expect.objectContaining({ targetId: group ? 'synthetic-group' : 'synthetic-user', msgId: 'platform-1' }), 'answer');
@@ -437,6 +450,73 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['answer']);
   });
 
+  it.each(['completed', 'error'] as const)('group emits only the settled answer for %s', async kind => {
+    const f = setup({ group: true });
+    f.input();
+    f.emit('assistant/message', { turn: 1, step: 1, message: { id: 'before-tool', content: [
+      { type: 'text', text: 'preparing tool' }, { type: 'tool-call', id: 'call', name: 'run_code' },
+    ] } });
+    f.emit('tool/call', { turn: 1, callId: 'call', name: 'run_code' });
+    f.emit('tool/result', { turn: 1, error: { code: 'CODE_RUN_FAILED' }, message: { source: { callId: 'call' } } });
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+    if (kind === 'completed') f.answer('settled answer', 2);
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+    f.emit('turn/end', { turn: 1, reason: { kind } });
+    await vi.waitFor(() => expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual([
+      kind === 'completed' ? 'settled answer' : '⚠️ 本轮处理失败，请稍后重试。',
+    ]));
+  });
+
+  it.each([false, true])('blocks a web answer when external push is off (QQ input=%s)', async withQqInput => {
+    vi.useFakeTimers();
+    const f = setup({ group: true, externalTurns: 'off' });
+    if (withQqInput) f.input();
+    else f.emit('turn/start', { turn: 1 });
+    f.emit('user/message', { id: 'web-answer', source: { kind: 'user-question-reply', callId: 'question' },
+      content: [{ type: 'text', text: 'only visible in Web' }] });
+    f.answer();
+    f.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
+    await vi.runAllTimersAsync();
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('waits for the final group turn to be flushed and drops an unconfirmed turn', async () => {
+    let finish!: (ok: boolean) => void;
+    const f = setup({ group: true, flushSession: () => new Promise(resolve => { finish = resolve; }) });
+    f.input();
+    f.answer();
+    f.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+    finish(false);
+    await Promise.resolve();
+    expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('permanently retires discarded QQ input even if the Web restores its original contents', async () => {
+    const file = join(directory(), 'discards.jsonl');
+    const f = setup({ file, group: true, externalTurns: 'all' });
+    f.input();
+    f.outbound.discardInput(f.record.sessionId, 'input-1');
+    const next = setup({ file, group: true, externalTurns: 'all' });
+    next.emit('turn/start', { turn: 1 });
+    next.emit('user/message', { id: 'input-1', source: { kind: 'user' }, content });
+    next.answer();
+    next.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
+    await Promise.resolve();
+    expect(next.bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('blocks an unchanged restored queue item whose live ingress could not be confirmed after restart', () => {
+    const file = join(directory(), 'interrupted-queue.jsonl');
+    const before = setup({ file, group: true });
+    before.ledger.registerInput({ key: 'registered', messageId: 'input-1',
+      sessionId: before.record.sessionId, senderId: 'synthetic-member', target: before.record.replyTarget, contentHash: deliveryKey(content) });
+    const restarted = setup({ file, group: true, externalTurns: 'all' });
+    restarted.emit('turn/start', { turn: 1 });
+    restarted.emit('user/message', { id: 'input-1', source: { kind: 'user' }, content });
+    expect(restarted.tracker.targetFor(restarted.record.sessionId)).toBeUndefined();
+  });
+
   it('drops unsent partial text and sends a single brief notice on terminal failure', async () => {
     vi.useFakeTimers();
     const f = setup({ showToolResults: true }); f.input();
@@ -568,7 +648,7 @@ it.each([false, true])('does not re-send a file or report a new failure on repla
   restarted.input();
   restarted.emit('deliverables/presented', claim);
   restarted.emit('turn/end', end);
-  await restarted.deliveryFinished;
+  await Promise.resolve();
   expect(restarted.media.sendFile).not.toHaveBeenCalled();
   expect(restarted.bot.sendMarkdown).not.toHaveBeenCalled();
 });

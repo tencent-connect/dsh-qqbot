@@ -1,3 +1,4 @@
+import { t } from './qq-locale.ts';
 import { createElement as h, Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, IconPlusOutlineRegular, IconSettingsOutlineRegular, IconTrashOutlineRegular, Input, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
 import {
@@ -14,32 +15,34 @@ import { BindPanelBody, QQ_BOT_LOGO_PATH } from './bind-page.ts';
 import { AccessSettings, PrimaryAccountSettings } from './config-panel.ts';
 import { fetchJson, HttpError } from './http.ts';
 
-export const ROBOT_STATE_LABELS: Record<WorkbenchRobot['state'], string> = {
-  connecting: '连接中', connected: '已连接', reconnecting: '重连中', failed: '连接失败', disabled: '已停用',
-};
+export function robotStateLabel(state: WorkbenchRobot['state']): string {
+  return {
+  connecting: t("连接中"), connected: t("已连接"), reconnecting: t("重连中"), failed: t("连接失败"), disabled: t("已停用"),
+  }[state];
+}
 
 type Access = WorkbenchRobot['access'];
 type Mode = Access['groupMode'];
 type ModeKey = 'c2cMode' | 'groupMode' | 'commandMode';
 const MODE_KEYS = ['c2cMode', 'groupMode', 'commandMode'] as const satisfies readonly ModeKey[];
-type Draft = { alias: string; c2cMode: Mode; groupMode: Mode; commandMode: Mode };
+type Draft = { alias: string; c2cMode: Mode; groupMode: Mode; commandMode?: Mode };
 type EditRobot = { kind: 'edit'; baseline: WorkbenchRobot; draft: Draft };
 type Editor = { kind: 'add'; id: string } | EditRobot;
-const accountDrafts = new Map<string, EditRobot>();
+export type RobotAccountDrafts = Map<string, EditRobot>;
 
 export function robotBindingKey(robot: WorkbenchRobot): string {
   return JSON.stringify([robot.appId, robot.bindingRevision]);
 }
 
 export function accountName(robot: WorkbenchRobot): string {
-  return robot.alias || (robot.primary ? '主机器人' : `机器人 ${robot.appId}`);
+  return robot.alias || (robot.primary ? t("主机器人") : t("机器人 {0}", robot.appId));
 }
 
 function editRobot(robot: WorkbenchRobot): EditRobot {
   return {
     kind: 'edit', baseline: robot, draft: {
       alias: robot.alias, c2cMode: robot.access.c2cMode, groupMode: robot.access.groupMode,
-      commandMode: robot.access.commandMode ?? 'open',
+      commandMode: robot.access.commandMode,
     },
   };
 }
@@ -51,14 +54,14 @@ function makePatch({ draft, baseline }: EditRobot): WorkbenchRobotPatch {
   if (!baseline.primary) {
     const access: Partial<Access> = {};
     for (const key of MODE_KEYS) {
-      if (draft[key] !== (baseline.access[key] ?? 'open')) access[key] = draft[key];
+      if (draft[key] !== undefined && draft[key] !== baseline.access[key]) access[key] = draft[key];
     }
     if (Object.keys(access).length > 0) patch.access = access;
   }
   return patch;
 }
 
-function rememberEdit(editor: EditRobot): void {
+function rememberEdit(accountDrafts: RobotAccountDrafts, editor: EditRobot): void {
   const key = robotBindingKey(editor.baseline);
   if (Object.keys(makePatch(editor)).length > 2) accountDrafts.set(key, editor);
   else accountDrafts.delete(key);
@@ -84,6 +87,7 @@ function replaceRobot(robots: readonly WorkbenchRobot[] | null, robot: Workbench
 
 export interface RobotAccountsProps {
   selectedAppId?: string;
+  draftStore: RobotAccountDrafts;
   onSelect: (appId: string) => void;
   workbench: {
     collapsed: boolean;
@@ -98,6 +102,7 @@ export interface RobotAccountsProps {
     render: (view: {
       robots: readonly WorkbenchRobot[] | null;
       unavailable: boolean;
+      error?: string;
       rail: ReactNode;
       accountSettings: ReactNode;
       cancelAdd: () => void;
@@ -106,7 +111,7 @@ export interface RobotAccountsProps {
   };
 }
 
-export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccountsProps): ReactNode {
+export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSelect, workbench }: RobotAccountsProps): ReactNode {
   const [robots, setRobots] = useState<readonly WorkbenchRobot[] | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -131,7 +136,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
     ?? robots?.find(robot => robot.primary) ?? robots?.[0];
 
   const setEdit = (next: EditRobot): void => {
-    rememberEdit(next);
+    rememberEdit(accountDrafts, next);
     setEditor(next);
   };
 
@@ -153,7 +158,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           setUnavailable(true);
           setLoadError('');
         } else {
-          setLoadError(error instanceof Error ? error.message : '无法读取机器人列表');
+          setLoadError(error instanceof Error ? error.message : t("无法读取机器人列表"));
         }
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(() => { void refresh(); }, 4000);
@@ -174,7 +179,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       if (selectedAppId === removing.appId && robots[0]) onSelect(robots[0].appId);
     } else if (latest.revision !== removing.revision) {
       setRemoving(latest);
-      setRemoveError('机器人配置已更新，请确认当前机器人后再解绑。');
+      setRemoveError(t("机器人配置已更新，请确认当前机器人后再解绑。"));
     }
   }, [busy, removing, removeError, removeMode, robots, selectedAppId, onSelect]);
 
@@ -196,7 +201,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           update({ phase: 'failed', reason: error.message });
           return;
         }
-        update({ phase: 'failed', reason: '无法读取绑定状态，请刷新二维码。' });
+        update({ phase: 'failed', reason: t("无法读取绑定状态，请刷新二维码。") });
       }
       if (!controller.signal.aborted) timer = setTimeout(() => { void poll(); }, 1500);
     };
@@ -206,7 +211,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       update(state);
       if (!controller.signal.aborted) void poll();
     }, (error: unknown) => {
-      update({ phase: 'failed', reason: error instanceof Error ? error.message : '无法开始绑定，请重试。' });
+      update({ phase: 'failed', reason: error instanceof Error ? error.message : t("无法开始绑定，请重试。") });
     });
     return () => {
       controller.abort();
@@ -235,7 +240,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   }, [bindState, robots, workbench]);
 
   const submitBinding = async (appId: string, appSecret: string) => {
-    if (!bindId || mutation.current) return { ok: false, error: '请等待当前绑定完成。' };
+    if (!bindId || mutation.current) return { ok: false, error: t("请等待当前绑定完成。") };
     const controller = new AbortController();
     mutation.current = controller;
     generation.current++;
@@ -245,14 +250,14 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
         body: JSON.stringify({ action: 'manual', id: bindId, appId, appSecret }),
       });
-      if (controller.signal.aborted) return { ok: false, error: '绑定已取消。' };
+      if (controller.signal.aborted) return { ok: false, error: t("绑定已取消。") };
       if (state.phase === 'bound') {
         setBinding({ id: bindId, state });
         return { ok: true };
       }
-      return { ok: false, error: state.phase === 'failed' ? state.reason : '绑定未完成，请重试。' };
+      return { ok: false, error: state.phase === 'failed' ? state.reason : t("绑定未完成，请重试。") };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : '绑定失败，请重试。' };
+      return { ok: false, error: error instanceof Error ? error.message : t("绑定失败，请重试。") };
     } finally {
       if (mutation.current === controller) {
         generation.current++;
@@ -263,7 +268,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
   };
 
   const save = async (patch: WorkbenchRobotPatch, editing: boolean): Promise<{ ok: boolean; error?: string }> => {
-    if (mutation.current) return { ok: false, error: '请等待当前操作完成。' };
+    if (mutation.current) return { ok: false, error: t("请等待当前操作完成。") };
     const controller = new AbortController();
     mutation.current = controller;
     generation.current++;
@@ -276,7 +281,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify(patch), signal: controller.signal,
       });
-      if (controller.signal.aborted) return { ok: false, error: '操作已取消。' };
+      if (controller.signal.aborted) return { ok: false, error: t("操作已取消。") };
       setRobots(current => replaceRobot(current, robot));
       if (editing) {
         setEdit(editRobot(robot));
@@ -286,11 +291,11 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       }
       return { ok: true };
     } catch (error) {
-      if (controller.signal.aborted) return { ok: false, error: '操作已取消。' };
+      if (controller.signal.aborted) return { ok: false, error: t("操作已取消。") };
       const conflict = error instanceof HttpError && error.status === 409;
       const message = conflict && patch.revision !== null
-        ? '机器人配置已更新，请读取最新配置后再保存。'
-        : error instanceof Error ? error.message : '无法保存机器人配置';
+        ? t("机器人配置已更新，请读取最新配置后再保存。")
+        : error instanceof Error ? error.message : t("无法保存机器人配置");
       if (editing) setEditError(message);
       else setActionError(message);
       if (conflict) setReload(value => value + 1);
@@ -333,7 +338,7 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
       }
     } catch (error) {
       if (!controller.signal.aborted) setRemoveError(error instanceof HttpError && (error.status === 409 || error.status === 503)
-        ? error.message : '暂未确认解绑结果。若刷新后仍显示此机器人，可以重试。');
+        ? error.message : t("暂未确认解绑结果。若刷新后仍显示此机器人，可以重试。"));
     } finally {
       if (mutation.current === controller) {
         generation.current++;
@@ -408,39 +413,39 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           startEdit(editRobot(current ?? editor.baseline));
         }
       },
-    }, '撤销修改'),
+    }, t("撤销修改")),
     h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave },
-      busy ? '保存中…' : '保存'));
+      busy ? t("保存中…") : t("保存")));
   const form = editor?.kind !== 'edit' ? null : h('form', {
       id: formId, className: 'imqr-form', onSubmit: (event: FormEvent) => {
         event.preventDefault();
         if (canSave) void save(patch, true);
       },
     },
-      h('label', { className: 'imqb-field imqr-field' }, '机器人名称', h(Input, {
-        value: editor.draft.alias, disabled: busy, placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120,
+      h('label', { className: 'imqb-field imqr-field' }, t("机器人名称"), h(Input, {
+        value: editor.draft.alias, disabled: busy, placeholder: t("可选，便于区分机器人"), autoComplete: 'off', maxLength: 120,
         onChange: event => setField('alias', event.currentTarget.value),
       })),
       stale ? h('div', { className: 'imqr-header' },
-        h('p', { className: 'imqb-error', role: 'alert' }, '配置已变化，草稿仍保留。'),
+        h('p', { className: 'imqb-error', role: 'alert' }, t("配置已变化，草稿仍保留。")),
         h(Button, { size: 'sm', variant: 'outline', type: 'button', disabled: busy, onClick: () => {
           if (editor.kind !== 'edit' || !current) return;
           setEdit(rebase(editor, current));
           setEditError('');
           setRebased(true);
-        } }, '合并到最新配置')) : null,
+        } }, t("合并到最新配置"))) : null,
       editError && !stale ? h('p', { className: 'imqb-error', role: 'alert' }, editError) : null,
-      rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, '草稿已合并，请核对后保存。') : null,
+      rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, t("草稿已合并，请核对后保存。")) : null,
   );
   const startBinding = (): void => startEdit({ kind: 'add', id: crypto.randomUUID() });
   const enabled = current?.enabled ?? (editor?.kind === 'edit' && editor.baseline.enabled);
   const accountControls = editor?.kind === 'edit' ? h(Fragment, null,
-    h('h3', null, '账号信息'),
+    h('h3', null, t("账号信息")),
     h('div', { className: 'imqr-inline-state' },
-      h('span', null, '启用机器人'),
+      h('span', null, t("启用机器人")),
       h(Switch, {
         checked: enabled,
-        label: '启用机器人', disabled: busy,
+        label: t("启用机器人"), disabled: busy,
         onChange: enabled => {
           const robot = current ?? editor.baseline;
           void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
@@ -469,8 +474,8 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
             key: robotBindingKey(editor.baseline),
             appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
             enabled, formId, controls: accountControls,
-            credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': '凭据与访问' },
-              h('h3', null, '凭据与访问'), credentials),
+            credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': t("凭据与访问") },
+              h('h3', null, t("凭据与访问")), credentials),
             onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
           })
         : h(Fragment, null, accountControls, form, credentials,
@@ -485,13 +490,13 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
 
   const retryClear = removing !== undefined && removeMode === 'clear' && removeError !== ''
     && robots?.some(robot => robot.appId === removing.appId) === false;
-  const rail = h('section', { className: 'imqr-rail', 'aria-label': '机器人账号' },
+  const rail = h('section', { className: 'imqr-rail', 'aria-label': t("机器人账号") },
     h('style', null, STYLES),
     h('div', { className: 'imqr-header' },
-      workbench.collapsed ? null : h('h2', { className: 'imqb-status-title' }, '机器人'),
+      workbench.collapsed ? null : h('h2', { className: 'imqb-status-title' }, t("机器人")),
       h('div', { className: 'imqr-actions' },
         robots?.length === 0 ? null : h(Button, {
-          size: 'sm', variant: 'ghost', type: 'button', title: '添加机器人', 'aria-label': '添加机器人',
+          size: 'sm', variant: 'ghost', type: 'button', title: t("添加机器人"), 'aria-label': t("添加机器人"),
           disabled: busy || adding || robots === null,
           onClick: () => {
             startBinding();
@@ -499,17 +504,17 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           },
         }, h(IconPlusOutlineRegular, { size: 16 })),
         !workbench.compact ? h(Button, {
-          size: 'sm', variant: 'ghost', type: 'button', title: workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
-          'aria-label': workbench.collapsed ? '展开机器人栏' : '收起机器人栏',
+          size: 'sm', variant: 'ghost', type: 'button', title: workbench.collapsed ? t("展开机器人栏") : t("收起机器人栏"),
+          'aria-label': workbench.collapsed ? t("展开机器人栏") : t("收起机器人栏"),
           onClick: workbench.onToggleCollapse,
         }, workbench.collapsed ? '›' : '‹') : null)),
     loadError ? h('p', { className: 'imqb-error', role: 'alert' }, loadError) : null,
     actionError ? h('p', { className: 'imqb-error', role: 'alert' }, actionError) : null,
     robots?.length && !robots.some(robot => robot.primary)
       ? h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: bindingBusy,
-        'aria-label': '绑定主机器人', title: '绑定主机器人', onClick: bindPrimary,
-      }, workbench.collapsed ? h(IconPlusOutlineRegular, { size: 16 }) : '绑定主机器人') : null,
-    robots?.length === 0 ? h('p', { className: 'imqb-status-sub' }, '还没有机器人') : null,
+        'aria-label': t("绑定主机器人"), title: t("绑定主机器人"), onClick: bindPrimary,
+      }, workbench.collapsed ? h(IconPlusOutlineRegular, { size: 16 }) : t("绑定主机器人")) : null,
+    robots?.length === 0 ? h('p', { className: 'imqb-status-sub' }, t("还没有机器人")) : null,
     robots?.map(robot => {
       const name = accountName(robot);
       const selected = activeRobot?.appId === robot.appId;
@@ -518,7 +523,8 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
           h('path', { d: QQ_BOT_LOGO_PATH })));
       const label = workbench.collapsed ? null : h('span', { className: 'imqb-status-meta' },
         h('span', { className: 'imqb-status-title imqr-name' }, name),
-        h('span', { className: 'imqb-status-sub' }, ROBOT_STATE_LABELS[robot.state]));
+        h('span', { className: 'imqb-status-sub' }, robotStateLabel(robot.state)),
+        h('span', { className: 'imqb-status-sub' }, 'AppID ', robot.appId));
       return h('div', { className: 'imqr-row', key: robot.appId, 'data-selected': selected || undefined },
         h('button', {
           className: 'imqr-select', type: 'button', disabled: adding && bindingBusy, 'aria-pressed': selected,
@@ -526,44 +532,45 @@ export function RobotAccounts({ selectedAppId, onSelect, workbench }: RobotAccou
             if (adding) cancelAdd();
             onSelect(robot.appId);
           },
-          'aria-label': name, title: `${name} · ${ROBOT_STATE_LABELS[robot.state]}`,
+          'aria-label': name, title: `${name} · ${robotStateLabel(robot.state)}`,
         }, avatar, label),
         workbench.collapsed ? null : h('div', { className: 'imqr-row-actions' },
           h('div', { className: 'imqr-row-buttons' },
-            h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: bindingBusy, onClick: () => openSettings(robot), 'aria-label': `设置${name}`, title: `设置${name}` }, h(IconSettingsOutlineRegular, { size: 16 })),
+            h(Button, { size: 'sm', variant: 'ghost', type: 'button', disabled: bindingBusy, onClick: () => openSettings(robot), 'aria-label': t("设置{0}", name), title: t("设置{0}", name) }, h(IconSettingsOutlineRegular, { size: 16 })),
             h(Button, {
               size: 'sm', variant: 'ghost', type: 'button', className: 'imqr-remove', disabled: bindingBusy,
               onClick: () => openRemove(robot),
-              'aria-label': `解绑${name}`, title: `解绑${name}`,
+              'aria-label': t("解绑{0}", name), title: t("解绑{0}", name),
             }, h(IconTrashOutlineRegular, { size: 16 }))),
-          h(Switch, { checked: robot.enabled, label: `启用${name}`, disabled: bindingBusy, onChange: enabled => {
+          h(Switch, { checked: robot.enabled, label: t("启用{0}", name), disabled: bindingBusy, onChange: enabled => {
             void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
           } })),
       );
     }),
     workbench.collapsed && activeRobot
       ? h(Button, {
-          size: 'sm', variant: 'ghost', type: 'button', title: '当前机器人设置', 'aria-label': '当前机器人设置', disabled: bindingBusy,
+          size: 'sm', variant: 'ghost', type: 'button', title: t("当前机器人设置"), 'aria-label': t("当前机器人设置"), disabled: bindingBusy,
           onClick: () => openSettings(activeRobot),
         }, h(IconSettingsOutlineRegular, { size: 16 })) : null,
     removing ? h(Modal, {
-      open: true, title: `解绑「${accountName(removing)}」？`, closeLabel: '关闭',
-      description: retryClear ? '这台机器人已解绑。重试将继续清除本机 QQ 消息记录和 Session 关联。'
-        : '「仅解绑」会保留本机 QQ 消息记录和 Session 关联。「解绑并清除记录」还会删除这台机器人在本机的 QQ 消息记录，并解除它的 QQ 会话与 DSH Session 的关联。清除无法撤销，原 Session 可在 DSH 工作区打开。',
+      open: true, title: t("解绑「{0}」？", accountName(removing)), closeLabel: t("关闭"),
+      description: retryClear ? t("这台机器人已解绑。重试将继续清除本机 QQ 消息记录和 Session 关联。")
+        : t("「仅解绑」会保留本机 QQ 消息记录和 Session 关联。「解绑并清除记录」还会删除这台机器人在本机的 QQ 消息记录，并解除它的 QQ 会话与 DSH Session 的关联。清除无法撤销，原 Session 可在 DSH 工作区打开。"),
       onClose: () => { if (!mutation.current) setRemoving(undefined); },
       footer: h(Fragment, null,
-        h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setRemoving(undefined) }, '取消'),
+        h(Button, { type: 'button', variant: 'ghost', size: 'sm', disabled: busy, onClick: () => setRemoving(undefined) }, t("取消")),
         h(Button, {
           type: 'button', variant: 'outline', size: 'sm', disabled: busy || retryClear,
           onClick: () => { void remove(removing, 'retain'); },
-        }, busy && removeMode === 'retain' ? '正在解绑…' : '仅解绑'),
+        }, busy && removeMode === 'retain' ? t("正在解绑…") : t("仅解绑")),
         h(Button, {
           type: 'button', variant: 'outline', size: 'sm', className: 'imqb-danger imqr-clear', disabled: busy,
           onClick: () => { void remove(removing, 'clear'); },
-        }, busy && removeMode === 'clear' ? '正在清除…' : retryClear ? '重试清除记录' : '解绑并清除记录')),
-    }, removeError ? h('p', { className: 'imqb-error', role: 'alert' }, removeError) : null) : null,
+        }, busy && removeMode === 'clear' ? t("正在清除…") : retryClear ? t("重试清除记录") : t("解绑并清除记录"))),
+    }, h('p', { className: 'imqb-status-sub' }, 'AppID ', removing.appId),
+      removeError ? h('p', { className: 'imqb-error', role: 'alert' }, removeError) : null) : null,
   );
-  return workbench.render({ robots, unavailable, rail, accountSettings, cancelAdd, busy: bindingBusy });
+  return workbench.render({ robots, unavailable, error: loadError, rail, accountSettings, cancelAdd, busy: bindingBusy });
 }
 
 const STYLES = `

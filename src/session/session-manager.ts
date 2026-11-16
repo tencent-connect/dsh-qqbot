@@ -787,7 +787,10 @@ export class SessionManager {
 
   private async createFresh(key: string, sessionId: string, settings = this.peerSettings?.read(key)) {
     const route = this.configuredRoute(key, settings);
-    const composed = await this.composePreset(settings?.preset || this.getEffectivePresetByKey(key), !!settings?.preset);
+    const placementPreset = settings?.preset;
+    const inheritedPreset = this.modelResolver.getPreset(key) ?? this.config.preset;
+    const required = !!placementPreset && placementPreset !== inheritedPreset;
+    const composed = await this.composePreset(placementPreset || this.getEffectivePresetByKey(key), required);
     const selectedCwd = settings?.cwd;
     const usesDefault = !selectedCwd || selectedCwd === resolveAgentCwd(this.config.cwd);
     const cwd = usesDefault ? this.workspaceDir() : selectedCwd;
@@ -1005,7 +1008,7 @@ export class SessionManager {
     this.sessions.clear();
     for (const record of records) {
       this.releasePrompt(record.agent);
-      record.agent.cancel({ kind: 'user' });
+      record.agent.cancel({ kind: 'user' }, { keepInbox: true });
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
     this.logger.info(`all sessions disposed (count=${records.length})`);

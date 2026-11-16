@@ -32,6 +32,12 @@ interface PrefsFile {
   presets: Record<string, string>;
 }
 
+export interface LegacyPreference {
+  sessionId?: string;
+  route?: ModelRoute;
+  preset?: string;
+}
+
 export class PrefsStore {
   /** per-peer 模型偏好（内存态） */
   private overrides = new Map<string, ModelRoute>();
@@ -57,6 +63,32 @@ export class PrefsStore {
     this.prefsPath = options?.path ?? resolve(PLUGIN_HOME, 'model-prefs.json');
     this.debugLog = debugLog;
     this.onError = options?.onError;
+    this.load();
+  }
+
+  get path(): string { return this.prefsPath; }
+
+  seedLegacy(entries: ReadonlyMap<string, LegacyPreference>): void {
+    const data = this.mergeDisk(this.readDiskState(true));
+    const knownIds = new Set(Object.values(data.sessionIds));
+    let changed = false;
+    for (const [key, { sessionId, route, preset }] of entries) {
+      if (sessionId && !Object.hasOwn(data.sessionIds, key) && !knownIds.has(sessionId)) {
+        data.sessionIds[key] = sessionId;
+        knownIds.add(sessionId);
+        changed = true;
+      }
+      if (route && !Object.hasOwn(data.overrides, key)) {
+        data.overrides[key] = route;
+        changed = true;
+      }
+      if (preset && !Object.hasOwn(data.presets, key)) {
+        data.presets[key] = preset;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    atomicWrite(this.prefsPath, [JSON.stringify(data, null, 2)]);
     this.load();
   }
 

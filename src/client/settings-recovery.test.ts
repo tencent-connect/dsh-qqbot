@@ -341,7 +341,8 @@ describe('QQ settings recovery', () => {
       collapsed: false, compact: false, onAdd() {}, onCancelAdd() {}, onOpenSettings() {}, onToggleCollapse() {},
       render: ({ rail, accountSettings }) => [rail, accountSettings],
     };
-    const render = mount(() => RobotAccounts({ onSelect() {}, workbench }));
+    const draftStore: RobotAccountsProps['draftStore'] = new Map();
+    const render = mount(() => RobotAccounts({ draftStore, onSelect() {}, workbench }));
     render();
     await vi.advanceTimersByTimeAsync(0);
     const open = (name: string) => find(render(), props => props['aria-label'] === `设置${name}`)!.props.onClick!();

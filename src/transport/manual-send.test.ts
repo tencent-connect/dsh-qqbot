@@ -54,6 +54,29 @@ it('links a submitted native answer to its Session in the same conversation time
   expect(timeline.page('B', peer)?.entries).toEqual([]);
 });
 
+it('retries a definitive rejection with the original operation and one timeline entry', async () => {
+  using timeline = { value: new QqTimeline(join(dir, 'timeline'), log), [Symbol.dispose]() { this.value.close(); } };
+  const journal = join(dir, 'delivery.jsonl');
+  const post = vi.fn()
+    .mockImplementationOnce(async (_target, _text, check: () => void) => {
+      check();
+      throw new ApiError('rejected', 400, '/messages');
+    })
+    .mockImplementation(async (_target, _text, check: () => void) => {
+      check();
+      return { id: 'accepted' };
+    });
+  const initial = new ManualQqSender('A', new DeliveryLedger(journal), post, timeline.value);
+  const rejected = await initial.submit(peer, 'retry-me', 'unchanged', yes, yes);
+  expect(rejected.status).toBe('rejected');
+  const retried = new ManualQqSender('A', new DeliveryLedger(journal), post, timeline.value);
+  const accepted = await retried.submit(peer, 'retry-me', 'unchanged', yes, yes);
+  expect(accepted).toMatchObject({ status: 'accepted', id: rejected.id });
+  expect(await retried.submit(peer, 'retry-me', 'unchanged', yes, yes)).toEqual(accepted);
+  expect(post).toHaveBeenCalledTimes(2);
+  expect(timeline.value.page('A', peer)?.entries).toMatchObject([{ status: 'accepted', id: accepted.id }]);
+});
+
 it('rechecks permission before HTTP and does not persist text when recording is off', async () => {
   const timeline = new QqTimeline(join(dir, 'timeline'), log);
   let allowed = true;

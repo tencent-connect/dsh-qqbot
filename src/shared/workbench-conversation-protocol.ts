@@ -30,11 +30,13 @@ export interface WorkbenchConversation {
   recording: boolean;
   retention: MessageRetention;
   admitted: boolean;
+  executionBlocked?: string;
   revision: number;
   /** Present while this conversation uses the robot's template as its settings baseline. */
   defaultsRevision?: number;
   agent?: WorkbenchAgentSettings;
   currentSessionId?: string;
+  sessionCount?: number;
   sessions: WorkbenchSession[];
 }
 

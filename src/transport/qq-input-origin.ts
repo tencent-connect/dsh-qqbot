@@ -58,7 +58,9 @@ export class QqInputRegistry {
   }
 
   public claim(messageId: string, sessionId: string, content: unknown, turn: number, peer: ReplyTarget): InputReceipt | undefined {
-    return this.ledger?.claimInput(messageId, sessionId, content, turn, peer);
+    // A restored queue item could have been edited while the gateway was down.
+    // Require this gateway to have observed its QQ ingress and any live discards.
+    return this.has(messageId) ? this.ledger?.claimInput(messageId, sessionId, content, turn, peer) : undefined;
   }
 
   /** 是否为本插件登记过且未过期的消息。不删除登记。 */

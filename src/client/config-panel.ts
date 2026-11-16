@@ -1,4 +1,4 @@
-/** 主机器人的账号与权限，以及两个账号类型共用的准入设置。 */
+import { t } from './qq-locale.ts';
 import { createElement, Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
@@ -80,14 +80,14 @@ function useConfigPanelStyles(): void {
 }
 
 /** 访问模式分段选择行 */
-function SegmentedRow({ label, help, value, options, onChange, disabled = false }: {
-  label: string; help?: string; value: AccessMode;
-  options: ReadonlyArray<{ value: AccessMode; label: string }>; onChange: (next: AccessMode) => void; disabled?: boolean;
+function SegmentedRow<T extends string>({ label, help, value, options, onChange, disabled = false }: {
+  label: string; help?: string; value: T;
+  options: ReadonlyArray<{ value: T; label: string }>; onChange: (next: T) => void; disabled?: boolean;
 }): ReactNode {
   return createElement('div', { className: 'imqb2-field' },
     createElement('div', { className: 'imqb2-head' },
       createElement('span', { className: 'imqb2-label' }, label),
-      createElement(SegmentedControl<AccessMode>, { id: `imqq-access-${label}`, value, options, onChange, label, disabled }),
+      createElement(SegmentedControl<T>, { id: `imqq-access-${label}`, value, options, onChange, label, disabled }),
     ),
     help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
   );
@@ -95,10 +95,10 @@ function SegmentedRow({ label, help, value, options, onChange, disabled = false 
 
 type AccessMode = AccessControlWire['c2cMode'];
 
-const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
-  { value: 'open', label: '所有人' },
-  { value: 'allowlist', label: '白名单' },
-  { value: 'disabled', label: '关闭' },
+const modeOptions = (): ReadonlyArray<{ value: AccessMode; label: string }> => [
+  { value: 'open', label: t("所有人") },
+  { value: 'allowlist', label: t("白名单") },
+  { value: 'disabled', label: t("关闭") },
 ];
 
 type AccessModeKey = 'c2cMode' | 'groupMode' | 'commandMode';
@@ -119,35 +119,36 @@ export function AccessSettings({
       .then(result => { if (!controller.signal.aborted) { setCommands(result.commands); setCommandsError(null); } })
       .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();
-  }, [appId, bound, enabled, access.commandMode]);
+  }, [appId, bound, enabled, access.c2cMode, access.commandMode]);
   return createElement('div', { className: 'imqb2-form' },
-    createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
-    createElement(SegmentedRow, {
-      disabled: busy, label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
+    createElement('div', { className: 'imqb2-group-title' }, t("服务范围")),
+    createElement(SegmentedRow<AccessMode>, {
+      disabled: busy, label: t("私聊"), value: access.c2cMode, options: modeOptions(),
       onChange: value => onMode('c2cMode', value),
     }),
     access.c2cMode === 'allowlist' ? createElement(PairClaimPanel, {
-      purpose: 'allow-c2c', title: '私聊白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
-      hint: '生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。',
+      purpose: 'allow-c2c', title: t("私聊白名单"), enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: t("生成配对码，让对方在私聊里直接给机器人发送这个码，即加入私聊白名单。"),
     }) : null,
-    createElement(SegmentedRow, {
-      disabled: busy, label: '群聊', value: access.groupMode, options: MODE_OPTIONS,
+    createElement(SegmentedRow<AccessMode>, {
+      disabled: busy, label: t("群聊"), value: access.groupMode, options: modeOptions(),
       onChange: value => onMode('groupMode', value),
     }),
     access.groupMode === 'allowlist' ? createElement(PairClaimPanel, {
-      purpose: 'allow-group', title: '群白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
-      hint: '生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。',
+      purpose: 'allow-group', title: t("群白名单"), enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: t("生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。"),
     }) : null,
-    createElement(SegmentedRow, {
-      disabled: busy, label: '斜杠命令', value: access.commandMode ?? 'open', options: MODE_OPTIONS,
-      help: '仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。',
-      onChange: value => onMode('commandMode', value),
+    createElement(SegmentedRow<AccessMode | 'legacy'>, {
+      disabled: busy, label: t("斜杠命令"), value: access.commandMode ?? 'legacy',
+      options: access.commandMode === undefined ? [{ value: 'legacy', label: t("沿用旧版授权") }, ...modeOptions()] : modeOptions(),
+      help: t("仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。"),
+      onChange: value => { if (value !== 'legacy') onMode('commandMode', value); },
     }),
     (access.commandMode ?? 'open') === 'allowlist' ? createElement(PairClaimPanel, {
-      purpose: 'owner', title: '命令白名单', enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
-      hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
+      purpose: 'owner', title: t("命令白名单"), enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
+      hint: t("名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。"),
     }) : null,
-    commandsError && bound && enabled ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
+    commandsError && bound && enabled ? createElement('p', { className: 'imqc-error', role: 'alert' }, t("命令清单加载失败：{0}", commandsError)) : null,
     commands.length ? createElement(SlashCommandList, { commands }) : null,
   );
 }
@@ -266,7 +267,7 @@ export function PrimaryAccountSettings({
       .then(async ({ config }) => {
         const { robots } = await fetchJson<WorkbenchRobotsResponse>(WORKBENCH_ROBOTS_PATH, { cache: 'no-store', signal: controller.signal });
         const robot = robots.find(robot => robot.appId === appId && robot.primary);
-        if (!robot || config.appId !== appId) throw new Error('主机器人绑定已更新，请重新打开设置。');
+        if (!robot || config.appId !== appId) throw new Error(t("主机器人绑定已更新，请重新打开设置。"));
         config = { ...config, alias: robot.alias, robotRevision: robot.revision };
         if (stopped || saveController.current !== null) return;
         const expected = pendingConfirmation.current;
@@ -278,12 +279,12 @@ export function PrimaryAccountSettings({
         const form = hadDraft ? rebaseConfig(current.baseline, current.form, config) : config;
         const dirty = isConfigDirty(config, form);
         replaceDraft({ baseline: config, form });
-        setDraftNotice(hadDraft && dirty ? '已保留未保存的修改，其余配置已更新。' : null);
+        setDraftNotice(hadDraft && dirty ? t("已保留未保存的修改，其余配置已更新。") : null);
         setLoadError(null);
         if (dirty) setResult(null);
-        else if (confirmed) setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
+        else if (confirmed) setResult({ kind: 'confirmed', message: t("配置已保存，插件重载完成后生效。") });
         else if (pendingConfirmation.current !== null) {
-          setResult({ kind: 'unconfirmed', message: '已读取当前配置，内容与上次保存的值不同。' });
+          setResult({ kind: 'unconfirmed', message: t("已读取当前配置，内容与上次保存的值不同。") });
         } else setResult(null);
       })
       .catch((error: unknown) => {
@@ -331,7 +332,7 @@ export function PrimaryAccountSettings({
         onAliasSaved(robot);
       }
       if (!configChanged) {
-        setResult({ kind: 'confirmed', message: '配置已保存。' });
+        setResult({ kind: 'confirmed', message: t("配置已保存。") });
         return;
       }
       const body = await fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
@@ -342,7 +343,7 @@ export function PrimaryAccountSettings({
           ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }),
         }),
       });
-      if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
+      if (!body.ok) throw new Error(body.error ?? t("保存失败，请重试。"));
       // The write is confirmed. A read from the old fiber during HMR must not undo it.
       if (!mounted.current || controller.signal.aborted) return;
       const expected = { appId: submitted.appId, changed };
@@ -355,17 +356,17 @@ export function PrimaryAccountSettings({
         pendingConfirmation.current = null;
         const baseline = { ...config, alias: submitted.alias, robotRevision: submitted.robotRevision };
         replaceDraft({ baseline, form: baseline });
-        setResult({ kind: 'confirmed', message: '配置已保存，插件重载完成后生效。' });
+        setResult({ kind: 'confirmed', message: t("配置已保存，插件重载完成后生效。") });
       } else {
-        setResult({ kind: 'unconfirmed', message: '配置已保存，刷新配置核对生效结果。' });
+        setResult({ kind: 'unconfirmed', message: t("配置已保存，刷新配置核对生效结果。") });
       }
     })()
       .catch((error: unknown) => {
         if (!mounted.current || controller.signal.aborted) return;
         const detail = error instanceof HttpError && error.status === 409
-          ? `${error.message}草稿已保留，请先刷新配置。`
-          : `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。`;
-        setResult({ kind: 'failed', message: aliasSaved ? `机器人名称已保存。${detail}` : detail });
+          ? t("{0}草稿已保留，请先刷新配置。", error.message)
+          : t("保存结果未确认：{0}。草稿已保留，可重试或刷新配置核对。", error instanceof Error ? error.message : String(error));
+        setResult({ kind: 'failed', message: aliasSaved ? t("机器人名称已保存。{0}", detail) : detail });
       })
       .finally(() => {
         if (saveController.current === controller) {
@@ -377,30 +378,30 @@ export function PrimaryAccountSettings({
 
   const retry = (): void => { setReload((value) => value + 1); };
   const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb2-feedback', role: 'alert' },
-    createElement('p', { className: 'imqb2-note imqb2-note--error' }, `配置加载失败：${loadError}`),
-    createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? '重试中…' : '重试'),
+    createElement('p', { className: 'imqb2-note imqb2-note--error' }, t("配置加载失败：{0}", loadError)),
+    createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? t("重试中…") : t("重试")),
   );
   const accountFields = createElement(Fragment, null,
     controls,
-    draft && createElement('label', { className: 'imqb-field imqr-field' }, '机器人名称', createElement(Input, {
+    draft && createElement('label', { className: 'imqb-field imqr-field' }, t("机器人名称"), createElement(Input, {
       form: formId, value: draft.form.alias ?? '', disabled: busy || loading,
-      placeholder: '可选，便于区分机器人', autoComplete: 'off', maxLength: 120,
+      placeholder: t("可选，便于区分机器人"), autoComplete: 'off', maxLength: 120,
       onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch('alias', event.target.value),
     })),
     credentials,
   );
   if (draft === null) {
     return createElement('div', { 'aria-busy': loading }, accountFields, loadFeedback,
-      loading ? createElement('p', { className: 'imqb2-hint', role: 'status', style: { padding: '12px 0' } }, '正在加载配置…') : null,
+      loading ? createElement('p', { className: 'imqb2-hint', role: 'status', style: { padding: '12px 0' } }, t("正在加载配置…")) : null,
     );
   }
 
   const { baseline, form } = draft;
   const dirty = isConfigDirty(baseline, form);
   const access = form.access ?? DEFAULT_ACCESS;
-  const message = busy ? '正在保存配置…' : result?.message ?? (dirty
-    ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
-    : '没有未保存的修改。');
+  const message = busy ? t("正在保存配置…") : result?.message ?? (dirty
+    ? draftNotice ?? t("有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。")
+    : t("没有未保存的修改。"));
 
   const settingsForm = createElement('form', { id: formId, className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
@@ -408,11 +409,11 @@ export function PrimaryAccountSettings({
       createElement(AccessSettings, { access, busy, appId, enabled, onMembershipChange: retry,
         onMode: (key, value) => patch('access', { ...access, [key]: value }),
       }),
-      createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
+      createElement('div', { className: 'imqb2-group-title' }, t("基础设置")),
       createElement('div', { className: 'imqb2-field' },
         createElement('div', { className: 'imqb2-head' },
-          createElement('span', { className: 'imqb2-label' }, '群聊仅回复 @机器人的消息'),
-          createElement(Switch, { label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
+          createElement('span', { className: 'imqb2-label' }, t("群聊仅回复 @机器人的消息")),
+          createElement(Switch, { label: t("群聊仅回复 @机器人的消息"), checked: form.requireMention ?? true,
             onChange: value => patch('requireMention', value) }))),
     ),
     createElement('div', { className: 'imqb2-footer' },
@@ -420,9 +421,9 @@ export function PrimaryAccountSettings({
       createElement('div', { className: 'imqb2-footer-actions' },
         pendingConfirmation.current !== null || result?.kind === 'failed' ? createElement(Button, {
           variant: 'ghost', size: 'sm', disabled: busy || loading, onClick: retry,
-        }, loading ? '刷新中…' : '刷新配置') : null,
-        createElement(Button, { variant: 'ghost', size: 'sm', disabled: busy || !dirty, onClick: () => { replaceDraft({ baseline, form: baseline }); setResult(null); setDraftNotice(null); } }, '撤销修改'),
-        createElement(Button, { variant: 'primary', size: 'sm', type: 'submit', disabled: busy || !dirty }, busy ? '保存中…' : '保存'),
+        }, loading ? t("刷新中…") : t("刷新配置")) : null,
+        createElement(Button, { variant: 'ghost', size: 'sm', disabled: busy || !dirty, onClick: () => { replaceDraft({ baseline, form: baseline }); setResult(null); setDraftNotice(null); } }, t("撤销修改")),
+        createElement(Button, { variant: 'primary', size: 'sm', type: 'submit', disabled: busy || !dirty }, busy ? t("保存中…") : t("保存")),
       ),
     ),
   );

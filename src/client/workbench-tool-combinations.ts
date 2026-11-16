@@ -1,3 +1,5 @@
+import type { QqLocaleKey } from './qq-locale.ts';
+
 export interface ToolCombination {
   id: string;
   label: string;
@@ -6,10 +8,10 @@ export interface ToolCombination {
 
 const fileAndSearchTools = ['skill', 'read', 'read_image', 'grep', 'glob', 'qqbot_group_history'];
 
-export const BUILT_IN_TOOL_COMBINATIONS: readonly ToolCombination[] = [
+export const BUILT_IN_TOOL_COMBINATIONS = [
   { id: 'read-files', label: '只读：文件与搜索', tools: fileAndSearchTools },
   { id: 'read-web', label: '只读 + 网页', tools: [...fileAndSearchTools, 'web_search', 'web_fetch'] },
-];
+] as const satisfies readonly (ToolCombination & { label: QqLocaleKey })[];
 
 const storageKey = 'im-qqbot/tool-presets/v1';
 

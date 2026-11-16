@@ -46,7 +46,7 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=20.3.0"
+    "node": "^22.19.0 || >=24.0.0"
   },
   "repository": {
     "type": "git",
@@ -64,14 +64,11 @@
       "platform": "web"
     },
     "compatibility": {
-      "dshReleases": {
-        "0.1.0-rc.8": "compatible",
-        "0.2.0-rc.2": "compatible"
-      },
-      "note": "0.1.0-rc.8 为 CLI（dsh web）已验证：扫码、手动绑定、解绑及终端二维码。0.2.0-rc.2 为 Desktop 内嵌运行时已验证：端内绑定和 HMR。当前客户端在 QQ 工作台提供绑定入口，宿主大版本升级后请重新验收。"
+      "note": "兼容性按宿主 API 启用。参见 README 的基础收发、QQ 工作台和自定义工具能力。 Capabilities depend on the Host APIs. See the README."
     }
   },
   "dependencies": {
+    "@tencent-connect/dsh-qqbot-workbench-history": "0.5.6",
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "^1.0.5",
     "@xmldom/xmldom": "0.9.12",
@@ -121,9 +118,13 @@
     "@types/node": "^26.2.0",
     "@types/qrcode": "^1.5.5",
     "@types/react": "~18.3.1",
+    "lightningcss": "1.33.0",
     "react": "^18.2.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.5.0",
     "vitest": "^4.1.8"
-  }
+  },
+  "workspaces": [
+    "plugins/workbench-history"
+  ]
 }

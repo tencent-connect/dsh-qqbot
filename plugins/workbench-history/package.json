@@ -16,9 +16,6 @@
     "lib/client.js.map",
     "locale"
   ],
-  "peerDependencies": {
-    "@tencent-connect/dsh-qqbot": "^0.5.6"
-  },
   "dsh": {
     "client": {
       "platform": "web",

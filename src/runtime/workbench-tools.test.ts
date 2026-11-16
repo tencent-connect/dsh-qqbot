@@ -39,7 +39,7 @@ function fixture(initial = native) {
   const registry = { get: (id: string) => live.get(id), list: () => [...live.values()] };
   const policies = new WorkbenchToolPolicies(ctx as unknown as Context, registry as DshAgentRegistry,
     id => saved.get(id), id => id === 'root' ? key : id === 'independent' ? peer : undefined);
-  async function start(id: string, parentSession?: string, broken = false) {
+  async function start(id: string, parentSession?: string, broken: boolean | 'legacy' = false) {
     let check: ((exec: Execution) => string | undefined) | undefined;
     let describe = (tools: readonly { name: string }[]) => ({ schemas: tools });
     let permission = 'workspace-write';
@@ -52,6 +52,7 @@ function fixture(initial = native) {
         return () => { describe = entries => ({ schemas: entries }); };
       },
     };
+    if (broken === 'legacy') Reflect.deleteProperty(tools, 'overrideExecutor');
     const cancel = vi.fn(() => signal.abort());
     const simulated = { id, status: 'running', session: { id, header: { agentPreset: 'ptc', parentSession } }, cancel,
       ctx: { get: (name: string) => name === 'tools' ? tools : { current: () => permission } } };
@@ -77,7 +78,7 @@ function fixture(initial = native) {
     afterSave?.();
     policies.reconcile(key, ['root']);
   }
-  return { start, save };
+  return { start, save, policies };
 }
 
 describe('QQ custom tool permissions', () => {
@@ -161,6 +162,34 @@ describe('QQ custom tool permissions', () => {
     await expect(save(narrow)).rejects.toThrow('no executor');
     expect(root.guard('write')).toBeUndefined();
     expect(root.cancel).not.toHaveBeenCalled();
+  });
+
+  it('releases a robot policy and descendants while keeping the original native Sessions open', async () => {
+    const { start, policies } = fixture(narrow);
+    const root = await start('root');
+    const child = await start('child', 'root');
+    const other = await start('independent');
+    for (const agent of [root, child]) expect(agent.tools()).toEqual(['read']);
+    policies.detachAccount('app');
+    for (const agent of [root, child]) {
+      expect(agent.tools()).toEqual(['read', 'write', 'subagent', 'run_code']);
+      expect(agent.guard('write')).toBeUndefined();
+      expect(agent.signal.aborted).toBe(true);
+    }
+    expect(other.cancel).not.toHaveBeenCalled();
+    const later = await start('later-child', 'root');
+    expect(later.guard('write')).toBeUndefined();
+  });
+
+  it('contains an unsupported policy and releases the deny guard on disable', async () => {
+    const { start, policies } = fixture(narrow);
+    const restricted = await start('root', undefined, 'legacy');
+    const independent = await start('independent', undefined, 'legacy');
+    expect(restricted.guard('read')).toContain('更新 DSH');
+    expect(independent.guard('write')).toBeUndefined();
+    expect(independent.cancel).not.toHaveBeenCalled();
+    policies.close();
+    expect(restricted.guard('read')).toBeUndefined();
   });
 
   it('rejects widening while a child is running and leaves a no-op save alone', async () => {

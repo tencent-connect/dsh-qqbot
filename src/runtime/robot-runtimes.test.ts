@@ -15,6 +15,7 @@ import { RobotConfigStore } from './robot-config.ts';
 import { RobotRuntimes } from './robot-runtimes.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import { QqTimeline } from './qq-timeline.ts';
+import { SESSION_PREFERENCES_FILE } from '../shared/dirs.ts';
 
 const sandbox = vi.hoisted(() => ({ dir: '' }));
 vi.mock('../shared/dirs.ts', async original => {
@@ -162,7 +163,7 @@ it('clears only the confirmed binding, letting a later retry finish safely', asy
     expect(clear()).toBeUndefined();
     expect(failFirst).toHaveBeenCalledTimes(2);
 
-    const prefs = new PrefsStore();
+    const prefs = new PrefsStore(undefined, { path: join(sandbox.dir, SESSION_PREFERENCES_FILE) });
     expect(prefs.listSessionBindings(target.appId)).toEqual([]);
     expect(prefs.findKnownSessionKey('old-session')).toBeUndefined();
     expect(prefs.findKnownSessionKey('current-session')).toBeUndefined();

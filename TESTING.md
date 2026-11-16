@@ -54,6 +54,18 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
 
 同一回放还会在机器人默认值和现有会话中绑定提示词文件，核对预览及模型请求都读到更新后的文件内容，并验证文件缺失时模型请求会停止。
 
+## 从 0.5.5 升级和干净安装
+
+用 npm 发布的 DSH CLI 和正式 QQBot 0.5.5 安装包回放。脚本从旧包写入实际格式的会话和偏好，测试单次安装主包、回退及双进程目录锁。候选记录包在回环 registry 暂存。QQ 网关和模型均使用本地夹具。
+
+```bash
+node tests/e2e/upgrade-055.mjs /absolute/dsh/lib/bin.js \
+  /absolute/official-0.5.5.tgz /absolute/qqbot.tgz \
+  /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+使用 RC3 时运行默认模式。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
+
 ## 本地协议夹具
 
 验证入口要求 Node 22.19+ 或 Node 24+（不支持 Node 23）及 Python 3.10+。请先确认当前终端使用的版本。

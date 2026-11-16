@@ -1,32 +1,20 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeSync, type Stats } from 'node:fs';
-import { basename, dirname, join, sep } from 'node:path';
+import { chmodSync, mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { basename, join, sep } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
-import { atomicWrite } from '../shared/atomic-file.ts';
 import { MAX_TIMELINE_IMAGES, TIMELINE_PAGE_SIZE, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage } from '../shared/workbench-timeline-protocol.ts';
 import { deliveryKey } from '../transport/delivery-ledger.ts';
 
 interface Peer { scope: ChatScope; openId: string }
 type StoredEntry = TimelineEntry & { imageFiles?: string[] };
-interface Journal {
-  signature: string;
-  generation?: string;
-  oldestAt: number;
-  rows: Map<string, StoredEntry>;
-  completeBytes?: number;
+
+function partition(appId: string, target: ReplyTarget): [string, ChatScope, string] {
+  return [appId, target.scope, target.targetId];
 }
 
-function missing(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT';
-}
-
-function signature(stats: { ino: number; size: number; mtimeMs: number }): string {
-  return `${stats.ino}:${stats.size}:${stats.mtimeMs}`;
-}
-
-function journalState(stats: Stats, rows: Map<string, StoredEntry>): Journal {
-  let oldestAt = Infinity;
-  for (const row of rows.values()) oldestAt = Math.min(oldestAt, row.at);
-  return { signature: signature(stats), generation: deliveryKey(stats.ino, stats.birthtimeMs), oldestAt, rows };
+function recordKey(appId: string, target: ReplyTarget): string {
+  return join(deliveryKey(appId), deliveryKey(target.scope, target.targetId));
 }
 
 export function timelineText(text: string): string {
@@ -37,9 +25,10 @@ export function receivedEntryId(platformId: string): string {
   return deliveryKey('inbound', platformId);
 }
 
-/** Display data has independent failure and retention semantics from the delivery ledger. */
+/** The display store and the delivery ledger have separate retention and failure semantics. */
 export class QqTimeline {
-  private readonly journals = new Map<string, Journal>();
+  private database?: DatabaseSync;
+  private closed = false;
   private readonly incomplete = new Set<string>();
   private readonly pending = new Set<string>();
   private readonly generations = new Map<string, number>();
@@ -47,54 +36,43 @@ export class QqTimeline {
   constructor(private readonly root: string, private readonly logger: Logger,
     private readonly retainAfter?: (appId: string, target: ReplyTarget) => number | undefined) {}
 
+  close(): void {
+    this.closed = true;
+    this.database?.close();
+    this.database = undefined;
+  }
+
   clearAccount(appId: string): void {
-    const path = this.accountDir(appId);
-    this.advanceGeneration(path);
-    for (const key of this.generations.keys()) if (key.startsWith(path + sep)) this.generations.delete(key);
-    for (const key of this.journals.keys()) if (key.startsWith(path + sep)) this.journals.delete(key);
+    this.connection().prepare('DELETE FROM peers WHERE app_id = ?').run(appId);
+    const account = deliveryKey(appId);
+    this.advanceGeneration(account);
+    for (const key of this.generations.keys()) if (key.startsWith(account + sep)) this.generations.delete(key);
     for (const set of [this.incomplete, this.pending]) {
-      for (const key of set) if (key.startsWith(path + sep)) set.delete(key);
+      for (const key of set) if (key.startsWith(account + sep)) set.delete(key);
     }
-    rmSync(path, { force: true, recursive: true });
   }
 
   clearPeer(appId: string, target: ReplyTarget): void {
-    const path = this.peerDir(appId, target);
-    const file = join(path, 'rows.jsonl');
-    if (existsSync(file)) atomicWrite(file, []);
-    this.advanceGeneration(path);
-    this.journals.delete(file);
-    for (const key of this.pending) if (key.startsWith(path + sep)) this.pending.delete(key);
-    rmSync(join(path, 'incomplete'), { force: true });
-    this.incomplete.delete(path);
+    const key = recordKey(appId, target);
+    this.removeRows(appId, target);
+    this.advanceGeneration(key);
+    for (const pending of this.pending) if (pending.startsWith(key + sep)) this.pending.delete(pending);
+    this.incomplete.delete(key);
   }
 
   expire(appId: string, target: ReplyTarget): void {
     try {
-      this.retainedJournal(appId, target);
+      const cutoff = this.retainAfter?.(appId, target);
+      if (cutoff !== undefined) this.removeRows(appId, target, cutoff);
     } catch {
-      this.noteFailure(this.peerDir(appId, target));
+      this.noteFailure(recordKey(appId, target));
     }
   }
 
   peers(appId: string): Peer[] {
-    const root = this.accountDir(appId);
-    let names: string[];
-    try { names = readdirSync(root); }
-    catch (error) { if (missing(error)) return []; throw error; }
-
-    return names.filter(name => /^[a-f0-9]{64}$/.test(name)).flatMap(name => {
-      const directory = join(root, name);
-      try {
-        const peer = JSON.parse(readFileSync(join(directory, 'peer.json'), 'utf8')) as Peer;
-        if (typeof peer.openId !== 'string' || (peer.scope !== 'c2c' && peer.scope !== 'group')
-          || deliveryKey(peer.scope, peer.openId) !== name) throw new Error('Invalid QQ timeline peer');
-        return [peer];
-      } catch {
-        this.noteFailure(directory);
-        return [];
-      }
-    });
+    const rows = this.connection().prepare('SELECT scope, target_id FROM peers WHERE app_id = ?').all(appId);
+    return rows.flatMap(row => (row.scope === 'group' || row.scope === 'c2c') && typeof row.target_id === 'string'
+      ? [{ scope: row.scope, openId: row.target_id }] : []);
   }
 
   record(appId: string, target: ReplyTarget, entry: TimelineEntry, once = false): void {
@@ -111,7 +89,7 @@ export class QqTimeline {
   }
 
   imageFile(appId: string, target: ReplyTarget, id: string, index: number): string | undefined {
-    return this.retainedJournal(appId, target).rows.get(id)?.imageFiles?.[index];
+    return this.read(appId, target, id)?.imageFiles?.[index];
   }
 
   reportInbound(appId: string, target: ReplyTarget, inboundOutcome: TimelineInboundOutcome, sessionId?: string): void {
@@ -125,20 +103,19 @@ export class QqTimeline {
   }
 
   entry(appId: string, target: ReplyTarget, id: string): TimelineEntry | undefined {
-    const directory = this.peerDir(appId, target);
-    const row = this.retainedJournal(appId, target).rows.get(id);
-    return row && this.observedStatus(directory, row);
+    const row = this.read(appId, target, id);
+    return row && this.observedStatus(recordKey(appId, target), row);
   }
 
   async observe<T>(appId: string, target: ReplyTarget, entry: TimelineEntry,
     send: () => Promise<T>, finish: (result?: T, error?: unknown) => Partial<TimelineEntry>,
     stillOwned?: () => boolean): Promise<T> {
-    const account = this.accountDir(appId);
-    const peer = this.peerDir(appId, target);
+    const account = deliveryKey(appId);
+    const peer = recordKey(appId, target);
     const key = join(peer, entry.id);
     const accountGeneration = this.generations.get(account);
     const peerGeneration = this.generations.get(peer);
-    const current = () => this.generations.get(account) === accountGeneration && this.generations.get(peer) === peerGeneration;
+    const current = () => !this.closed && this.generations.get(account) === accountGeneration && this.generations.get(peer) === peerGeneration;
     this.pending.add(key);
     this.update(appId, target, entry.id, previous => ({ ...entry, at: previous?.at ?? entry.at }));
     try {
@@ -158,17 +135,27 @@ export class QqTimeline {
   }
 
   page(appId: string, target: ReplyTarget, before?: string): TimelinePage | undefined {
-    const directory = this.peerDir(appId, target);
-    const journal = this.retainedJournal(appId, target);
-    const rows = [...journal.rows.values()];
-    const end = before === undefined ? rows.length : rows.findIndex(row => row.id === before);
-    if (end < 0) return undefined;
-    const start = Math.max(0, end - TIMELINE_PAGE_SIZE);
+    this.expire(appId, target);
+    const db = this.connection();
+    const key = partition(appId, target);
+    const position = before === undefined ? undefined : db.prepare(
+      'SELECT seq FROM messages WHERE app_id = ? AND scope = ? AND target_id = ? AND message_id = ?',
+    ).get(...key, before)?.seq;
+    if (before !== undefined && typeof position !== 'number') return undefined;
+    const cutoff = this.retainAfter?.(appId, target) ?? -Number.MAX_SAFE_INTEGER;
+    const rows = typeof position === 'number'
+      ? db.prepare(`SELECT body FROM messages INDEXED BY messages_page WHERE app_id = ? AND scope = ? AND target_id = ?
+          AND seq < ? AND at >= ? ORDER BY seq DESC LIMIT ?`).all(...key, position, cutoff, TIMELINE_PAGE_SIZE + 1)
+      : db.prepare(`SELECT body FROM messages INDEXED BY messages_page WHERE app_id = ? AND scope = ? AND target_id = ?
+          AND at >= ? ORDER BY seq DESC LIMIT ?`).all(...key, cutoff, TIMELINE_PAGE_SIZE + 1);
+    const directory = recordKey(appId, target);
+    const entries = rows.slice(0, TIMELINE_PAGE_SIZE).reverse().map(row => this.observedStatus(directory, parseEntry(row.body)));
+    const generation = db.prepare('SELECT generation FROM peers WHERE app_id = ? AND scope = ? AND target_id = ?').get(...key)?.generation;
     return {
-      entries: rows.slice(start, end).map(row => this.observedStatus(directory, row)),
-      before: start > 0 ? rows[start]?.id : undefined,
-      incomplete: this.incomplete.has(directory) || existsSync(join(directory, 'incomplete')),
-      generation: journal.generation,
+      entries,
+      before: rows.length > TIMELINE_PAGE_SIZE ? entries[0]?.id : undefined,
+      incomplete: this.incomplete.has(directory),
+      generation: typeof generation === 'string' ? generation : undefined,
     };
   }
 
@@ -178,118 +165,93 @@ export class QqTimeline {
       ? { ...row, status: 'unknown' } : row;
   }
 
-  private accountDir(appId: string): string {
-    return join(this.root, deliveryKey(appId));
+  private advanceGeneration(key: string): void {
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
   }
 
-  private peerDir(appId: string, target: ReplyTarget): string {
-    return join(this.accountDir(appId), deliveryKey(target.scope, target.targetId));
-  }
-
-  private advanceGeneration(path: string): void {
-    this.generations.set(path, (this.generations.get(path) ?? 0) + 1);
-  }
-
-  private retainedJournal(appId: string, target: ReplyTarget): Journal {
-    const directory = this.peerDir(appId, target);
-    const file = join(directory, 'rows.jsonl');
-    const journal = this.load(file);
-    const cutoff = this.retainAfter?.(appId, target);
-    if (cutoff === undefined || journal.oldestAt >= cutoff) return journal;
-    const rows = new Map([...journal.rows].filter(([, row]) => row.at >= cutoff));
+  private removeRows(appId: string, target: ReplyTarget, cutoff?: number): void {
+    const db = this.connection();
+    const key = partition(appId, target);
+    db.exec('BEGIN IMMEDIATE');
     try {
-      if (journal.completeBytes !== undefined && !existsSync(join(directory, 'incomplete'))) {
-        atomicWrite(join(directory, 'incomplete'), ['Interrupted append\n']);
+      const result = cutoff === undefined
+        ? db.prepare('DELETE FROM messages WHERE app_id = ? AND scope = ? AND target_id = ?').run(...key)
+        : db.prepare('DELETE FROM messages WHERE app_id = ? AND scope = ? AND target_id = ? AND at < ?').run(...key, cutoff);
+      if (result.changes) {
+        db.prepare('UPDATE peers SET generation = ? WHERE app_id = ? AND scope = ? AND target_id = ?').run(randomUUID(), ...key);
       }
-      atomicWrite(file, journalLines(rows.values()));
-      const retained = journalState(statSync(file), rows);
-      this.remember(file, retained);
-      return retained;
-    } catch {
-      this.noteFailure(directory);
-      return { ...journal, rows, generation: deliveryKey(journal.generation, rows.size, rows.keys().next().value) };
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
     }
+  }
+
+  private read(appId: string, target: ReplyTarget, id: string): StoredEntry | undefined {
+    const entry = this.connection().prepare(
+      'SELECT body, at FROM messages WHERE app_id = ? AND scope = ? AND target_id = ? AND message_id = ?',
+    ).get(...partition(appId, target), id);
+    const cutoff = this.retainAfter?.(appId, target);
+    if (!entry || (cutoff !== undefined && typeof entry.at === 'number' && entry.at < cutoff)) return undefined;
+    return parseEntry(entry.body);
   }
 
   private update(appId: string, target: ReplyTarget, id: string, change: (previous?: StoredEntry) => StoredEntry | undefined): void {
-    const directory = this.peerDir(appId, target);
-    const file = join(directory, 'rows.jsonl');
+    if (this.closed) return;
     try {
-      const journal = this.load(file);
-      const entry = change(journal.rows.get(id));
+      const db = this.connection();
+      const entry = change(this.read(appId, target, id));
       if (!entry || entry.at < (this.retainAfter?.(appId, target) ?? -Infinity)) return;
-      if (journal.rows.size === 0) {
-        atomicWrite(join(directory, 'peer.json'), [JSON.stringify({ scope: target.scope, openId: target.targetId })]);
-      }
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      if (journal.completeBytes !== undefined && !existsSync(join(directory, 'incomplete'))) {
-        atomicWrite(join(directory, 'incomplete'), ['Interrupted append\n']);
-      }
-      const fd = openSync(file, 'a', 0o600);
-      try {
-        if (journal.completeBytes !== undefined) ftruncateSync(fd, journal.completeBytes);
-        const buffer = Buffer.from(JSON.stringify(entry) + '\n');
-        let offset = 0;
-        while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
-        fsyncSync(fd);
-        const stats = fstatSync(fd);
-        journal.signature = signature(stats);
-        journal.generation ??= deliveryKey(stats.ino, stats.birthtimeMs);
-        journal.oldestAt = Math.min(journal.oldestAt, entry.at);
-        journal.completeBytes = undefined;
-      } finally { closeSync(fd); }
-      journal.rows.set(id, entry);
-      this.remember(file, journal);
+      const key = partition(appId, target);
+      db.prepare('INSERT OR IGNORE INTO peers VALUES (?, ?, ?, ?)').run(...key, randomUUID());
+      db.prepare(`INSERT INTO messages (app_id, scope, target_id, message_id, at, body) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (app_id, scope, target_id, message_id) DO UPDATE SET at = excluded.at, body = excluded.body`)
+        .run(...key, id, entry.at, JSON.stringify(entry));
     } catch {
-      this.journals.delete(file);
-      this.noteFailure(directory);
+      this.noteFailure(recordKey(appId, target));
     }
   }
 
-  private load(file: string): Journal {
-    let stats: ReturnType<typeof statSync>;
-    try { stats = statSync(file); }
-    catch (error) {
-      if (missing(error) && !this.journals.has(file)) return { signature: '', oldestAt: Infinity, rows: new Map() };
+  private connection(): DatabaseSync {
+    if (this.closed) throw new Error('The QQ timeline is closed.');
+    if (this.database) return this.database;
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    const path = join(this.root, 'messages.sqlite');
+    const db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    try {
+      chmodSync(path, 0o600);
+      db.exec(`
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA secure_delete = ON;
+        CREATE TABLE IF NOT EXISTS peers (
+          app_id TEXT NOT NULL, scope TEXT NOT NULL, target_id TEXT NOT NULL, generation TEXT NOT NULL,
+          PRIMARY KEY (app_id, scope, target_id)
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS messages (
+          seq INTEGER PRIMARY KEY, app_id TEXT NOT NULL, scope TEXT NOT NULL, target_id TEXT NOT NULL,
+          message_id TEXT NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL,
+          UNIQUE (app_id, scope, target_id, message_id),
+          FOREIGN KEY (app_id, scope, target_id) REFERENCES peers ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS messages_page ON messages (app_id, scope, target_id, seq);
+        CREATE INDEX IF NOT EXISTS messages_expiration ON messages (app_id, scope, target_id, at);
+      `);
+      this.database = db;
+      return db;
+    } catch (error) {
+      db.close();
       throw error;
     }
-    const stamp = signature(stats);
-    const cached = this.journals.get(file);
-    if (cached?.signature === stamp) {
-      this.remember(file, cached);
-      return cached;
-    }
-    const rows = new Map<string, StoredEntry>();
-    const bytes = readFileSync(file);
-    const end = bytes.lastIndexOf(0x0a) + 1;
-    const completeBytes = end < bytes.length ? end : undefined;
-    if (completeBytes !== undefined) this.noteFailure(dirname(file));
-    const text = bytes.subarray(0, end).toString('utf8');
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      const row = JSON.parse(line) as StoredEntry;
-      if (!row || typeof row.id !== 'string' || typeof row.text !== 'string' || !Number.isFinite(row.at)
-        || (row.direction !== 'inbound' && row.direction !== 'outbound')
-        || !['received', 'sending', 'partial', 'accepted', 'rejected', 'unknown'].includes(row.status)) throw new Error('Invalid QQ timeline');
-      rows.set(row.id, row);
-    }
-    const journal = { ...journalState(stats, rows), completeBytes };
-    this.remember(file, journal);
-    return journal;
   }
 
-  private remember(file: string, journal: Journal): void {
-    this.journals.delete(file);
-    this.journals.set(file, journal);
-    if (this.journals.size > 8) this.journals.delete(this.journals.keys().next().value!);
-  }
-
-  private noteFailure(directory: string): void {
-    if (!this.incomplete.has(directory)) this.logger.warn('QQ 消息流水写入或读取失败，记录可能不完整。');
-    this.incomplete.add(directory);
+  private noteFailure(key: string): void {
+    if (!this.incomplete.has(key)) this.logger.warn('QQ 消息流水写入或读取失败，记录可能不完整。');
+    this.incomplete.add(key);
   }
 }
 
-function* journalLines(rows: Iterable<StoredEntry>): Iterable<string> {
-  for (const row of rows) yield JSON.stringify(row) + '\n';
+function parseEntry(body: unknown): StoredEntry {
+  if (typeof body !== 'string') throw new Error('Invalid QQ timeline record');
+  return JSON.parse(body) as StoredEntry;
 }

@@ -305,7 +305,7 @@ export function validateCatalog(catalog, config) {
   if (catalog.failures?.length) throw new Error('The live Host model catalog reports provider failures.');
 }
 
-async function hostClient(config) {
+export async function hostClient(config) {
   const log = await readFile(config.hostLog, 'utf8');
   const prefix = config.hostOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const matches = [...log.matchAll(new RegExp(prefix + '/\\?token=[A-Za-z0-9._~%+-]+', 'g'))];
@@ -372,7 +372,7 @@ export async function waitForHost(config, owned, { timeoutMs = 90_000, signal } 
   throw new Error(`Isolated Host did not become ready; private log: ${config.hostLog}`);
 }
 
-async function verifyComponents(client, fixture, signal) {
+export async function verifyComponents(client, fixture, signal) {
   const core = 'im-qqbot';
   const history = 'im-qqbot-workbench-history';
   const plugin = async id => (await client.rpc('pluginManager/listPlugins')).find(row => row.patchId === id);

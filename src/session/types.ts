@@ -36,6 +36,11 @@ export interface DshAgent {
     readonly header?: { agentPreset?: string; parentSession?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
+  readonly inbox?: {
+    readonly nextStep: readonly { id: string }[];
+    readonly nextTurn: readonly { id: string }[];
+    remove(id: string): unknown;
+  };
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;

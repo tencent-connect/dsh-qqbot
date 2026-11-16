@@ -52,14 +52,14 @@ export class ManualQqSender {
     const prior = this.ledger.delivery(id);
     if (prior) {
       if (prior.fingerprint !== fingerprint) throw new ManualSendConflict('这次发送的正文已变更、附件不同或引用不同，请先查询原发送结果。');
-      return this.status(target, operation)!;
+      if (prior.state !== 'not-sent') return this.status(target, operation)!;
     }
     if (!allowed()) throw new ManualSendConflict('当前机器人或会话不允许发送。');
     const quoted = replyTo ? this.timeline?.entry(this.appId, target, replyTo) : undefined;
     if (replyTo && (attachment || !canQuoteTimelineEntry(quoted) || receivedEntryId(quoted.platformId) !== replyTo)) {
       throw new ManualSendConflict('引用消息不可用。请在当前 QQ 对话选择一条收到的消息。');
     }
-    if (!this.ledger.begin(id, fingerprint)) return this.status(target, operation)!;
+    if (!this.ledger.begin(id, fingerprint, true)) return this.status(target, operation)!;
     this.pending.add(id);
     let posted = false;
     const quote = quoted && {

@@ -1,10 +1,10 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ReplyTarget } from '../types.ts';
 import { QqTimeline, receivedEntryId } from './qq-timeline.ts';
-import { deliveryKey } from '../transport/delivery-ledger.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 const target: ReplyTarget = { scope: 'group', targetId: 'shared' };
@@ -40,19 +40,30 @@ it('paginates stable same-time identities across updates, replay and restart', (
   expect(restored.page('A', { ...target, scope: 'c2c' })?.entries).toEqual([]);
 });
 
-it('preserves complete records and resumes appending after a torn UTF-8 tail', () => {
-  const record = (log: QqTimeline, id: string, text: string) =>
-    log.record('A', target, { id, at: 1, direction: 'inbound', text, status: 'received' });
-  record(new QqTimeline(dir, logger), 'before', '原有记录');
-  const file = join(dir, deliveryKey('A'), deliveryKey(target.scope, target.targetId), 'rows.jsonl');
-  appendFileSync(file, Buffer.from('{"text":"未写完').subarray(0, -1));
-
-  const restarted = new QqTimeline(dir, logger);
-  expect(restarted.page('A', target)).toMatchObject({ incomplete: true, entries: [{ text: '原有记录' }] });
-  record(restarted, 'after', '新消息');
-  const page = new QqTimeline(dir, logger).page('A', target);
-  expect(page?.incomplete).toBe(true);
-  expect(page?.entries.map(row => row.text)).toEqual(['原有记录', '新消息']);
+it('reads consecutive indexed windows from a 100,000-entry conversation after restart', () => {
+  const log = new QqTimeline(dir, logger);
+  log.record('A', target, { id: 'first', at: 1, direction: 'inbound', text: 'first', status: 'received' });
+  log.close();
+  const db = new DatabaseSync(join(dir, 'messages.sqlite'));
+  try {
+    db.exec(`
+      WITH RECURSIVE numbers(n) AS (SELECT 2 UNION ALL SELECT n + 1 FROM numbers WHERE n < 100000)
+      INSERT INTO messages (app_id, scope, target_id, message_id, at, body)
+      SELECT 'A', 'group', 'shared', CAST(n AS TEXT), n,
+        json_object('id', CAST(n AS TEXT), 'at', n, 'direction', 'inbound', 'status', 'received', 'text', CAST(n AS TEXT))
+      FROM numbers;
+    `);
+    const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT body FROM messages INDEXED BY messages_page
+      WHERE app_id = 'A' AND scope = 'group' AND target_id = 'shared' AND seq < 99961 ORDER BY seq DESC LIMIT 41`).all();
+    expect(plan.map(row => row.detail)).toEqual([expect.stringContaining('SEARCH messages USING INDEX messages_page')]);
+  } finally { db.close(); }
+  const reopened = new QqTimeline(dir, logger);
+  try {
+    const first = reopened.page('A', target)!;
+    expect(first.entries.map(row => row.text)).toEqual(Array.from({ length: 40 }, (_, index) => String(99961 + index)));
+    const next = reopened.page('A', target, first.before)!;
+    expect(next.entries.map(row => row.text)).toEqual(Array.from({ length: 40 }, (_, index) => String(99921 + index)));
+  } finally { reopened.close(); }
 });
 
 it('does not report a pending request as successful after restart', async () => {
@@ -91,7 +102,7 @@ it.each(['account', 'peer'] as const)('ignores an old receipt after clearing the
   expect(new QqTimeline(dir, logger).page('A', target)?.entries).toEqual([fresh]);
 });
 
-it('expires complete journal rows and obsolete versions using record time', () => {
+it('expires records using message time', () => {
   let cutoff: number | undefined;
   const log = new QqTimeline(dir, logger, appId => appId === 'A' ? cutoff : undefined);
   const old = { id: 'old', at: 5, direction: 'outbound', text: 'old body', status: 'sending' } as const;
@@ -107,8 +118,10 @@ it('expires complete journal rows and obsolete versions using record time', () =
   expect(log.page('A', target, 'old')).toBeUndefined();
   expect(log.entry('B', target, 'old')).toBeDefined();
   log.record('A', target, old);
-  const file = join(dir, deliveryKey('A'), deliveryKey(target.scope, target.targetId), 'rows.jsonl');
-  expect(readFileSync(file, 'utf8')).not.toContain('old');
+  const db = new DatabaseSync(join(dir, 'messages.sqlite'));
+  try {
+    expect(db.prepare("SELECT count(*) AS count FROM messages WHERE app_id = 'A' AND message_id = 'old'").get()?.count).toBe(0);
+  } finally { db.close(); }
   expect(new QqTimeline(dir, logger).page('A', target)?.entries.map(row => row.id)).toEqual(['boundary']);
 });
 

@@ -23,9 +23,10 @@ function fixture() {
   const config = ConfigSchema({ appId: 'test-app', appSecret: 'not-a-real-secret' });
   // Keep disk state isolated while using the production authorization and command wrappers.
   const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService, { config, store });
-  const deps = { manager: { accountAccess: service }, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
+  const manager = { accountAccess: service, setModelOverride: vi.fn(), setPresetOverride: vi.fn().mockResolvedValue({ ok: true }) };
+  const deps = { manager, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
   const context = (senderId?: string) => ({ message: { senderId, kind: 'c2c' } }) as SlashCommandHandlerContext;
-  return { store, service, config, deps, context, root };
+  return { store, service, config, deps, context, root, manager };
 }
 
 describe('QQ slash-command access modes', () => {
@@ -42,6 +43,23 @@ describe('QQ slash-command access modes', () => {
     const ping = buildCommandList(deps).find(command => command.name === 'bot-ping')!;
     expect(await ping.handler(context('outsider'))).toContain('pong');
     expect(describeCommands(deps).every(command => command.scope === 'all')).toBe(true);
+  });
+
+  it('preserves the 0.5.5 private whitelist for model and preset on an admitted group', async () => {
+    const { config, deps, context, manager } = fixture();
+    config.access.c2cMode = 'allowlist';
+    config.access.c2cAllow = ['original-listed-user'];
+    const list = buildCommandList(deps);
+    const member = context('member');
+    member.message.kind = 'group';
+    for (const name of ['model', 'preset']) {
+      const raw = name === 'model' ? 'provider/model' : 'standard';
+      expect(await list.find(command => command.name === name)!.handler({ ...member, command: { raw } } as SlashCommandHandlerContext)).toContain('白名单');
+      expect(describeCommands(deps).find(command => command.name === name)?.scope).toBe('owner');
+    }
+    expect(manager.setModelOverride).not.toHaveBeenCalled();
+    expect(manager.setPresetOverride).not.toHaveBeenCalled();
+    expect(await list.find(command => command.name === 'bot-ping')!.handler(member)).toContain('pong');
   });
 
   it.each(['c2c', 'group'] as const)('checks %s query/help/mutation handlers before execution', async kind => {

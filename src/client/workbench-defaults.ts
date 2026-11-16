@@ -1,3 +1,4 @@
+import { t } from './qq-locale.ts';
 import { createElement as h, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { WORKBENCH_DEFAULTS_PATH, type WorkbenchAgentSettings, type WorkbenchDefaults } from '../shared/workbench-agent-settings.ts';
@@ -54,7 +55,7 @@ export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
     } catch (cause) {
       if (controller.signal.aborted) return;
       if (cause instanceof HttpError && cause.status === 409) setConflict(true);
-      setError(cause instanceof Error ? cause.message : '无法更新默认设置。');
+      setError(cause instanceof Error ? cause.message : t("无法更新默认设置。"));
     } finally {
       if (request.current === controller) {
         request.current = undefined;
@@ -75,11 +76,11 @@ export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
       if (mode === 'restore' && Object.keys(changes(merged)).length
         && (latest.revision !== previous.base.revision || Object.keys(agentSettingsPatch(previous.base.settings, latest.settings)).length)) {
         setConflict(true);
-        setError('默认设置已更新，草稿已保留。');
+        setError(t("默认设置已更新，草稿已保留。"));
         return;
       }
       replace(merged);
-      if (mode === 'merge') setNotice('草稿已合并，请核对后保存。');
+      if (mode === 'merge') setNotice(t("草稿已合并，请核对后保存。"));
     }
     setConflict(false);
   });
@@ -100,7 +101,7 @@ export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
       });
       if (signal.aborted) return;
       replace({ base: next, settings: next.settings });
-      setNotice('默认设置已保存。');
+      setNotice(t("默认设置已保存。"));
     });
   };
   const change = (patch: Partial<WorkbenchAgentSettings>): void => {
@@ -111,17 +112,17 @@ export function WorkbenchDefaultsForm({ appId, bindingRevision = 0, source }: {
   };
   const fields = draft && { settings: draft.settings, disabled: busy || loading, onChange: change };
   return h('form', { className: 'imqw-form imqw-defaults-form', onSubmit: save },
-    h('p', { className: 'imqw-muted' }, '首次建立 QQ 群聊或私聊的配置时采用。'),
-    fields ? h(SettingsGroup, { title: 'Agent 设置', defaultOpen: true, children: h(WorkbenchAgentFields, { ...fields, source }) }) : null,
-    fields ? h(SettingsGroup, { title: 'QQ 回复', defaultOpen: true, children: h(WorkbenchReplyFields, { ...fields, source }) }) : null,
+    h('p', { className: 'imqw-muted' }, t("首次建立 QQ 群聊或私聊的配置时采用。")),
+    fields ? h(SettingsGroup, { title: t("Agent 设置"), defaultOpen: true, children: h(WorkbenchAgentFields, { ...fields, source }) }) : null,
+    fields ? h(SettingsGroup, { title: t("QQ 回复"), defaultOpen: true, children: h(WorkbenchReplyFields, { ...fields, source }) }) : null,
     error ? h('p', { className: 'imqb-error', role: 'alert' }, error) : null,
     notice ? h('p', { className: 'imqw-muted', role: 'status' }, notice) : null,
     fields ? h('footer', { className: 'imqw-actions imqw-savebar' },
-      conflict ? h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: busy, onClick: () => { void read('merge'); } }, '合并草稿') : null,
+      conflict ? h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: busy, onClick: () => { void read('merge'); } }, t("合并草稿")) : null,
       h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: busy || (!dirty && !conflict),
-        onClick: () => { void read('discard'); } }, '撤销修改'),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || loading || !dirty || conflict }, busy ? '处理中…' : '保存'),
-    ) : error ? h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => { void read('restore'); } }, '重新读取')
-      : h('p', { role: 'status', className: 'imqw-muted' }, '正在读取默认设置…'),
+        onClick: () => { void read('discard'); } }, t("撤销修改")),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: busy || loading || !dirty || conflict }, busy ? t("处理中…") : t("保存")),
+    ) : error ? h(Button, { type: 'button', size: 'sm', variant: 'outline', onClick: () => { void read('restore'); } }, t("重新读取"))
+      : h('p', { role: 'status', className: 'imqw-muted' }, t("正在读取默认设置…")),
   );
 }
