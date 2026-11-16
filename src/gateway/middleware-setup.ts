@@ -16,7 +16,6 @@ import {
   concurrencyGuard,
   typingIndicator,
   quoteRef,
-  historyBuffer,
   envelopeFormatter,
 } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.ts';
@@ -124,29 +123,24 @@ export function setupMiddlewares(
     }
   });
 
-  // 4. 群历史缓冲 — 放在门控之前，确保所有消息（含未 @bot）都计入上下文
-  //    store 走共享单例（getHistoryStore），groupKey 带 appId 前缀，供回复后清空
   const history = getHistoryStore(config.appId);
-  bot.use(historyBuffer({
-    limit: config.historyLimit,
-    store: {
-      list: (key, limit) => history.list(key, limit),
-      append: (key, entry, limit) => {
-        const targetId = key.slice(config.appId.length + 1);
-        if (isActive() && receiving?.({ scope: 'group', targetId }) !== false) return history.append(key, entry, limit);
-      },
-    },
-    recordOnSkip: true,
-    groupKey: (ctx) => {
-      const gid = ctx.message.groupOpenid;
-      if (ctx.message.kind !== 'group' || !gid) return undefined;
-      return historyGroupKey(config.appId, gid);
+  bot.use(requireReceiving);
+  bot.use(mentionGate({
+    requireMentionInGroup: config.requireMention,
+    onSkip(ctx) {
+      const { kind, groupOpenid, senderId, senderName, content, timestamp, messageId } = ctx.message;
+      if (kind !== 'group' || !groupOpenid || blocked(ctx)) return;
+      history.append(historyGroupKey(config.appId, groupOpenid), {
+        senderId, senderName, content, timestamp: Date.parse(timestamp) || Date.now(), messageId,
+      }, config.historyLimit);
     },
   }));
-  bot.use(requireReceiving);
-
-  // 5. 群聊 @bot 门控
-  bot.use(mention);
+  bot.use(async (ctx, next) => {
+    if (ctx.message.kind === 'group' && ctx.message.groupOpenid) {
+      ctx.state.history = history.list(historyGroupKey(config.appId, ctx.message.groupOpenid), config.historyLimit);
+    }
+    await next();
+  });
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({

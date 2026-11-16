@@ -59,7 +59,8 @@ interface TrackedTurn {
 interface UserMessageData {
   id?: unknown;
   source?: TurnInputSource;
-  message?: { id?: unknown; source?: TurnInputSource };
+  content?: unknown;
+  message?: { id?: unknown; source?: TurnInputSource; content?: unknown };
 }
 
 export class TurnTracker implements DeliveryTargetResolver {
@@ -110,11 +111,11 @@ export class TurnTracker implements DeliveryTargetResolver {
 
   /** user/message：按这一条消息归类，不发送 */
   public note(sessionId: string, data: Record<string, unknown>): void {
+    const { messageId, source, content } = readUserMessage(data);
+    if (messageId && source?.kind === 'user') this.inputs.admitBackground(sessionId, messageId, content);
     const tracked = this.turns.get(sessionId);
     if (tracked === undefined) return;
-    const { messageId, source } = readUserMessage(data);
-    const receipt = messageId ? this.inputs.claim(messageId, sessionId, data.content ?? (data.message as { content?: unknown } | undefined)?.content,
-      tracked.state.turn, tracked.target) : undefined;
+    const receipt = messageId ? this.inputs.claim(messageId, sessionId, content, tracked.state.turn, tracked.target) : undefined;
     if (!receipt && messageId && this.inputs.ledger?.knowsInput(messageId)) tracked.invalid = true;
     const qqOwned = this.inputs.ledger ? receipt !== undefined : this.inputs.has(messageId);
     if (receipt) {
@@ -227,11 +228,12 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 }
 
-function readUserMessage(data: Record<string, unknown>): { messageId: string | undefined; source: TurnInputSource | undefined } {
+function readUserMessage(data: Record<string, unknown>): { messageId: string | undefined; source: TurnInputSource | undefined; content: unknown } {
   const raw = data as UserMessageData;
   const id = raw.id ?? raw.message?.id;
   return {
     messageId: typeof id === 'string' && id !== '' ? id : undefined,
     source: raw.source ?? raw.message?.source,
+    content: raw.content ?? raw.message?.content,
   };
 }

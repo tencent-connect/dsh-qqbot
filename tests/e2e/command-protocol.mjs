@@ -2,6 +2,14 @@
 export const DUMMY_APP_ID = '0000000000';
 export const DUMMY_SECRET = 'local-fixture-only';
 export const DUMMY_TOKEN = 'local-fixture-token';
+const backgroundMessages = {
+  'background-remove-first': 'QQ_BACKGROUND_REMOVE_FIRST',
+  'background-remove-second': 'QQ_BACKGROUND_REMOVE_SECOND',
+  'background-remove-late': 'QQ_BACKGROUND_REMOVE_LATE',
+  'background-steer-first': 'QQ_BACKGROUND_STEER_FIRST',
+  'background-steer-second': 'QQ_BACKGROUND_STEER_SECOND',
+  'background-steer-late': 'QQ_BACKGROUND_STEER_LATE',
+};
 
 function identifier(value, label) {
   if (typeof value !== 'string' || !value || /[\s"'<>]/u.test(value)) {
@@ -37,6 +45,7 @@ export function createFixtureCommands(config = {}) {
     new: '/new', reset: '/reset', clear: '/clear', stop: '/stop', compact: '/compact',
     ping: '/bot-ping', version: '/bot-version',
     smoke: '只回复 QQ_CMD_OK，不调用工具。',
+    ...backgroundMessages,
   });
 }
 
@@ -52,7 +61,7 @@ export function parseFixtureMessage(value = {}, commands = createFixtureCommands
   }
   if (value.mention !== undefined && typeof value.mention !== 'boolean') throw new Error('Invalid fixture mention flag');
   if (typeof command !== 'string' || !Object.hasOwn(commands, command)) throw new Error('Unsupported fixture command');
-  if (['smoke', 'compact'].includes(command) && !allowModelRequests) {
+  if (!allowModelRequests && (['smoke', 'compact'].includes(command) || Object.hasOwn(backgroundMessages, command))) {
     throw new Error('Fixture model requests are disabled');
   }
   return { scope, identity, groupIdentity: value.groupIdentity ?? identity, command,

@@ -372,6 +372,13 @@ export async function waitForHost(config, owned, { timeoutMs = 90_000, signal } 
   throw new Error(`Isolated Host did not become ready; private log: ${config.hostLog}`);
 }
 
+export async function readSessionEvents(client, sessionId) {
+  const result = await client.rpc('session/events', {
+    request: { address: { kind: 'session', sessionId }, maxMessages: 180 },
+  });
+  return result.records.filter(row => row.type === 'event').map(row => row.event);
+}
+
 export async function verifyComponents(client, fixture, signal) {
   const core = 'im-qqbot';
   const history = 'im-qqbot-workbench-history';

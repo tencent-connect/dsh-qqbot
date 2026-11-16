@@ -8,8 +8,10 @@ import {
   runLogged, spawnLogged, waitForHost, writePrivateJson,
 } from './host.mjs';
 import { createFixtureCommands, DUMMY_APP_ID } from './command-protocol.mjs';
+import { verifyGroupQueue } from './group-queue.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { stageHistoryPackage } from './history-registry.mjs';
+import { verifyWebAnswers } from './web-timed-answer.mjs';
 
 const appQuery = '?appId=' + DUMMY_APP_ID;
 const qqApi = '/qqbot/im-qqbot/';
@@ -24,7 +26,6 @@ const commands = [
   ['bot-ping', 'ping', /pong/i],
 ];
 const ordinaryAnswer = 'QQ_ORDINARY_REPLY';
-const turnText = text => [{ type: 'text', text }];
 const primary = { provider: 'access-delivery-fixture', model: 'primary' };
 const secondary = { provider: primary.provider, model: 'secondary' };
 
@@ -79,64 +80,7 @@ async function verifyCommands({ client, hostReady, qq, exchange, report, until }
   assert.deepEqual(pairing.owners.map(owner => owner.openid), [userId('allowed')]);
   assert.deepEqual(Object.keys(initialBindings).sort(), [...identities.map(identity => 'c2c:' + userId(identity)), 'group:' + groupId]);
   assert.equal(new Set(Object.values(initialBindings)).size, 3, 'Expected two private Sessions and one shared group Session.');
-  return initialBindings['group:' + groupId];
-}
-
-async function verifyQueueEdit({ client, sessionId, until, inject, newModelRound, outboundSince, qq }) {
-  const events = async () => {
-    const result = await client.rpc('session/events', {
-      request: { address: { kind: 'session', sessionId }, maxMessages: 180 },
-    });
-    return result.records.filter(row => row.type === 'event').map(row => row.event);
-  };
-  const outgoingStart = qq.state.observedOutboundRequests;
-  const expected = [];
-  for (const edit of [true, false]) {
-    const round = newModelRound(edit ? 'RESTORED' : 'UNCHANGED');
-    const receipt = await client.rpc('session/prompt', { request: {
-      sessionId, requestId: crypto.randomUUID(), mode: 'queue', content: turnText(round.holder),
-    } });
-    assert.equal(receipt.accepted, true);
-    await until(() => round.waiting, 'Web model request held before queueing QQ');
-
-    const before = (await events()).at(-1)?.seq ?? 0;
-    await inject({ scope: 'group', identity: 'allowed', command: 'smoke' });
-    const original = await until(async () => {
-      const queued = (await events()).find(event => event.seq > before && event.type === 'agent/inbox/spliced'
-        && event.data.target === 'next-turn' && event.data.inserted.length === 1);
-      return queued?.data.inserted[0];
-    }, 'QQ input waiting in the next-turn queue');
-    const replace = async content => {
-      const status = await client.rpc('session/updateQueue', { request: { sessionId, itemId: original.id,
-        action: { kind: 'edit', content } } });
-      assert.equal(status.accepted, true);
-    };
-    if (edit) {
-      const replacement = turnText('QQ_QUEUE_CHANGED_BODY');
-      await replace(replacement);
-      await until(async () => (await events()).some(event => event.seq > before && event.type === 'agent/inbox/spliced'
-        && event.data.inserted.some(item => item.id === original.id && item.content[0]?.text === replacement[0].text)),
-      'changed text in the original queue item');
-      await replace(original.content);
-    }
-    round.release();
-
-    await until(async () => {
-      const rows = (await events()).filter(event => event.seq > before);
-      const input = rows.find(event => event.type === 'user/message' && event.data.id === original.id);
-      if (!input) return false;
-      assert.deepEqual(input.data.content, original.content, 'The native turn must consume the original ID and text.');
-      const answer = rows.find(event => event.seq > input.seq && event.type === 'assistant/message'
-        && event.data.message.content.some(block => block.type === 'text' && block.text === round.answer));
-      return answer && rows.some(event => event.seq > answer.seq && event.type === 'turn/end'
-        && event.data.turn === answer.data.turn && event.data.reason.kind === 'completed');
-    }, 'completed native turn with ' + round.answer);
-    expected.push(round.holder);
-    if (!edit) expected.push(round.answer);
-  }
-  // The unedited queued reply follows the restored turn on the same Session and must still reach QQ.
-  await until(async () => (await outboundSince(outgoingStart)).some(row => row.content === expected.at(-1)), 'unedited queued reply');
-  return { outgoingStart, expected };
+  return { group: initialBindings['group:' + groupId], c2c: initialBindings['c2c:' + userId('allowed')] };
 }
 
 async function main([dshSource, corePackage, historyPackage, runDir], signal) {
@@ -153,6 +97,7 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
   const report = { commands: [], ordinaryReplies: [], passed: false };
   const smoke = createFixtureCommands().smoke;
   let qq, registry, host, round;
+  let modelReply;
   const model = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -161,17 +106,19 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       const userText = JSON.stringify(body.messages.findLast(message => message.role === 'user')?.content ?? '');
       const current = round;
       let answer = ordinaryAnswer;
-      if (current && userText.includes(current.holder)) {
+      if (current?.waiting && userText.includes(smoke)) {
+        answer = current.replies[current.inputs.length] ?? current.answer;
+        current.inputs.push({ latest: userText, history: JSON.stringify(body.messages.filter(message => message.role === 'user')) });
+      } else if (current && userText.includes(current.holder)) {
         current.waiting = true;
         await current.released;
         answer = current.holder;
-      } else if (current?.waiting && userText.includes(smoke)) {
-        answer = current.answer;
       }
+      const delta = modelReply?.(body) ?? { content: answer };
       const base = { id: 'fixture', object: 'chat.completion.chunk', created: 123, model: body.model };
       response.writeHead(200, { 'content-type': 'text/event-stream' });
-      for (const [delta, finish_reason] of [[{ role: 'assistant', content: answer }, null], [{}, 'stop']]) {
-        response.write('data: ' + JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason }] }) + '\n\n');
+      for (const [part, finish_reason] of [[{ role: 'assistant', ...delta }, null], [{}, delta.tool_calls ? 'tool_calls' : 'stop']]) {
+        response.write('data: ' + JSON.stringify({ ...base, choices: [{ index: 0, delta: part, finish_reason }] }) + '\n\n');
       }
       response.end('data: [DONE]\n\n');
     } catch {
@@ -208,16 +155,21 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
     await runLogged(config.node, [...cli, 'plugin', ...profile, 'add', 'file:' + corePackage, '--registry=' + registry.origin],
       launch, { signal });
     const bot = dummyQQConfig(config);
+    const qqConfig = { ...bot, preset: 'minimal', proactiveDelivery: { externalTurns: 'all' },
+      access: { ...bot.access, commandMode: 'open', c2cAllow: identities.map(userId) } };
     const patch = [
-      { id: 'im-qqbot', config: { ...bot, preset: 'minimal',
-        proactiveDelivery: { externalTurns: 'all' },
-        access: { ...bot.access, commandMode: 'open', c2cAllow: identities.map(userId) } } },
+      { id: 'im-qqbot', config: qqConfig },
+      { id: 'preset-minimal', config: { id: 'minimal', order: 3, plugins: [
+        { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user', config: { mode: 'timed', timeout: 1 } },
+      ] } },
       { id: 'agent-default-model', config: primary },
       { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
         baseURL: 'http://127.0.0.1:' + model.address().port + '/v1', apiKeyEnv: 'QQBOT_ACCESS_TEST_KEY',
         models: [primary, secondary].map(({ model: id }) => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024 })) } } } },
     ];
-    await writeFile(join(config.home, 'profiles', config.profile, 'cordis.patch.yml'), JSON.stringify(patch, null, 2), { mode: 0o600 });
+    const patchPath = join(config.home, 'profiles', config.profile, 'cordis.patch.yml');
+    const savePatch = () => writeFile(patchPath, JSON.stringify(patch, null, 2), { mode: 0o600 });
+    await savePatch();
     host = await spawnLogged(config.node, [...cli, ...profile, '--port', String(port), '--no-open'],
       { ...launch, logPath: config.hostLog });
     await writePrivateJson(join(runDir, 'process.json'), { pid: host.child.pid, hostOrigin: config.hostOrigin });
@@ -233,11 +185,12 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
     };
     await fixture('outbound', { mode: 'success' });
     const outboundSince = async sequence => (await fixture('observations')).outbound.filter(row => row.sequence > sequence);
-    const inject = async ({ scope, identity, command }) => {
+    const inject = async ({ scope, identity, command, mention }) => {
       const count = qq.state.receivedMessages;
-      const status = await fixture('message', { scope, identity, command,
+      const status = await fixture('message', { scope, identity, command, mention,
         ...(scope === 'group' ? { groupIdentity: 'allowed' } : {}) });
       assert.equal(status.receivedMessages, count + 1, 'Exactly one gateway should receive each fixture input.');
+      return 'local-fixture-message-' + status.receivedMessages;
     };
     const exchange = async (input, expected, action) => {
       const label = action + ' in ' + input.scope + ' from ' + input.identity;
@@ -253,18 +206,35 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
     const newModelRound = name => {
       const gate = Promise.withResolvers();
       round = { holder: 'QQ_WEB_HOLDER_' + name, answer: 'QQ_QUEUE_ANSWER_' + name,
-        waiting: false, released: gate.promise, release: gate.resolve };
+        inputs: [], replies: [], waiting: false, released: gate.promise, release: gate.resolve };
       return round;
     };
-    const sessionId = await verifyCommands({ client, hostReady, qq, exchange, report, until });
-    const { outgoingStart, expected } = await verifyQueueEdit({ client, sessionId, until, inject, newModelRound, outboundSince, qq });
+    const sessions = await verifyCommands({ client, hostReady, qq, exchange, report, until });
+    const queue = await verifyGroupQueue({ client, sessionId: sessions.group, groupId, until, inject, newModelRound, outboundSince, qq });
+    await queue.verifyOutbound();
+    report.queue = queue.cases;
+    round = undefined;
+
+    const setModelReply = responder => { modelReply = responder; };
+    const webTest = { client, sessions, setModelReply, until, outboundSince, qq };
+    report.timedWebAnswers = { on: await verifyWebAnswers({ ...webTest, expectPush: true }) };
+    const previousReady = qq.state.readyCount;
+    qqConfig.access = (await client.get(qqApi + 'config')).config.access;
+    qqConfig.proactiveDelivery.externalTurns = 'off';
+    await savePatch();
+    await until(() => qq.state.readyCount > previousReady, 'QQ reconnects with Web push disabled', 30_000);
+    await hostReady();
+    assert.equal((await client.get(qqApi + 'config')).config.proactiveDelivery.externalTurns, 'off');
+    const offStart = qq.state.observedOutboundRequests;
+    report.timedWebAnswers.off = await verifyWebAnswers({ ...webTest, expectPush: false });
+    for (const scope of Object.keys(sessions)) {
+      await exchange({ scope, identity: 'allowed', command: 'smoke' }, ordinaryAnswer, 'reply to QQ while Web push is off');
+    }
     await host.stop();
-    const outbound = await outboundSince(outgoingStart);
-    assert.deepEqual(outbound.map(row => row.content).sort(), expected.toSorted(),
-      'Only the Web controls and the unedited queued reply may send to QQ.');
-    assert.ok(outbound.every(row => row.path === '/v2/groups/' + groupId + '/messages'), 'Replies must target the test group.');
+    const offReplies = (await outboundSince(offStart)).filter(row => row.messageType !== 6);
+    assert.deepEqual(offReplies.map(row => row.content), [ordinaryAnswer, ordinaryAnswer],
+      'With Web push off, only the two fresh QQ inputs may generate outbound replies.');
     assert.equal(qq.state.unexpectedRequests, 0);
-    report.queue = { sessionId, nativeAnswerAfterRestore: true, restoredQqOutbound: 0, unchangedQueuedReply: true };
     report.passed = true;
   } catch (error) {
     report.error = error.message;

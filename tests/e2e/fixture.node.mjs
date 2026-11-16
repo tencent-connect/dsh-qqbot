@@ -72,6 +72,7 @@ test('command routes and presets are configurable, and messages stay on the fixe
   assert.throws(() => parseFixtureMessage({ scope: 'c2c', groupIdentity: 'allowed' }, commands), /Invalid fixture group identity/);
   assert.throws(() => parseFixtureMessage({ command: 'smoke' }, commands), /model requests are disabled/);
   assert.throws(() => parseFixtureMessage({ command: 'compact' }, commands), /model requests are disabled/);
+  assert.throws(() => parseFixtureMessage({ command: 'background-remove-first' }, commands), /model requests are disabled/);
   assert.equal(parseFixtureMessage({ command: 'smoke' }, commands, true).content, commands.smoke);
   assert.throws(() => createFixtureCommands({ primary: { provider: 'bad/provider', model: 'one' } }), /Invalid fixture primary provider/);
 });

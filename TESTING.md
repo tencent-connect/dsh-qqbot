@@ -50,6 +50,8 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
 
 脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后，分别通过 QQ 设置撤权、通过 DSH 原生 `/permission` 将权限调到上限之外。释放等待后，预期工具本体不会执行。恢复原生权限后，新一轮应能正常写入。脚本另启动真实的宿主内子 Agent，检查旧请求和 PTC 的授权。用同时缺少 QQ 撤权和原生权限修复的旧包跑正对照时追加 `baseline`。证据写入运行目录的 `report.json`，Host 结束后自动停止。
 
+默认回放也检查原生 Session 的权限恢复。停用 QQ 主组件后，原 Session 提供并运行 `write`。重新启用后，模型只看到 QQ 策略允许的 `read`，尝试 `write` 会被拦下。随后仅解绑并在原 Session 再次写入。用新的输出目录追加 `fixed --clear-bindings`，可回放「解绑并清除记录」，同时检查 QQ 关联已删除、原 Session 仍可使用 `write`。
+
 在命令末尾加 `fixed --browser` 可在同一 Host 回放 QQ 消息列和工具弹窗。浏览器使用 Host Web 工作区的 Playwright。已安装 Chrome 时可设 `QQBOT_BROWSER_CHANNEL=chrome`。用例覆盖引用、消息刷新失败后重试、返回 QQ 对话、旧工具组合、分类批量勾选，以及浏览器确认和服务端保存的边界。
 
 同一回放还会在机器人默认值和现有会话中绑定提示词文件，核对预览及模型请求都读到更新后的文件内容，并验证文件缺失时模型请求会停止。
@@ -79,7 +81,7 @@ node tests/e2e/upgrade-055.mjs /absolute/dsh/lib/bin.js \
 
 使用 RC3 时运行默认模式。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
 
-## 隔离 Host 回放斜杠授权与队列编辑
+## 隔离 Host 回放斜杠授权、队列与网页补答
 
 按[双包安装说明](docs/workbench/extensions.md)准备同版本安装包。使用支持 `session/updateQueue` 的 DSH 源码目录、Node 22.19+ 或 24+，并在 PATH 中提供 pnpm。输出目录使用全新的绝对路径。
 
@@ -90,7 +92,9 @@ node tests/e2e/access-delivery-host.mjs /absolute/dsh-source \
 
 脚本在独立 profile 安装候选包，使用回环 QQ 网关和模型。两位发送者分别私聊机器人，并在同一个已获准接入的群里发消息，其中一人进入斜杠命令白名单。逐一验证「所有人」「白名单」「关闭」下的 `/model`、`/preset` 和 `/bot-ping`。每种模式下四条普通消息都应收到回复，服务范围、命令白名单和 Session 关联保持原值。
 
-队列用例先让网页请求占住群 Session 的当前轮，再用宿主 RPC 编辑排队的 QQ 消息并恢复原文。核对相同 ID、相同正文和已完成的原生答复。回环网关应只收到网页轮次和未编辑的排队消息对应的答复。结果写入 `report.json`。
+队列用例先让网页请求占住群 Session 的当前轮，再调用宿主 RPC 编辑、删除或转向排队的 QQ 消息。核对实际模型请求。删除后下次 @ 仍能读到之前的群背景，转向使消息和背景进入当前轮。两位成员的未 @ 消息和排队后到达的背景各进入历史一次。只有正常网页回合和有效的 QQ 输入会发到回环网关。
+
+网页补答在私聊和群聊各运行一次开启与关闭对照。等待限时提问进入待补答状态且原回合结束，再调用网页使用的 `userQuestions/answer`。补答应开始新回合。网页推送关闭时，网关收不到补答产生的消息，普通 QQ 输入仍能收到回复。回放结果写入 `report.json`。
 
 ## 本地协议夹具
 

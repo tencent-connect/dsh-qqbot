@@ -10,7 +10,7 @@
  * - TTL 与条数上限只是兜底，防止丢失 turn/end 时无界增长。
  */
 
-import type { DeliveryLedger, InputReceipt } from './delivery-ledger.ts';
+import { deliveryKey, type DeliveryLedger, type InputReceipt } from './delivery-ledger.ts';
 import type { ReplyTarget } from '../types.ts';
 
 /** 兜底 TTL 下限：至少覆盖一次默认处理超时 */
@@ -38,6 +38,7 @@ export function inputOriginTtlMs(processingTimeoutMs: number): number {
 export class QqInputRegistry {
   public readonly ledger: DeliveryLedger | undefined;
   private readonly entries = new Map<string, number>();
+  private readonly backgrounds = new Map<string, { sessionId: string; contentHash: string; consume: () => void }>();
   private readonly ttlMs: number;
   private readonly maxEntries: number;
   private readonly now: () => number;
@@ -55,6 +56,19 @@ export class QqInputRegistry {
     this.entries.delete(messageId);
     this.entries.set(messageId, this.now() + this.ttlMs);
     this.evictOverflow();
+  }
+
+  public trackBackground(messageId: string, sessionId: string, contentHash: string, consume: () => void): () => void {
+    this.backgrounds.set(messageId, { sessionId, contentHash, consume });
+    return () => { this.backgrounds.delete(messageId); };
+  }
+
+  public admitBackground(sessionId: string, messageId: string, content: unknown): void {
+    // Steering discards the receipt, and the original content can still reach the model.
+    const pending = this.backgrounds.get(messageId);
+    if (pending?.sessionId !== sessionId || pending.contentHash !== deliveryKey(content)) return;
+    this.backgrounds.delete(messageId);
+    pending.consume();
   }
 
   public claim(messageId: string, sessionId: string, content: unknown, turn: number, peer: ReplyTarget): InputReceipt | undefined {

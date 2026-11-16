@@ -21,8 +21,8 @@ import {
   type DownloadedFile,
   type MediaKind,
 } from './attachment.ts';
-import { clearGroupHistory } from '../features/history-store.ts';
-import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { getHistoryStore } from '../features/history-store.ts';
+import type { HistoryEntry, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 // ── 类型定义 ──
@@ -45,14 +45,6 @@ interface ResolvedQuote {
   text?: string;
   entry?: { senderId?: string; content?: string };
   attachments?: QuotedAttachment[];
-}
-
-interface HistoryEntry {
-  senderId: string;
-  senderName?: string;
-  content: string;
-  timestamp: number;
-  messageId: string;
 }
 
 interface MentionState {
@@ -120,15 +112,13 @@ export async function handleInbound(
   const canSubmit = () => !ctx.signal.aborted && allowTarget(replyTarget);
   if (!canSubmit()) return;
 
-  // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, logger);
-
-  if (!agentBody) {
+  const body = assembleMessageBody(msg, mwState, scope, logger);
+  if (!body) {
     report?.(replyTarget, 'empty');
     return;
   }
 
-  logger.info(`Processing: scope=${scope} peerId=${peerId} body="${agentBody.slice(0, 200)}"`);
+  logger.info(`Processing: scope=${scope} peerId=${peerId} body="${body.slice(0, 200)}"`);
 
   // ── 获取或创建会话 ──
   let record;
@@ -150,44 +140,46 @@ export async function handleInbound(
 
   if (!canSubmit()) return;
 
-  // ── 构建 UserMessage → followup ──
-  const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
+  const history = scope === 'group' && mwState.mention?.wasMentioned ? getHistoryStore(config.appId) : undefined;
+  const background = history?.unconsumed(mwState.history ?? []) ?? [];
+  const content: ContentBlock[] = [{ type: 'text', text: buildAgentBody(body, background) }];
 
   const message = createUserMessage({
     content,
     source: { kind: 'user' as const },
   });
+  const contentHash = deliveryKey(message.content);
 
   // 按宿主保证跨边界不变的 Message.id 登记 QQ 入站，出站据此认领回合归属
   //（不在 source 上写非契约字段，也不在 SessionRecord 上抢标记）。
   if (inputs.ledger && !inputs.ledger.registerInput({
     key: inputKey,
     messageId: String(message.id), sessionId: record.sessionId,
-    senderId: msg.senderId, target: replyTarget, contentHash: deliveryKey(message.content),
+    senderId: msg.senderId, target: replyTarget, contentHash,
   })) {
     logger.info('im-qqbot: duplicate QQ input ignored');
     return;
   }
   inputs.register(String(message.id));
+  const releaseBackground = history && background.length > 0
+    ? inputs.trackBackground(String(message.id), record.sessionId, contentHash, () => history.consume(background))
+    : undefined;
   try {
     record.agent.followup(message);
   } catch (error) {
+    releaseBackground?.();
     report?.(replyTarget, 'submit-failed');
     throw error;
   }
-  report?.(replyTarget, 'submitted', record.sessionId);
-  logger.info(`→ followup sent: key=${scope}:${peerId}`);
-
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
-  if (scope === 'group') {
-    clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
-  }
-
-  // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
   try {
-    await record.agent.whenIdle();
-  } catch (err) {
-    logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
+    report?.(replyTarget, 'submitted', record.sessionId);
+    logger.info(`→ followup sent: key=${scope}:${peerId}`);
+    // Keep this peer serial until the native inbox settles.
+    await record.agent.whenIdle().catch((err: unknown) => {
+      logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  } finally {
+    releaseBackground?.();
   }
 }
 
@@ -196,9 +188,9 @@ export async function handleInbound(
 // ══════════════════════════════════════════════════════════════
 
 /**
- * 组装 agentBody — AI 实际看到的完整上下文
+ * 组装原消息及其附件和引用。
  */
-function assembleAgentBody(
+function assembleMessageBody(
   msg: ProcessedMessage,
   state: MiddlewareState,
   scope: ChatScope,
@@ -216,10 +208,7 @@ function assembleAgentBody(
 
   const dynamicCtx = buildDynamicCtx(msg, state);
 
-  const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
-  const agentBody = buildAgentBody(base, state.history, isGroup, wasMentioned);
-
-  return agentBody;
+  return dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
 }
 
 /**
@@ -382,13 +371,9 @@ function renderMediaLine(
  */
 function buildAgentBody(
   base: string,
-  history: HistoryEntry[] | undefined,
-  isGroup: boolean,
-  wasMentioned: boolean,
+  history: readonly HistoryEntry[],
 ): string {
-  if (!isGroup || !wasMentioned || !history || history.length === 0) {
-    return base;
-  }
+  if (history.length === 0) return base;
 
   const historyLines = history.map(h => {
     const name = h.senderName ?? shortSenderId(h.senderId);

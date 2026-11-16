@@ -15,13 +15,17 @@ import { atomicWrite } from '../../lib/shared/atomic-file.js';
 import { deliveryKey } from '../../lib/transport/delivery-ledger.js';
 import { stageHistoryPackage } from './history-registry.mjs';
 
-const [source, corePackage, historyPackage, dir, expected = 'fixed', browser, oldPackage, ...extra] = process.argv.slice(2);
+const [source, corePackage, historyPackage, dir, expected = 'fixed', ...flags] = process.argv.slice(2);
+const browser = flags.includes('--browser');
+const clearBindings = flags.includes('--clear-bindings');
+const [oldPackage, ...extra] = flags.filter(flag => flag !== '--browser' && flag !== '--clear-bindings');
 assertNodeVersion();
 assert([source, corePackage, historyPackage, dir].every(value => value && isAbsolute(value))
   && ['baseline', 'fixed'].includes(expected)
-  && (browser === undefined || expected === 'fixed' && browser === '--browser')
-  && (oldPackage === undefined || browser === '--browser' && isAbsolute(oldPackage)) && extra.length === 0,
-'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed [--browser [OLD_CORE_TGZ]]]');
+  && (flags.length === 0 || expected === 'fixed')
+  && (oldPackage === undefined || browser && !clearBindings && isAbsolute(oldPackage))
+  && extra.length === 0 && new Set(flags).size === flags.length,
+'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed [--browser] [--clear-bindings|OLD_CORE_TGZ]]');
 await mkdir(dir, { mode: 0o700 });
 const home = join(dir, 'home');
 const workspace = join(dir, 'workspace');
@@ -97,7 +101,7 @@ try {
   const barrier = fileURLToPath(new URL('./tool-policy-barrier.mjs', import.meta.url));
   await writeFile(join(profileDir, 'cordis.patch.yml'), JSON.stringify([
     { id: 'im-qqbot', config: { appId: DUMMY_APP_ID, appSecret: DUMMY_SECRET, cwd: workspace,
-      preset: 'standard', streaming: false, showToolResults: false,
+      preset: 'standard', streaming: false, showToolResults: false, proactiveDelivery: { externalTurns: 'off' },
       media: { enabled: false }, access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open' } } },
     { id: 'agent-default-model', config: primary },
     { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
@@ -107,7 +111,7 @@ try {
   ], null, 2), { mode: 0o600 });
   let historyFixture;
   let openLog;
-  if (browser === '--browser') {
+  if (browser) {
     const directId = 'local-fixture-allowed-user';
     const pausedId = 'local-fixture-legacy-paused';
     const timelineOnlyId = 'local-fixture-legacy-timeline';
@@ -211,6 +215,28 @@ try {
   await client.get(barrierPath);
   await fetch(qq.origin + '/__fixture/outbound', { method: 'POST', body: '{"mode":"success"}' });
   const write = name => ({ name: 'write', args: { file_path: join(workspace, name), content: 'fixture only\n' } });
+  const nativeWrite = async (sessionId, name, allowed) => {
+    const before = qq.state.observedOutboundRequests;
+    const previousTurns = (await events(sessionId)).filter(event => event.type === 'turn/end').length;
+    const file = name + '.txt';
+    plan(name, [write(file)], 'c2c');
+    const receipt = await client.rpc('session/prompt', { request: { sessionId, requestId: crypto.randomUUID(),
+      mode: 'queue', content: [{ type: 'text', text: 'QQ_CMD_OK native followup ' + name }] } });
+    assert.equal(receipt.accepted, true);
+    const result = await finish(sessionId, previousTurns + 1);
+    const offered = (await observed(name)).tools;
+    if (allowed) {
+      assert(offered.includes('write'), name);
+      assert.equal(await readFile(join(workspace, file), 'utf8'), 'fixture only\n', name);
+    } else {
+      assert.deepEqual(offered, ['read'], name);
+      assert.equal(existsSync(join(workspace, file)), false, name);
+      const turn = result.filter(event => event.type === 'turn/end').at(-1).data.turn;
+      assert(result.some(event => event.type === 'tool/result' && event.data.turn === turn
+        && event.data.message.isError && JSON.stringify(event.data).includes('未允许该工具')), name);
+    }
+    assert.equal(qq.state.observedOutboundRequests, before, name + ' sent to QQ');
+  };
 
   await dispatch('group', 'ping');
   await until(() => conversation('group'), 'discovered group');
@@ -354,9 +380,22 @@ try {
     }, 'PTC recovery after tool failure');
     assert.deepEqual(sent.map(row => row.content), ['QQ_CMD_OK']);
     report.cases.ptcRecoveryDelivery = { toolFailed: true, finalAnswerOnly: true };
+
+    await nativeWrite(direct, 'native-while-qq-policy-active', false);
+    const plugin = async () => (await client.rpc('pluginManager/listPlugins')).find(row => row.patchId === 'im-qqbot');
+    const { entryId } = await plugin();
+    await client.rpc('pluginManager/setPluginEnabled', { id: entryId, enabled: false });
+    await until(async () => (await plugin())?.fiberPhase === null && qq.state.activeConnections === 0, 'QQ plugin stopped');
+    await nativeWrite(direct, 'native-after-plugin-disable', true);
+    const readyCount = qq.state.readyCount;
+    await client.rpc('pluginManager/setPluginEnabled', { id: entryId, enabled: true });
+    await until(async () => (await plugin())?.fiberPhase === 'active' && qq.state.readyCount > readyCount, 'QQ plugin restarted');
+    assert.equal(await current('c2c'), direct);
+    await nativeWrite(direct, 'native-after-plugin-enable', false);
+    report.cases.pluginDisable = { sessionId: direct, writeRestored: true, reenableRestoredRestriction: true, qqSends: 0 };
   }
   report.sessions = { group, direct, child };
-  if (browser === '--browser') {
+  if (browser) {
     const { verifyWorkbenchBrowser } = await import('./workbench-browser.mjs');
     const files = join(dir, 'prompt documents');
     await mkdir(files);
@@ -477,22 +516,24 @@ try {
   } else if (expected === 'fixed') {
     const robots = async () => (await client.get(base + 'robots')).robots;
     const bot = (await robots()).find(row => row.appId === DUMMY_APP_ID);
+    const mode = clearBindings ? 'clear' : 'retain';
+    const prefsPath = join(qqData, 'session-preferences.json');
+    const privateKey = 'qqbot:' + DUMMY_APP_ID + ':c2c:' + peer('c2c');
+    assert.equal(JSON.parse(await readFile(prefsPath, 'utf8')).sessionIds[privateKey], direct);
     await client.post(base + 'robots/remove', {
-      appId: DUMMY_APP_ID, revision: bot.revision, bindingRevision: bot.bindingRevision, mode: 'retain',
+      appId: DUMMY_APP_ID, revision: bot.revision, bindingRevision: bot.bindingRevision, mode,
     });
     await until(async () => qq.state.activeConnections === 0 &&
       !(await robots().catch(() => [bot])).some(row => row.appId === DUMMY_APP_ID), 'QQ unbound and routes reloaded');
-    const before = (await fetch(qq.origin + '/__fixture/observations').then(result => result.json())).outbound.length;
-    const previousTurns = (await events(direct)).filter(event => event.type === 'turn/end').length;
-    plan('native-after-unbind', [write('native-after-unbind.txt')], 'c2c');
-    const receipt = await client.rpc('session/prompt', { request: { sessionId: direct, requestId: crypto.randomUUID(),
-      mode: 'queue', content: [{ type: 'text', text: 'QQ_CMD_OK native followup' }] } });
-    assert.equal(receipt.accepted, true);
-    assert((await observed('native-after-unbind')).tools.includes('write'));
-    await finish(direct, previousTurns + 1);
-    assert.equal(await readFile(join(workspace, 'native-after-unbind.txt'), 'utf8'), 'fixture only\n');
-    assert.equal((await fetch(qq.origin + '/__fixture/observations').then(result => result.json())).outbound.length, before);
-    report.cases.nativeAfterUnbind = { sameSession: true, nativeWriteRestored: true, noQqDelivery: true };
+    const prefs = JSON.parse(await readFile(prefsPath, 'utf8'));
+    if (clearBindings) {
+      const keys = [...Object.keys(prefs.sessionIds), ...Object.keys(prefs.sessionHistory ?? {})];
+      assert(!keys.some(key => key.startsWith('qqbot:' + DUMMY_APP_ID + ':')), 'The QQ associations were cleared.');
+    } else {
+      assert.equal(prefs.sessionIds[privateKey], direct);
+    }
+    await nativeWrite(direct, 'native-after-unbind', true);
+    report.cases.nativeAfterUnbind = { mode, sessionId: direct, sameSession: true, nativeWriteRestored: true, noQqDelivery: true };
   }
   assert.equal(qq.state.unexpectedRequests, 0);
 } finally {
