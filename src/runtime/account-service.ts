@@ -1,4 +1,4 @@
-import { commandAccessError, usesLegacyCommandWhitelist } from '../commands/auth.ts';
+import { commandAccessError } from '../commands/auth.ts';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { MemberStore } from './member-store.ts';
@@ -227,13 +227,9 @@ export class AccountAccessService {
   allowsConversation(scope: ChatScope, openid: string): boolean {
     return allowsConversation(this.currentAccess(), scope, openid);
   }
-  commandAccessError(actor?: string, command?: string): string | undefined {
-    const access = this.currentAccess();
-    const mode = access.commandMode;
-    if (mode === undefined && access.c2cMode === 'allowlist' && usesLegacyCommandWhitelist(command)) {
-      return commandAccessError('allowlist', actor, actor !== undefined && access.c2cAllow.includes(actor));
-    }
-    return commandAccessError(mode, actor, mode === 'allowlist' && this.isOwner(actor));
+  commandAccessError(actor?: string): string | undefined {
+    const { commandMode } = this.currentAccess();
+    return commandAccessError(commandMode, actor, commandMode === 'allowlist' && this.isOwner(actor));
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }
 }

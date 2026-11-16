@@ -10,8 +10,8 @@ export interface AccessControlConfig {
   c2cAllow: string[];
   /** 群聊访问模式 */
   groupMode: 'open' | 'allowlist' | 'disabled';
-  /** QQ 斜杠命令模式，缺省沿用 0.5.5 的授权 */
-  commandMode?: 'open' | 'allowlist' | 'disabled';
+  /** QQ 斜杠命令模式 */
+  commandMode: 'open' | 'allowlist' | 'disabled';
   /** 群聊白名单（group openid） */
   groupAllow: string[];
 }
@@ -116,9 +116,9 @@ export interface ImQQBotConfig {
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
-export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
+export const AccessControlSchema: Schema<Partial<AccessControlConfig>, AccessControlConfig> = Schema.object({
   c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式（默认开放）'),
-  commandMode: Schema.union(['open', 'allowlist', 'disabled']).description('斜杠命令模式（省略时沿用旧版授权）'),
+  commandMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('斜杠命令模式（默认开放）'),
   c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单（QQ OpenID）'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),
@@ -144,6 +144,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   access: AccessControlSchema.default({
     c2cMode: 'open',
     c2cAllow: [],
+    commandMode: 'open',
     groupMode: 'open',
     groupAllow: [],
   }).description('访问控制'),

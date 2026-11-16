@@ -93,7 +93,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 
 先退出该 profile 的 Host，并备份它的 `cordis.patch.yml` 与 `~/.dsh-qqbot/model-prefs.json`。在原 profile 安装新版后直接启动。QQBot 沿用绑定及群聊、私聊名单，按 AppID 导入模型、预设和当前 Session 关联。关联需通过当前 Host 的 Session 持久化校验。原 Session 和工作目录继续通过 DSH 打开。
 
-设置显示「沿用旧版授权」时，旧私聊白名单仍限制 `/model` 和 `/preset` 的发送者，包括获准进入的群聊。选择新的斜杠命令模式并保存后，改用所选授权。
+旧配置省略 `access.commandMode` 时，斜杠命令默认采用「所有人」。获准接入的发送者适用相同的命令授权规则。可以在「斜杠命令」中选择独立的命令白名单或关闭。
 
 设置、记录与投递凭证默认位于当前 profile 的 `qqbot-state/`。可用 `QQBOT_DATA_DIR` 指定独立的绝对路径。另一 Host 已占用同一实际目录时，请先退出占用进程或改用独立 profile 和目录。
 

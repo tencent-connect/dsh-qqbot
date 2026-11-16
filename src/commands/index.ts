@@ -10,7 +10,6 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { newCommand, compactCommand } from './session.ts';
-import { usesLegacyCommandWhitelist } from './auth.ts';
 import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
@@ -40,26 +39,25 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
 
   for (const command of commands) {
     const original = command.handler;
-    const name = typeof command.name === 'string' ? command.name : command.name[0];
     command.handler = ctx => {
       const service = deps.manager.accountAccess;
-      const error = service ? service.commandAccessError(ctx.message.senderId, name) : '斜杠命令服务尚未就绪。';
+      const error = service ? service.commandAccessError(ctx.message.senderId) : '斜杠命令服务尚未就绪。';
       return error ? Promise.resolve(error) : original(ctx);
     };
   }
   return commands;
 }
 export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
-  const { commandMode, c2cMode } = deps.manager.accountAccess?.currentAccess() ?? deps.config.access;
+  const { commandMode } = deps.manager.accountAccess?.currentAccess() ?? deps.config.access;
+  const scope = commandMode === 'open' ? 'all' : commandMode === 'disabled' ? 'disabled' : 'owner';
   return buildCommandList(deps).map((command): SlashCommandDescriptor => {
     const names = Array.isArray(command.name) ? command.name : [command.name];
-    const mode = commandMode ?? (c2cMode === 'allowlist' && usesLegacyCommandWhitelist(names[0]) ? 'allowlist' : 'open');
     return {
       name: names[0] ?? '',
       aliases: names.slice(1),
       description: command.description ?? '',
       category: command.category,
-      scope: mode === 'open' ? 'all' : mode === 'disabled' ? 'disabled' : 'owner',
+      scope,
       ...(command.hidden === true ? { hidden: true } : {}),
     };
   }).filter((descriptor) => descriptor.name !== '');

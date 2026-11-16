@@ -119,7 +119,7 @@ export function AccessSettings({
       .then(result => { if (!controller.signal.aborted) { setCommands(result.commands); setCommandsError(null); } })
       .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();
-  }, [appId, bound, enabled, access.c2cMode, access.commandMode]);
+  }, [appId, bound, enabled, access.commandMode]);
   return createElement('div', { className: 'imqb2-form' },
     createElement('div', { className: 'imqb2-group-title' }, t("服务范围")),
     createElement(SegmentedRow<AccessMode>, {
@@ -138,13 +138,12 @@ export function AccessSettings({
       purpose: 'allow-group', title: t("群白名单"), enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
       hint: t("生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。"),
     }) : null,
-    createElement(SegmentedRow<AccessMode | 'legacy'>, {
-      disabled: busy, label: t("斜杠命令"), value: access.commandMode ?? 'legacy',
-      options: access.commandMode === undefined ? [{ value: 'legacy', label: t("沿用旧版授权") }, ...modeOptions()] : modeOptions(),
+    createElement(SegmentedRow<AccessMode>, {
+      disabled: busy, label: t("斜杠命令"), value: access.commandMode ?? 'open', options: modeOptions(),
       help: t("仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。"),
-      onChange: value => { if (value !== 'legacy') onMode('commandMode', value); },
+      onChange: value => onMode('commandMode', value),
     }),
-    (access.commandMode ?? 'open') === 'allowlist' ? createElement(PairClaimPanel, {
+    access.commandMode === 'allowlist' ? createElement(PairClaimPanel, {
       purpose: 'owner', title: t("命令白名单"), enabled: bound, canPair: enabled, appId, onChange: onMembershipChange,
       hint: t("名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。"),
     }) : null,

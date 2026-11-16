@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { AccessControlConfig } from '../config.ts';
+import { AccessControlSchema, type AccessControlConfig } from '../config.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 
 interface RobotConfigBase {
@@ -84,7 +84,7 @@ export function robotAccessPatch(input: unknown): Partial<AccessControlConfig> {
 function parseAccess(input: unknown): AccessControlConfig {
   const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = robotAccessPatch(input);
   if (!c2cMode || !groupMode || !c2cAllow || !groupAllow) throw new Error('机器人访问配置不完整。');
-  return { c2cMode, groupMode, commandMode, c2cAllow, groupAllow };
+  return AccessControlSchema({ c2cMode, groupMode, commandMode, c2cAllow, groupAllow });
 }
 
 function parseRecord(input: unknown): RobotConfigRecord {

@@ -93,7 +93,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 
 Stop the Host and back up the profile's `cordis.patch.yml` and `~/.dsh-qqbot/model-prefs.json`. Install the new version in the same profile and start it again. QQBot reuses the binding and access lists and imports model, preset, and current Session preferences for that AppID. It checks Session IDs against the Host's configured storage. Existing Sessions and their working directories remain accessible from DSH.
 
-With **Use legacy authorization**, the previous private-chat allowlist still controls who can use `/model` and `/preset`, including in admitted groups. Choose and save a different slash command mode to change that rule.
+If the old configuration omits `access.commandMode`, slash commands use **Everyone**. The same command policy applies to all admitted senders. Use the slash command settings to choose a separate command allowlist or turn commands off.
 
 QQBot stores settings, history, and delivery state in `qqbot-state/` under the profile by default. Set `QQBOT_DATA_DIR` to an absolute path to choose a separate directory. If another Host owns the same directory, stop it or choose a separate profile and directory.
 

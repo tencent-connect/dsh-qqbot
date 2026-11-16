@@ -238,7 +238,6 @@ const english = {
   "群白名单": "Group allowlist",
   "生成配对码，让群成员在群里 @ 机器人后直接发送这个码，即把该群加入白名单。": "Generate a code and ask a group member to mention the bot and send the code in the group.",
   "斜杠命令": "Slash commands",
-  "沿用旧版授权": "Keep legacy authorization",
   "仅在获准接入的对话中生效。所有人模式允许成员切换模型、开始新会话等，影响该群的共享会话。审批和提问按钮按各自权限处理。": "Applies in authorized conversations. Everyone mode lets group members change the shared model and start a new Session. Approvals and questions use their own access rules.",
   "命令白名单": "Command allowlist",
   "名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。": "The sender’s OpenID controls access in authorized groups and direct chats. Saving modes and managing the list take effect separately.",

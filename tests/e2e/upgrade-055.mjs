@@ -201,8 +201,9 @@ try {
   assert.equal(await readFile(patchPath(profile), 'utf8'), patchText);
   await withHost(profile, 'upgrade-candidate', async connect => {
     await exchange('group', 'allowed', 'ping', /pong/i);
-    await exchange('group', 'allowed', 'model-secondary', /无权限|不在斜杠命令白名单/);
-    await exchange('group', 'allowed', 'preset-minimal', /无权限|不在斜杠命令白名单/);
+    await exchange('group', 'allowed', 'model', /模型配置/);
+    await exchange('group', 'allowed', 'preset', /Agent Preset|无可用的 agent preset/);
+    await exchange('group', 'denied', 'model', null);
     await exchange('c2c', 'allowed', 'ping', null);
     await exchange('c2c', 'denied', 'smoke', /QQ_CMD_OK/);
     assert.equal(requests.at(-1)?.model, secondary.model);
@@ -213,7 +214,7 @@ try {
     const client = await connect();
     const { robots } = await client.get('/api/qqbot/workbench/robots');
     assert.equal(robots[0]?.appId, DUMMY_APP_ID);
-    assert.equal(robots[0]?.access.commandMode, undefined);
+    assert.equal(robots[0]?.access.commandMode, 'open');
     const conversations = await client.get('/api/qqbot/workbench/conversations?appId=' + DUMMY_APP_ID);
     assert.equal(conversations.conversations.find(row => row.openId === directId)?.currentSessionId, sessionId);
     resultMode = 'tool-then-answer';
@@ -228,10 +229,10 @@ try {
     const data = JSON.parse(await readFile(join(profilePath(profile), 'qqbot-state', 'session-preferences.json'), 'utf8'));
     assert.equal(data.sessionIds[directKey], sessionId);
     assert.equal(data.presets[directKey], 'minimal');
-    assert(!data.overrides[groupKey], 'The legacy denied group sender changed the shared model');
+    assert(!data.overrides[groupKey], 'The model list request changed the shared group model');
   });
   assert.equal(await readFile(oldPrefs, 'utf8'), oldBytes);
-  report.upgrade = { sessionId, model: secondary.model, legacyCommandAccess: true, sourcePrefsPreserved: true };
+  report.upgrade = { sessionId, model: secondary.model, unifiedCommandAccess: true, sourcePrefsPreserved: true };
   await install(profile, oldPackage);
   assert.equal((await installed(profile, core)).version, '0.5.5');
   await withHost(profile, 'rollback', async () => {

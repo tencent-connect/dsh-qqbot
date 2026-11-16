@@ -92,6 +92,7 @@ interface TestProps {
   disabled?: boolean;
   label?: string;
   value?: string;
+  options?: readonly { value: string; label: string }[];
   onClick?: () => void;
   placeholder?: string;
   onChange?: (event: { target: { value: string }; currentTarget: { value: string } }) => void;
@@ -122,6 +123,18 @@ afterEach(() => {
 });
 
 describe('QQ settings recovery', () => {
+  it('offers three slash command modes and shows the default without submitting it', () => {
+    const onMode = vi.fn();
+    const render = mount(() => AccessSettings({
+      access: { c2cMode: 'allowlist', groupMode: 'allowlist' },
+      busy: false, bound: false, onMode, onMembershipChange: vi.fn(),
+    }));
+    const mode = find(render(), props => props.label === '斜杠命令')?.props;
+    expect(mode?.value).toBe('open');
+    expect(mode?.options?.map(option => option.label)).toEqual(['所有人', '白名单', '关闭']);
+    expect(onMode).not.toHaveBeenCalled();
+  });
+
   it('submits the name and access changes from one form and retries only the unsaved fields', async () => {
     vi.useFakeTimers();
     const writes: { path: string; body: Record<string, unknown> }[] = [];

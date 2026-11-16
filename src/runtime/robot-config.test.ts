@@ -46,6 +46,18 @@ describe('robot account catalog', () => {
     expect(() => store.save({ ...primary, appId: saved.appId, revision: 2 })).toThrow(RobotConfigConflictError);
   });
 
+  it('reads a saved account without a command mode as open', () => {
+    const bytes = JSON.stringify({
+      version: 1,
+      robots: [{ ...additional, revision: 1, access: { ...additional.access, commandMode: undefined } }],
+    });
+    writeFileSync(path, bytes, { mode: 0o600 });
+
+    expect(store.get(additional.appId)?.kind).toBe('additional');
+    expect(store.get(additional.appId)).toMatchObject({ access: additional.access });
+    expect(readFileSync(path, 'utf8')).toBe(bytes);
+  });
+
   it('removes only the selected account and rejects stale requests after it is re-added', () => {
     const kept = store.save(primary);
     const original = store.save(additional);
