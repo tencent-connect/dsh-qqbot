@@ -14,6 +14,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { createElement, type ReactNode } from 'react';
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { BindPanelBody, useBindState, QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { ConfigPanel } from './config-panel.ts';
 
@@ -98,7 +99,8 @@ function QqBotSidebarIcon({ size = 16 }: { size?: number; active?: boolean }): R
     createElement('path', { d: QQ_BOT_LOGO_PATH, fill: 'currentColor' }));
 }
 
-/** 插件详情「设置」按钮：仅在本包的 bundle / 组件行详情页渲染，其他插件不显示 */
+/** 插件详情「设置」按钮：仅在本包的 bundle / 组件行详情页渲染，其他插件不显示。
+ *  样式走宿主统一 Button 原语（与详情页自身的更新/卸载按钮同规格）。 */
 function OpenQqBotAction({ subject, packageName, onOpen }: {
   subject?: { kind?: string; pkg?: { name?: string }; row?: { moduleName?: string } };
   packageName: string;
@@ -107,8 +109,8 @@ function OpenQqBotAction({ subject, packageName, onOpen }: {
   if (subject?.kind !== 'bundle' && subject?.kind !== 'row') return null;
   if (subject.pkg?.name !== packageName) return null;
   if (subject.kind === 'row' && subject.row?.moduleName !== packageName) return null;
-  return createElement('button', {
-    type: 'button', className: 'imqb-pluginOpen', onClick: onOpen,
+  return createElement(Button, {
+    variant: 'outline', size: 'sm', onClick: onOpen,
   }, '设置');
 }
 
