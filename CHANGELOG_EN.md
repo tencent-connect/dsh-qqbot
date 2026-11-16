@@ -18,11 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### ⚠️ Behavior Changes
 
+- **Minimum host raised to 0.2.0-rc.2**: hosts from 0.1.x are no longer supported (their question-channel protocol is incompatible); installing on an older host is now rejected explicitly.
+- **Questions surface on QQ and the desktop at once**: an `ask_user_question` is delivered to both QQ and the desktop/Web, first answer wins — whichever side replies first settles it, and the other side goes inert (a late QQ button press no longer advances; when QQ wins, the stale desktop card disappears).
 - **Slash commands open by default**: `/preset`, `/model`, and other admin commands were previously limited to allowlisted users; with `access.commandMode` they are open to everyone by default — set it to `allowlist` and configure the command roster to keep them restricted.
 - **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
 
 ### Fixed
 
+- **Question channel survives hot reloads**: plugin hot reloads (saving config, QR binding) used to silently disable the QQ question channel — afterwards `ask_user_question` reached no surface at all or failed outright. The channel now hooks in via events and its lifecycle follows the plugin automatically. The full question flow (multi-question stepping, buttons, timeouts, racing the desktop) is regression-tested.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
 
 ## [0.5.5] - 2026-10-30
