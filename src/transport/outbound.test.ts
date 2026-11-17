@@ -568,3 +568,61 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     expect(tracker.activeTurns).toBe(0);
   });
 });
+
+describe('OutboundRouter: tool/result', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const sid = { header: { id: 'sess-qq' } };
+  const toolCall = (callId: string, name = 'bash') => ({
+    type: 'tool/call',
+    data: { turn: 1, step: 1, callId, name, arguments: '{"command":"ls -l"}' },
+  });
+  const toolResult = (callId: string, text: string, isError = false) => ({
+    type: 'tool/result',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { source: { kind: 'tool', callId }, content: [{ type: 'text', text }], isError },
+    },
+  });
+
+  it('开关打开时把工具结果发到当前会话', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'total 0'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '🔧 `bash` 完成\ntotal 0');
+  });
+
+  it('开关关闭时不发成功结果', async () => {
+    const { outbound, bot } = setup();
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'total 0'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('工具错误始终发送（即使开关关闭）', async () => {
+    const { outbound, bot } = setup();
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'exit code 1', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '❌ 工具 `bash` 执行失败\nexit code 1');
+  });
+
+  it('未登记过的 callId 不投递（避免重放/迟到结果刷屏）', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
+
+    outbound.routeSessionEvent(sid, toolResult('call-x', 'orphan'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+});

@@ -45,6 +45,8 @@ export interface ToolCallEvent {
 export interface ToolResultEvent {
   type: 'tool/result';
   callId: string;
+  /** 结果消息自带的失败标记（error 之外的另一条错误路径） */
+  isError: boolean;
   error?: { name: string; code: string };
   /** 原始 data 透传给 presenter 做结构化展示 */
   raw: Record<string, unknown>;
@@ -107,10 +109,19 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'tool/result': {
-      const data = raw.data as { message?: { source?: { callId?: string } }; error?: { name: string; code: string } };
+      const data = raw.data as {
+        message?: { source?: { callId?: string }; isError?: boolean };
+        error?: { name: string; code: string };
+      };
       const callId = data.message?.source?.callId;
       if (!callId) return undefined;
-      return { type: 'tool/result', callId, error: data.error, raw: raw.data };
+      return {
+        type: 'tool/result',
+        callId,
+        isError: data.message?.isError === true,
+        error: data.error,
+        raw: raw.data,
+      };
     }
 
     case 'turn/end': {

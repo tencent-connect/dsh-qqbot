@@ -80,3 +80,33 @@ describe('parseEvent: deliverables/presented', () => {
     expect(parseEvent(presented(data))).toBeUndefined();
   });
 });
+
+describe('parseEvent: tool/result', () => {
+  const result = (data: unknown): RawSessionEvent => ({ type: 'tool/result', data: data as Record<string, unknown> });
+
+  it('解析 callId 与 message.isError', () => {
+    const raw = result({
+      turn: 1,
+      step: 1,
+      message: { source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'text', text: 'ok' }], isError: true },
+    });
+
+    expect(parseEvent(raw)).toEqual({
+      type: 'tool/result',
+      callId: 'call-1',
+      isError: true,
+      error: undefined,
+      raw: raw.data,
+    });
+  });
+
+  it('isError 缺省为 false', () => {
+    const event = parseEvent(result({ message: { source: { callId: 'c' }, content: [] } }));
+
+    expect(event?.type === 'tool/result' && event.isError).toBe(false);
+  });
+
+  it('缺 callId 返回 undefined', () => {
+    expect(parseEvent(result({ message: { content: [] } }))).toBeUndefined();
+  });
+});

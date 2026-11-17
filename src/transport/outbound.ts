@@ -249,7 +249,7 @@ class OutboundRouter {
     this.toolCalls.delete(event.callId);
     if (call === undefined) return;
 
-    if (event.error === undefined && !this.config.showToolResults) return;
+    if (event.error === undefined && !event.isError && !this.config.showToolResults) return;
 
     const text = formatToolResult(
       call.name,
