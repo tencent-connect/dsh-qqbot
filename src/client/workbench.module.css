@@ -312,6 +312,8 @@
 :global(.imqw-details) dd { margin: 0; overflow-wrap: anywhere; }
 :global(.imqw-field) { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 :global(.imqw-field) input { width: 100%; min-width: 0; }
+:global(.imqw-retention-days) { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+:global(.imqw-retention-input) { box-sizing: border-box; width: 7rem; }
 :global(.imqw-receiving) { font-size: 13px; }
 :global(.imqw-form) > footer { justify-content: flex-end; }
 :global(.imqw-savebar) {

@@ -8,6 +8,7 @@ import { registerSendFileTool } from '../media/send-file-tool.ts';
 import { PrefsStore } from '../model/prefs-store.ts';
 import type { DshAgent, DshAgentRegistry } from '../session/index.ts';
 import { PLUGIN_HOME, resolveRobotWorkspace, SESSION_PREFERENCES_FILE } from '../shared/dirs.ts';
+import { RETENTION_DAY_MS } from '../shared/workbench-conversation-protocol.ts';
 import type { WorkbenchRobot, WorkbenchRobotPatch } from '../shared/workbench-protocol.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { registerAccountRoutes } from './account-routes.ts';
@@ -61,7 +62,7 @@ export class RobotRuntimes {
     this.conversationSettings = new ConversationSettingsStore(join(dataDir, 'conversation-settings.json'));
     this.timeline = new QqTimeline(join(dataDir, 'timeline'), logger, (appId, { scope, targetId }) => {
       const days = this.conversationSettings.recordedDays(peerKey(appId, scope, targetId));
-      return days === undefined ? undefined : Date.now() - days * 86_400_000;
+      return days === undefined ? undefined : Date.now() - days * RETENTION_DAY_MS;
     });
     this.names = new QqDisplayNames(join(dataDir, 'qq-display-names.json'), logger);
     this.toolPolicies = new WorkbenchToolPolicies(ctx, agents,

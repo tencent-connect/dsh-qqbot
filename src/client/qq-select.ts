@@ -13,17 +13,18 @@ export interface QQSelectProps {
   readonly onChange: (value: string) => void;
   readonly options: readonly QQSelectOption[];
   readonly placeholder?: string;
+  readonly selectedLabel?: string;
   readonly disabled?: boolean;
   readonly onOpen?: () => void;
 }
 
 /** Public host menu and button semantics, shared by all QQ settings selectors. */
-export function QQSelect({ label, value, onChange, options, placeholder = '请选择', disabled = false, onOpen }: QQSelectProps): ReactNode {
+export function QQSelect({ label, value, onChange, options, selectedLabel, placeholder = '请选择', disabled = false, onOpen }: QQSelectProps): ReactNode {
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const selected = options.find((option) => option.value === value);
   const missing = value !== '' && selected === undefined;
-  const visible = selected?.label ?? (missing ? `${value}（当前值不可用）` : placeholder);
+  const visible = selectedLabel ?? selected?.label ?? (missing ? `${value}（当前值不可用）` : placeholder);
   const choices = missing ? [{ value, label: visible, disabled: true }, ...options] : options;
   return h(Menu, {
     open: open && !disabled, onClose: () => setOpen(false),

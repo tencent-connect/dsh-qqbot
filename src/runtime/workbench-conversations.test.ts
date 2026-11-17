@@ -324,6 +324,26 @@ it('requires confirmation to shorten retention or clear one conversation', async
   } finally { await f.close(); }
 });
 
+it('validates and reloads a custom retention period, and confirms only shorter periods', async () => {
+  const f = await fixture();
+  const ref = { appId: 'A', scope: 'c2c', openId: 'same' } as const;
+  const key = peerKey(ref.appId, ref.scope, ref.openId);
+  try {
+    f.conversationSettings.remember(key);
+    for (const retention of ['0d', '-1d', '1.5d', '090d', '9007199254740991d', '90', 90]) {
+      expect((await f.post({ ...ref, revision: 0, retention })).status).toBe(400);
+    }
+    expect((await f.post({ ...ref, revision: 0, retention: '90d' })).status).toBe(200);
+    const restored = new ConversationSettingsStore(f.settingsPath);
+    expect(restored.recordedDays(key)).toBe(90);
+    expect(restored.expiringPeers()).toEqual([ref]);
+    expect((await f.post({ ...ref, revision: 1, retention: '14d' })).status).toBe(400);
+    expect(restored.get(key).retention).toBe('90d');
+    expect((await f.post({ ...ref, revision: 1, retention: '14d', confirmRetention: true })).status).toBe(200);
+    expect(restored.get(key).retention).toBe('14d');
+  } finally { await f.close(); }
+});
+
 it('serves downloaded GIF bytes only to the matching timeline row and keeps paths out of JSON', async () => {
   const f = await fixture();
   try {

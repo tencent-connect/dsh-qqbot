@@ -10,7 +10,7 @@ import { fetchJson, HttpError } from './http.ts';
 import { accountName } from './robot-accounts.ts';
 import { extensionSettingsProps } from './workbench-extensions.ts';
 import { WorkbenchAgentFields, type AgentFormSource } from './workbench-agent-form.ts';
-import { changes, conversationKey, scopedKey, selectDraft, type Draft, type SessionNavigation, type SmallPage, type WorkbenchState } from './workbench-state.ts';
+import { changes, conversationKey, draftRetentionPolicy, scopedKey, selectDraft, type Draft, type SessionNavigation, type SmallPage, type WorkbenchState } from './workbench-state.ts';
 import { peerName, receivingLabel, sessionDate, workspaceName } from './workbench-labels.ts';
 import { ConversationSettings } from './workbench-conversation-settings.ts';
 import styles from './workbench.module.css';
@@ -178,12 +178,20 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
   };
 
   const save = async (target: WorkbenchConversation, draft: Draft, confirmRetention?: true): Promise<void> => {
-    if (mutation.current) return;
+    const policy = draftRetentionPolicy(draft.retention);
+    if (mutation.current || policy === undefined) return;
     const key = scopedKey(appId, target);
+    const { retention, ...edited } = changes({ ...draft, retention: policy });
+    if (retention === undefined && Object.keys(edited).length === 0) {
+      peerDrafts.delete(key);
+      redraw(value => value + 1);
+      return;
+    }
     const controller = new AbortController();
     const patch: WorkbenchConversationPatch = {
       appId, scope: target.scope, openId: target.openId, revision: draft.baseline.revision,
-      defaultsRevision: draft.baseline.defaultsRevision, ...changes(draft), confirmRetention,
+      defaultsRevision: draft.baseline.defaultsRevision, ...edited,
+      retention: retention === undefined ? undefined : policy, confirmRetention,
     };
     mutation.current = controller;
     generation.current++;

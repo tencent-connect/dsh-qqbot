@@ -374,7 +374,7 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
     conversationPath: true, latestPreview: true, storedOnlyPath: true, missingPreview: true };
 }
 
-async function verifyRetention(page, client, until, { older, recent, pausedId, timelineOnlyId, storedMessages, timedId }) {
+async function verifyRetention(page, client, until, { expired, older, recent, pausedId, timelineOnlyId, storedMessages, timedId }) {
   const startup = storedMessages(timedId);
   assert(!startup.includes('QQ_EXPIRE_WITHOUT_OPENING'));
   assert(startup.includes('QQ_KEEP_ON_STARTUP'));
@@ -403,30 +403,62 @@ async function verifyRetention(page, client, until, { older, recent, pausedId, t
     await policy.click();
     await page.getByRole('menuitem', { name: label, exact: true }).click();
   };
-  const save = () => button(settings, '保存').click();
+  const save = button(settings, '保存');
   const shorten = page.getByRole('dialog', { name: '缩短消息保留期？' });
-  await choose('保留最近 30 天');
-  await save();
-  await shorten.getByText(/超过 30 天/).waitFor();
+  const days = settings.getByRole('textbox', { name: '自定义保留天数', exact: true });
+  await choose('自定义天数');
+  assert(await save.isDisabled());
+  for (const invalid of ['0', '-1', '1.5']) {
+    await days.fill(invalid);
+    await settings.getByRole('alert').filter({ hasText: '请输入有效的正整数天数。' }).waitFor();
+    assert(await save.isDisabled());
+  }
+  await days.fill('90');
+  await button(settings, '撤销修改').click();
+  await days.waitFor({ state: 'hidden' });
+  assert.equal((await current()).retention, 'forever');
+
+  await choose('自定义天数');
+  await days.fill('90');
+  await save.click();
+  await shorten.getByText(/超过 90 天/).waitFor();
   await button(shorten, '取消').click();
   assert.equal((await current()).retention, 'forever');
-  assert(storedMessages(directId).includes(older));
-  await save();
+  assert(storedMessages(directId).includes(expired));
+  await save.click();
   await button(shorten, '确认缩短并保存').click();
-  await until(async () => (await current()).retention === '30d', '30-day policy');
+  await until(async () => (await current()).retention === '90d', '90-day custom policy');
+  await button(settings, '本机消息记录：保留最近 90 天').waitFor();
+  await history.getByText(expired, { exact: true }).waitFor({ state: 'hidden' });
+  await history.getByText(older, { exact: true }).waitFor();
+  assert(!storedMessages(directId).includes(expired));
+  assert(storedMessages(directId).includes(older));
+
+  await days.fill('14');
+  await save.click();
+  await shorten.getByText(/超过 14 天/).waitFor();
+  await button(shorten, '确认缩短并保存').click();
+  await until(async () => (await current()).retention === '14d', '14-day custom policy');
   await history.getByText(older, { exact: true }).waitFor({ state: 'hidden' });
   await history.getByText(recent, { exact: true }).waitFor();
   assert(!storedMessages(directId).includes(older));
 
-  await choose('保留最近 7 天');
-  await save();
+  await choose('保留最近 30 天');
+  await save.click();
+  await until(async () => (await current()).retention === '30d', 'lengthening to 30 days without confirmation');
+  assert(!storedMessages(directId).includes(older));
+
+  await choose('自定义天数');
+  await days.fill('7');
+  await save.click();
   await button(shorten, '确认缩短并保存').click();
-  await until(async () => (await current()).retention === '7d', '7-day policy');
+  await until(async () => (await current()).retention === '7d', 'custom input uses the 7-day preset');
+  await days.waitFor({ state: 'hidden' });
   await history.getByText(recent, { exact: true }).waitFor({ state: 'hidden' });
   assert(!storedMessages(directId).includes(recent));
 
   await choose('暂停记录');
-  await save();
+  await save.click();
   await history.getByText('已暂停记录新消息', { exact: true }).waitFor();
   assert.equal((await current()).retention, 'paused');
   const prior = (await entries()).map(entry => entry.id);
@@ -442,7 +474,8 @@ async function verifyRetention(page, client, until, { older, recent, pausedId, t
   assert.deepEqual(storedMessages(directId), []);
   assert.deepEqual(await readOther(), otherBefore);
   assert.deepEqual((await current()).sessions, original.sessions);
-  return { newDefault: true, legacyPolicies: true, startupExpiry: true, physicalExpiry: true, canceledDeletion: true, clearOneTimeline: true };
+  return { newDefault: true, legacyPolicies: true, startupExpiry: true, customDays: true, validationAndDiscard: true,
+    lengthening: true, presetNormalization: true, physicalExpiry: true, canceledDeletion: true, clearOneTimeline: true };
 }
 
 async function verifyBotIdentityAndLanguage(page, client) {

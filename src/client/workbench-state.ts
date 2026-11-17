@@ -1,12 +1,23 @@
-import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
+import { isMessageRetention, type MessageRetention, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { agentSettingsPatch } from './agent-settings-draft.ts';
 import type { RobotAccountDrafts } from './robot-accounts.ts';
 
 export type SmallPage = 'list' | 'conversation' | 'settings';
 type EditableSettings = Pick<WorkbenchConversation, 'alias' | 'receiving' | 'retention' | 'agent'>;
 
-export interface Draft extends EditableSettings {
+type DraftRetention = MessageRetention | { days: string };
+type DraftFields = Omit<EditableSettings, 'retention'> & { retention: DraftRetention };
+
+export interface Draft extends DraftFields {
   baseline: EditableSettings & Pick<WorkbenchConversation, 'revision' | 'defaultsRevision'>;
+}
+
+export function draftRetentionPolicy(retention: DraftRetention): MessageRetention | undefined {
+  if (typeof retention === 'string') return retention;
+  const text = retention.days.trim();
+  if (!/^\d+$/.test(text)) return undefined;
+  const policy = `${Number(text)}d`;
+  return isMessageRetention(policy) ? policy : undefined;
 }
 
 export interface Navigation {
@@ -29,7 +40,7 @@ export function selectDraft(peer: WorkbenchConversation): Draft {
   return { alias, receiving, retention, agent, baseline: { alias, receiving, retention, agent, revision, defaultsRevision } };
 }
 
-export function changes(draft: Draft): Partial<EditableSettings> {
+export function changes(draft: Draft): Partial<DraftFields> {
   const agentChanged = draft.agent && draft.baseline.agent
     ? Object.keys(agentSettingsPatch(draft.baseline.agent, draft.agent)).length > 0
     : draft.agent !== draft.baseline.agent;
@@ -41,7 +52,7 @@ export function changes(draft: Draft): Partial<EditableSettings> {
   };
 }
 
-export function mergeDraft(peer: WorkbenchConversation, draft: Draft, edited: Partial<EditableSettings>): Draft {
+export function mergeDraft(peer: WorkbenchConversation, draft: Draft, edited: Partial<DraftFields>): Draft {
   const latest = selectDraft(peer);
   const next = { ...latest, ...edited };
   const { agent } = edited;

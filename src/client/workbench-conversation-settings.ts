@@ -2,10 +2,10 @@ import styles from './workbench.module.css';
 import { t } from './qq-locale.ts';
 import { createElement as h, Fragment, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, IconEllipsisOutlineRegular, Menu, Modal, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives';
-import { retentionDays, shortensRetention, type MessageRetention, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
+import { retentionDays, shortensRetention, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { WORKBENCH_GROUP_GUIDE_IMAGES, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
-import { changes, mergeDraft, selectDraft, type Draft } from './workbench-state.ts';
+import { changes, draftRetentionPolicy, mergeDraft, selectDraft, type Draft } from './workbench-state.ts';
 import { accessLabel, peerName, workspaceName } from './workbench-labels.ts';
 import { WorkbenchAgentFields, WorkbenchReplyFields, type AgentFormSource } from './workbench-agent-form.ts';
 import { readDefaults } from './workbench-defaults.ts';
@@ -60,8 +60,15 @@ interface ConversationSettingsProps {
 export function ConversationSettings({ robot, peer, agentSource, closeButton, archived, workspace, openCurrent, draft, busy, feedback, onEdit, onSave, onClearRecords }: ConversationSettingsProps): ReactNode {
   const retentionOptions = [
     { value: '7d', label: t("保留最近 7 天") }, { value: '30d', label: t("保留最近 30 天") },
+    { value: 'custom', label: t("自定义天数") },
     { value: 'forever', label: t("长期保留") }, { value: 'paused', label: t("暂停记录") },
-  ] as const satisfies ReadonlyArray<{ value: MessageRetention; label: string }>;
+  ] as const;
+  const policy = draftRetentionPolicy(draft.retention);
+  const days = retentionDays(policy);
+  const uncommittedDays = typeof draft.retention === 'object' ? draft.retention.days : undefined;
+  const custom = uncommittedDays !== undefined || (days !== undefined && days !== 7 && days !== 30);
+  const daysInput = uncommittedDays ?? (days === undefined ? '' : String(days));
+  const invalidDays = custom && policy === undefined && daysInput !== '';
   const [adoptError, setAdoptError] = useState('');
   const [reading, setReading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -95,8 +102,8 @@ export function ConversationSettings({ robot, peer, agentSource, closeButton, ar
 
   return h('form', { className: 'imqw-form', onSubmit: (event: FormEvent) => {
     event.preventDefault();
-    if (!dirty || stale || disabled || confirm) return;
-    if (shortensRetention(draft.baseline.retention, draft.retention)) setConfirm('shorten');
+    if (!dirty || stale || disabled || confirm || policy === undefined) return;
+    if (shortensRetention(draft.baseline.retention, policy)) setConfirm('shorten');
     else onSave(draft);
   } },
     h('header', { className: 'imqw-column-head' },
@@ -152,13 +159,28 @@ export function ConversationSettings({ robot, peer, agentSource, closeButton, ar
       h('div', { className: 'imqw-field' },
         h('span', null, t("本机消息记录")),
         h(QQSelect, {
-          label: t("本机消息记录"), value: draft.retention, options: retentionOptions, disabled,
+          label: t("本机消息记录"), value: custom ? 'custom' : policy ?? '', options: retentionOptions, disabled,
+          selectedLabel: custom && days !== undefined ? t("保留最近 {0} 天", days) : undefined,
           onChange: value => {
             const option = retentionOptions.find(item => item.value === value);
-            if (option) onEdit({ ...draft, retention: option.value });
+            if (!option) return;
+            if (option.value === 'custom') {
+              if (!custom) onEdit({ ...draft, retention: { days: '' } });
+            } else {
+              onEdit({ ...draft, retention: option.value });
+            }
           },
         }),
-        h('p', { className: 'imqw-muted' }, draft.retention === 'paused'
+        custom ? h('div', { className: 'imqw-retention-days' },
+          h('span', null, t("保留最近")),
+          h(Input, {
+            className: 'imqw-retention-input', autoComplete: 'off', inputMode: 'numeric', value: daysInput,
+            'aria-label': t("自定义保留天数"), 'aria-invalid': invalidDays || undefined, placeholder: '90', disabled,
+            onChange: event => onEdit({ ...draft, retention: { days: event.currentTarget.value } }),
+          }),
+          h('span', null, t("天"))) : null,
+        invalidDays ? h('p', { className: 'imqb-error', role: 'alert' }, t("请输入有效的正整数天数。")) : null,
+        h('p', { className: 'imqw-muted' }, policy === 'paused'
           ? t("保存后暂停记录新消息，保留已有记录。")
           : t("保留期限适用于此 QQ 对话的本机收发记录。"))),
       h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled, className: 'imqb-danger',
@@ -169,16 +191,16 @@ export function ConversationSettings({ robot, peer, agentSource, closeButton, ar
       open: true, title: confirm === 'clear' ? t("清空本会话记录？") : t("缩短消息保留期？"), closeLabel: t("关闭"),
       description: confirm === 'clear'
         ? t("将删除「{0}」的全部本机 QQ 消息记录。DSH Session 历史单独保留。", peerName(peer))
-        : t("保存后将删除「{0}」超过 {1} 天的本机 QQ 消息记录。", peerName(peer), retentionDays(draft.retention)),
+        : t("保存后将删除「{0}」超过 {1} 天的本机 QQ 消息记录。", peerName(peer), days),
       onClose: () => setConfirm(undefined),
       footer: h(Fragment, null,
         h(Button, { type: 'button', variant: 'ghost', onClick: () => setConfirm(undefined) }, t("取消")),
         h(Button, { type: 'button', variant: 'outline', className: 'imqb-danger',
-          disabled: disabled || (confirm === 'shorten' && stale),
+          disabled: disabled || (confirm === 'shorten' && (stale || policy === undefined)),
           onClick: () => {
             setConfirm(undefined);
             if (confirm === 'clear') onClearRecords();
-            else onSave(draft, true);
+            else if (policy !== undefined) onSave(draft, true);
           },
         }, confirm === 'clear' ? t("确认清空") : t("确认缩短并保存"))),
     }) : null,
@@ -193,7 +215,7 @@ export function ConversationSettings({ robot, peer, agentSource, closeButton, ar
     feedback ? h('p', { className: 'imqb-error', role: 'alert' }, feedback.message) : null,
     h('footer', { className: 'imqw-actions imqw-savebar' },
       h(Button, { type: 'button', size: 'sm', variant: 'ghost', disabled: disabled || !dirty, onClick: () => onEdit(selectDraft(peer)) }, t("撤销修改")),
-      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: disabled || !dirty || stale }, busy ? t("保存中…") : t("保存")),
+      h(Button, { type: 'submit', size: 'sm', variant: 'primary', disabled: disabled || !dirty || stale || policy === undefined }, busy ? t("保存中…") : t("保存")),
     ),
   );
 }

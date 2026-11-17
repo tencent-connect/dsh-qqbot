@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { AccessControlConfig } from '../config.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import {
-  WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, retentionDays, shortensRetention,
+  WORKBENCH_CONVERSATIONS_PATH, WORKBENCH_NEW_SESSION_PATH, isMessageRetention, retentionDays, shortensRetention,
   type MessageRetention, type WorkbenchConversation, type WorkbenchConversationPatch,
   type WorkbenchNewSession, type WorkbenchSession,
 } from '../shared/workbench-conversation-protocol.ts';
@@ -192,7 +192,7 @@ function recordingValue(value: unknown): boolean {
 }
 
 function retentionValue(value: unknown): MessageRetention {
-  if (value === '7d' || value === '30d' || value === 'forever' || value === 'paused') return value;
+  if (isMessageRetention(value)) return value;
   throw new Error('QQ 消息保留策略无效。');
 }
 

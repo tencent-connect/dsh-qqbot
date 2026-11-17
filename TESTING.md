@@ -54,6 +54,19 @@ node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
 
 同一回放还会在机器人默认值和现有会话中绑定提示词文件，核对预览及模型请求都读到更新后的文件内容，并验证文件缺失时模型请求会停止。
 
+## 消息保留期与回退
+
+在上述隔离 Host 命令末尾加 `fixed --browser /absolute/old-qqbot.tgz`。浏览器回放自定义天数、撤销、缩短确认与实际过期记录删除，再使用同一隔离 Home 启动旧包，核对原 Session 和剩余记录。
+
+保存自定义天数后，仍只识别 7 天、30 天、长期保留和暂停记录的旧包会拒绝读取设置。回退时先停止使用该数据目录的 Host，再用新版包中附带的脚本转换。脚本把自定义项转为长期保留，并将转换前的设置原样备份到指定的新文件。
+
+```bash
+node /absolute/new-qqbot/scripts/prepare-retention-rollback.mjs \
+  /absolute/qqbot-data/conversation-settings.json /absolute/new-backup.json
+```
+
+转换完成后安装旧包并启动 Host。回退前已经清理的消息无法从这份设置备份恢复。
+
 ## 从 0.5.5 升级和干净安装
 
 用 npm 发布的 DSH CLI 和正式 QQBot 0.5.5 安装包回放。脚本从旧包写入实际格式的会话和偏好，测试单次安装主包、回退及双进程目录锁。候选记录包在回环 registry 暂存。QQ 网关和模型均使用本地夹具。

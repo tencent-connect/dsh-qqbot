@@ -4,10 +4,18 @@ import type { WorkbenchAgentSettings } from './workbench-agent-settings.ts';
 export const WORKBENCH_CONVERSATIONS_PATH = '/api/qqbot/workbench/conversations';
 export const WORKBENCH_NEW_SESSION_PATH = '/api/qqbot/workbench/conversations/new-session';
 
-export type MessageRetention = '7d' | '30d' | 'forever' | 'paused';
+export type MessageRetention = 'forever' | 'paused' | `${number}d`;
 
-export function retentionDays(value: MessageRetention): number | undefined {
-  return value === '7d' ? 7 : value === '30d' ? 30 : undefined;
+export const RETENTION_DAY_MS = 86_400_000;
+
+export function retentionDays(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !/^[1-9]\d*d$/.test(value)) return undefined;
+  const days = Number(value.slice(0, -1));
+  return days <= Math.floor(Number.MAX_SAFE_INTEGER / RETENTION_DAY_MS) ? days : undefined;
+}
+
+export function isMessageRetention(value: unknown): value is MessageRetention {
+  return value === 'forever' || value === 'paused' || retentionDays(value) !== undefined;
 }
 
 export function shortensRetention(before: MessageRetention, after: MessageRetention): boolean {

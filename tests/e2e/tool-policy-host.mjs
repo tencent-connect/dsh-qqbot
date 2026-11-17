@@ -6,20 +6,22 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { strToU8, zipSync } from 'fflate';
-import { assertNodeVersion, availablePort, runLogged, spawnLogged, waitForHost } from './host.mjs';
+import { assertNodeVersion, availablePort, hostClient, runLogged, spawnLogged, waitForHost } from './host.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { QqTimeline } from '../../lib/runtime/qq-timeline.js';
+import { atomicWrite } from '../../lib/shared/atomic-file.js';
 import { deliveryKey } from '../../lib/transport/delivery-ledger.js';
 import { stageHistoryPackage } from './history-registry.mjs';
 
-const [source, corePackage, historyPackage, dir, expected = 'fixed', browser] = process.argv.slice(2);
+const [source, corePackage, historyPackage, dir, expected = 'fixed', browser, oldPackage, ...extra] = process.argv.slice(2);
 assertNodeVersion();
 assert([source, corePackage, historyPackage, dir].every(value => value && isAbsolute(value))
   && ['baseline', 'fixed'].includes(expected)
-  && (browser === undefined || expected === 'fixed' && browser === '--browser'),
-'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed [--browser]]');
+  && (browser === undefined || expected === 'fixed' && browser === '--browser')
+  && (oldPackage === undefined || browser === '--browser' && isAbsolute(oldPackage)) && extra.length === 0,
+'Usage: node tests/e2e/tool-policy-host.mjs HOST_SOURCE CORE_TGZ HISTORY_TGZ NEW_OUTPUT_DIR [baseline|fixed [--browser [OLD_CORE_TGZ]]]');
 await mkdir(dir, { mode: 0o700 });
 const home = join(dir, 'home');
 const workspace = join(dir, 'workspace');
@@ -119,6 +121,7 @@ try {
         [`qqbot:${DUMMY_APP_ID}:c2c:${timedId}`]: { alias: '', receiving: true, retention: '7d', revision: 1 },
       },
     }), { mode: 0o600 });
+    const expired = 'QQ_TIMELINE_BEYOND_90_DAYS';
     const older = 'QQ_TIMELINE_BEYOND_30_DAYS';
     const recent = 'QQ_TIMELINE_BETWEEN_7_AND_30_DAYS';
     const timelineDir = join(qqData, 'timeline');
@@ -137,12 +140,12 @@ try {
           .all(DUMMY_APP_ID, openId).map(row => JSON.parse(row.body).text);
       } finally { db.close(); }
     };
-    seed(directId, [[older, 35], [recent, 12]]);
+    seed(directId, [[expired, 120], [older, 35], [recent, 12]]);
     seed(timedId, [['QQ_EXPIRE_WITHOUT_OPENING', 9], ['QQ_KEEP_ON_STARTUP', 2]]);
     seed(timelineOnlyId, [['QQ_LEGACY_TIMELINE_WITHOUT_SETTINGS', 35]]);
     seed('local-fixture-paged-messages', Array.from({ length: 105 }, (_, index) => ['QQ_PAGE_' + (index + 1), 1]));
     timeline.close();
-    historyFixture = { older, recent, pausedId, timelineOnlyId, storedMessages, timedId };
+    historyFixture = { expired, older, recent, pausedId, timelineOnlyId, storedMessages, timedId };
     if (process.platform === 'darwin') {
       openLog = join(dir, 'native-open.log');
       const bin = join(dir, 'bin');
@@ -405,7 +408,73 @@ try {
     assert.equal(pending.get('c2c').shift()?.name, 'file-prompt-missing');
     report.cases.livePromptFile = { modelSawLatest: true, sameSession: true, noConfigRewrite: true, missingFileStoppedTurn: true };
   }
-  if (expected === 'fixed') {
+  if (oldPackage) {
+    const list = async client => (await client.get(base + 'conversations?appId=' + DUMMY_APP_ID)).conversations;
+    const pick = (rows, openId) => rows.find(row => row.scope === 'c2c' && row.openId === openId);
+    const directId = peer('c2c');
+    for (const openId of [directId, historyFixture.timelineOnlyId]) {
+      const row = pick(await list(client), openId);
+      const { conversation: saved } = await client.post(base + 'conversations', {
+        appId: DUMMY_APP_ID, scope: 'c2c', openId, revision: row.revision,
+        defaultsRevision: row.defaultsRevision, retention: '90d', confirmRetention: true,
+      });
+      assert.equal(saved.retention, '90d');
+    }
+    const previous = await list(client);
+    const query = new URLSearchParams({ appId: DUMMY_APP_ID, scope: 'c2c', openId: historyFixture.timelineOnlyId });
+    const retained = await client.get(base + 'timeline?' + query);
+    assert(retained.entries.some(row => row.text === 'QQ_LEGACY_TIMELINE_WITHOUT_SETTINGS'));
+
+    await host.stop();
+    const settings = join(qqData, 'conversation-settings.json');
+    const backup = join(dir, 'settings-before-rollback.json');
+    const original = await readFile(settings);
+    const core = '@tencent-connect/dsh-qqbot';
+    const installedCore = join(profileDir, 'node_modules', core);
+    const prepareRollback = join(installedCore, 'scripts/prepare-retention-rollback.mjs');
+    await runLogged(process.execPath, [prepareRollback, settings, backup], { ...install, logPath: join(dir, 'retention-rollback.log') });
+    assert.deepEqual(await readFile(backup), original);
+    const expectedSettings = JSON.parse(original);
+    const custom = Object.values(expectedSettings.peers).filter(row => row.retention === '90d');
+    assert.equal(custom.length, 2);
+    for (const row of custom) row.retention = 'forever';
+    assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), expectedSettings);
+    await runLogged(process.execPath, [prepareRollback, settings, backup], { ...install, logPath: join(dir, 'retention-rollback-repeat.log') });
+    assert.deepEqual(await readFile(backup), original);
+
+    await runLogged(process.execPath, [...cli, 'plugin', ...select, 'add', 'file:' + oldPackage,
+      '--registry=' + registry.origin], install);
+    const port = await availablePort();
+    const oldHost = { hostOrigin: 'http://127.0.0.1:' + port, hostLog: join(dir, 'old-host.log') };
+    const readyCount = qq.state.readyCount;
+    host = await spawnLogged(process.execPath, [...cli, ...select, '--port', String(port), '--no-open'],
+      { cwd: source, env, logPath: oldHost.hostLog });
+    const oldClient = await until(async () => {
+      assert(!host.settled, 'old Host stopped before startup');
+      if (qq.state.readyCount <= readyCount) return undefined;
+      return hostClient(oldHost).catch(() => undefined);
+    }, 'old package Host ready');
+    const bundles = await oldClient.rpc('pluginManager/listBundles');
+    assert.equal(bundles.find(bundle => bundle.name === core)?.source, 'file:' + oldPackage);
+    const compatible = await readFile(settings);
+    try {
+      // Inject the pre-conversion bytes into the isolated Host as a negative control.
+      atomicWrite(settings, [original]);
+      await assert.rejects(() => list(oldClient), /HTTP 503/);
+    } finally {
+      atomicWrite(settings, [compatible]);
+    }
+    const after = await list(oldClient);
+    assert.equal(pick(after, directId).retention, 'forever');
+    assert.equal(pick(after, historyFixture.timelineOnlyId).retention, 'forever');
+    assert.equal(pick(after, historyFixture.pausedId).retention, 'paused');
+    assert.equal(after.find(row => row.scope === 'group' && row.openId === peer('group')).retention, '7d');
+    assert.deepEqual(pick(after, directId).sessions, pick(previous, directId).sessions);
+    assert.equal(pick(after, directId).currentSessionId, direct);
+    assert.deepEqual(await oldClient.get(base + 'timeline?' + query), retained);
+    report.cases.retentionRollback = { oldReaderRejectedRawCustom: true, exactBackup: true, repeatedConversion: true,
+      oldPackageLoaded: true, retainedMessages: true, unchangedSession: true, unchangedPresetAndPause: true };
+  } else if (expected === 'fixed') {
     const robots = async () => (await client.get(base + 'robots')).robots;
     const bot = (await robots()).find(row => row.appId === DUMMY_APP_ID);
     await client.post(base + 'robots/remove', {
