@@ -16,6 +16,7 @@ import {
   createTurnState,
   deliveryMode,
   noteTurnInput,
+  type MessageOrigin,
   type TurnDeliveryState,
   type TurnInputSource,
 } from './turn-origin.ts';
@@ -88,24 +89,31 @@ export class TurnTracker implements DeliveryTargetResolver {
     return true;
   }
 
-  /** user/message：按这一条消息归类，不发送 */
-  public note(sessionId: string, data: Record<string, unknown>): void {
+  /**
+   * user/message：按这一条消息归类，不发送。
+   *
+   * @returns 这一条消息的归属；没有回合状态（非 QQ 会话）时为 undefined。
+   *   调用方（Web 镜像）据此判断要不要补发一条到 QQ。
+   */
+  public note(sessionId: string, data: Record<string, unknown>): MessageOrigin | undefined {
     const tracked = this.turns.get(sessionId);
-    if (tracked === undefined) return;
+    if (tracked === undefined) return undefined;
     const { messageId, source } = readUserMessage(data);
     const qqOwned = this.inputs.has(messageId);
     if (qqOwned && messageId !== undefined) tracked.inputs.add(messageId);
 
+    const origin = classifyTurnInput(source, qqOwned);
     const before = deliveryMode(tracked.state);
-    noteTurnInput(tracked.state, classifyTurnInput(source, qqOwned));
-    if (before === 'proactive' || deliveryMode(tracked.state) !== 'proactive') return;
+    noteTurnInput(tracked.state, origin);
+    if (before === 'proactive' || deliveryMode(tracked.state) !== 'proactive') return origin;
 
     const plan = this.planFor(sessionId);
     if (plan === undefined) {
       this.logger.info(`im-qqbot: turn not delivered to QQ (externalTurns=${this.options.externalTurns}): sessionId=${sessionId}`);
-      return;
+      return origin;
     }
     this.logger.info(`im-qqbot: turn will be pushed proactively: sessionId=${sessionId} peer=${plan.target.targetId}`);
+    return origin;
   }
 
   /**

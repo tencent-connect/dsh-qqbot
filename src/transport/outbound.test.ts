@@ -568,3 +568,233 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     expect(tracker.activeTurns).toBe(0);
   });
 });
+
+describe('OutboundRouter: mirrorWeb（Web 提问镜像到 QQ）', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const sid = { header: { id: 'sess-qq' } };
+  const turnStart = { type: 'turn/start', data: { turn: 1 } };
+  const userMessage = (
+    source: Record<string, unknown>,
+    text: string,
+    id?: string,
+  ) => ({
+    type: 'user/message',
+    data: { id, source, content: [{ type: 'text', text }] },
+  });
+
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  }
+
+  function setupMirror(opts: {
+    config?: Partial<ImQQBotConfig>;
+    inputs?: QqInputRegistry;
+    target?: ReplyTarget;
+  } = {}) {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(opts.target ?? c2cTarget);
+    const manager = {
+      findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    } as unknown as SessionManager;
+    const config = createConfig(opts.config);
+    const inputs = opts.inputs ?? new QqInputRegistry();
+    const tracker = createTurnTracker(manager, config, createLogger(), inputs);
+    const outbound = createOutboundHandler(manager, bot, config, createLogger(), undefined, undefined, tracker);
+    return { outbound, bot };
+  }
+
+  it('默认关闭：网页输入一条消息也不发送', async () => {
+    const { outbound, bot } = setupMirror();
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, userMessage({ kind: 'user' }, '在网页里问的问题', 'web-1'));
+    await settle();
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('开启后 external 来源镜像成一条主动消息，正文逐字保留', async () => {
+    const { outbound, bot } = setupMirror({ config: { mirrorWeb: true } });
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, userMessage({ kind: 'user' }, '在网页里问的问题', 'web-1'));
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    const [target, text] = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls[0] as [ReplyTarget, string];
+    // external 回合已置 forceProactive：镜像不吃被动回复额度
+    expect(target).toEqual({ scope: 'c2c', targetId: 'user1', forceProactive: true });
+    expect(text).toBe('🌐 来自 Web：在网页里问的问题');
+    expect(text).toContain('在网页里问的问题');
+  });
+
+  it('qq 来源不镜像（QQ 端本来就有这条消息）', async () => {
+    const inputs = new QqInputRegistry();
+    inputs.register('msg-qq');
+    const { outbound, bot } = setupMirror({ config: { mirrorWeb: true }, inputs });
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, userMessage({ kind: 'user' }, '你好', 'msg-qq'));
+    await settle();
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['schedule 注入', { kind: 'schedule' }],
+    ['已回答的提问回显', { kind: 'user-question-reply' }],
+    ['notice 形态', { kind: 'user', form: 'notice' }],
+    ['每轮上下文（非 user kind）', { kind: 'time-context' }],
+  ])('internal 来源不镜像：%s', async (_name, source) => {
+    const { outbound, bot } = setupMirror({ config: { mirrorWeb: true } });
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, userMessage(source as Record<string, unknown>, '插件自己塞的字', 'plugin-1'));
+    await settle();
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('仅附件的消息不镜像（没有可镜像的正文）', async () => {
+    const { outbound, bot } = setupMirror({ config: { mirrorWeb: true } });
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, {
+      type: 'user/message',
+      data: { id: 'web-img', source: { kind: 'user' }, content: [{ type: 'image', url: 'https://example.com/a.png' }] },
+    });
+    await settle();
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('externalTurns=off 时不镜像（跟随主动推送策略）', async () => {
+    const { outbound, bot } = setupMirror({
+      config: { mirrorWeb: true, proactiveDelivery: { externalTurns: 'off' } },
+    });
+
+    outbound.routeSessionEvent(sid, turnStart);
+    outbound.routeSessionEvent(sid, userMessage({ kind: 'user' }, '桌面输入的提问', 'web-1'));
+    await settle();
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+});
+
+describe('OutboundRouter: wakeupFallback（文本三档兜底）', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const sid = { header: { id: 'sess-qq' } };
+  const replyEvent = {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: '回复正文' }] } },
+  };
+
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+  }
+
+  /** 按顺序决定 sendMarkdown 的结果；缺省一律失败（被动窗口已用尽） */
+  function makeBot(sequence: Array<'ok' | 'fail'>, wakeup: 'ok' | 'fail' | 'absent'): QQBotSender {
+    const sendMarkdown = vi.fn();
+    for (const outcome of sequence) {
+      if (outcome === 'ok') sendMarkdown.mockResolvedValueOnce(undefined);
+      else sendMarkdown.mockRejectedValueOnce(new Error('passive reply window expired'));
+    }
+    sendMarkdown.mockRejectedValue(new Error('passive reply window expired'));
+    const bot: QQBotSender = { sendMarkdown, openStream: vi.fn(() => createSession()) };
+    if (wakeup === 'ok') bot.sendWakeup = vi.fn().mockResolvedValue(undefined);
+    else if (wakeup === 'fail') bot.sendWakeup = vi.fn().mockRejectedValue(new Error('wakeup limited'));
+    return bot;
+  }
+
+  function setupFallback(bot: QQBotSender, opts: {
+    target?: ReplyTarget;
+    config?: Partial<ImQQBotConfig>;
+  } = {}) {
+    const record = createRecord(opts.target ?? c2cTarget);
+    const manager = {
+      findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    } as unknown as SessionManager;
+    const config = createConfig(opts.config);
+    return createOutboundHandler(manager, bot, config, createLogger());
+  }
+
+  it('默认关闭：被动发送失败只记错误，不重投也不唤醒', async () => {
+    const bot = makeBot([], 'ok');
+    const outbound = setupFallback(bot);
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '回复正文');
+    expect(bot.sendWakeup).not.toHaveBeenCalled();
+  });
+
+  it('开启后 c2c 两档都失败才用唤醒消息补一次', async () => {
+    const bot = makeBot([], 'ok');
+    const outbound = setupFallback(bot, { config: { wakeupFallback: true } });
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    const calls = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.calls as Array<[ReplyTarget, string]>;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0]).toEqual(c2cTarget); // 第一档：被动回复带 msgId
+    expect(calls[1]![0]).toEqual({ scope: 'c2c', targetId: 'user1', forceProactive: true }); // 第二档：去 msgId
+    expect(bot.sendWakeup).toHaveBeenCalledTimes(1);
+    expect(bot.sendWakeup).toHaveBeenCalledWith({ scope: 'c2c', targetId: 'user1' }, '回复正文');
+  });
+
+  it('第二档成功就不再唤醒', async () => {
+    const bot = makeBot(['fail', 'ok'], 'ok');
+    const outbound = setupFallback(bot, { config: { wakeupFallback: true } });
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(bot.sendWakeup).not.toHaveBeenCalled();
+  });
+
+  it('群聊不唤醒：两档都失败就放弃', async () => {
+    const bot = makeBot([], 'ok');
+    const outbound = setupFallback(bot, {
+      target: groupTarget,
+      config: { wakeupFallback: true },
+    });
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(bot.sendWakeup).not.toHaveBeenCalled();
+  });
+
+  it('适配器没有唤醒能力时降级为放弃（不抛错）', async () => {
+    const bot = makeBot([], 'absent');
+    const outbound = setupFallback(bot, { config: { wakeupFallback: true } });
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(bot.sendWakeup).toBeUndefined();
+  });
+
+  it('唤醒也失败时不重复补发（每档只一次）', async () => {
+    const bot = makeBot([], 'fail');
+    const outbound = setupFallback(bot, { config: { wakeupFallback: true } });
+
+    outbound.routeSessionEvent(sid, replyEvent);
+    await settle();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(2);
+    expect(bot.sendWakeup).toHaveBeenCalledTimes(1);
+  });
+});

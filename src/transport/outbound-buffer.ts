@@ -22,6 +22,11 @@ export interface StreamSessionLike {
 export interface QQBotSender {
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
   openStream(target: ReplyTarget): StreamSessionLike;
+  /**
+   * c2c 唤醒消息（不带 msgId 的 30 天窗口主动投递，平台限频）。可选能力：
+   * 仅在 wakeupFallback 开启、且被动与主动两档都失败时由出站路由使用。
+   */
+  sendWakeup?(target: ReplyTarget, content: string): Promise<unknown>;
 }
 
 export class OutboundBuffer {
