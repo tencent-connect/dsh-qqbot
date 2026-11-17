@@ -1,21 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Context } from '@deepseek-ai/cordis';
-import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { Context } from '@deepseek-ai/cordis';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigSchema } from '../config.ts';
 import { MemberStore } from './member-store.ts';
-import { PAIR_MANUAL_PATH, PAIR_RENAME_PATH } from '../shared/pairing-protocol.ts';
-import type { WebRoute } from '../setup/bind-routes.ts';
 import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
-import { registerAccountRoutes } from './account-routes.ts';
+import { createAccountRpcHandler } from './account-routes.ts';
+import { registerPluginRpc } from '../rpc-carrier.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 
 const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
 afterEach(() => { if (profile.dir) rmSync(profile.dir, { recursive: true, force: true }); profile.dir = undefined; });
+
 function service(): AccountAccessService {
   profile.dir ??= mkdtempSync(join(tmpdir(), 'qq-route-lifecycle-'));
   const config = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' });
@@ -26,51 +25,70 @@ function service(): AccountAccessService {
   });
 }
 
-describe('pairing routes during reload', () => {
-  it.each([PAIR_RENAME_PATH, PAIR_MANUAL_PATH])('rejects an already dispatched %s request after route disposal without restoring a revoked member', async path => {
-    const old = service(); old.addManualMember('owner', 'alice:Alice');
-    const routes = new Map<string, WebRoute>();
-    let dispose = (): void => {};
-    const scoped = {
-      get: () => ({ register: (route: WebRoute) => { routes.set(route.path, route); return () => { routes.delete(route.path); }; } }),
-      effect: (effect: () => () => void) => { dispose = effect(); },
-    };
-    const context = { inject: (_dependencies: string[], callback: (scope: typeof scoped) => void) => callback(scoped) };
-    registerAccountRoutes(context as unknown as Context, old, () => []);
-    let arrived = (): void => {};
-    const dispatched = new Promise<void>(resolve => { arrived = resolve; });
-    const requests = new Set<Promise<void>>();
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      const route = routes.get(req.url ?? '');
-      if (!route) { res.writeHead(404).end(); return; }
-      const pending = Promise.resolve(route.handler(req, res));
-      requests.add(pending); arrived();
+describe('account rpc handler', () => {
+  it('applies manual member additions and renames through the account methods', async () => {
+    const store = service();
+    store.addManualMember('owner', 'alice:Alice');
+    const handler = createAccountRpcHandler(store, () => []);
+
+    const manual = await handler(ACCOUNT_METHODS.pairManual, { purpose: 'owner', openid: 'bob:Bob' }, new AbortController().signal);
+    expect(manual).toMatchObject({ ok: true });
+
+    const rename = await handler(ACCOUNT_METHODS.pairRename, { openid: 'bob', nickname: 'Bobby' }, new AbortController().signal);
+    expect(rename).toMatchObject({ ok: true });
+    expect(store.isOwner('bob')).toBe(true);
+    const status = await handler(ACCOUNT_METHODS.pairStatus, {}, new AbortController().signal);
+    expect(status).toMatchObject({ ok: true, value: { owners: expect.arrayContaining([expect.objectContaining({ openid: 'bob', nickname: 'Bobby' })]) } });
+  });
+
+  it('rejects invalid pairing payloads without touching the store', async () => {
+    const store = service();
+    const handler = createAccountRpcHandler(store, () => []);
+    const result = await handler(ACCOUNT_METHODS.pairManual, { purpose: 'owner' }, new AbortController().signal);
+    expect(result).toMatchObject({ ok: false, error: { code: 'pair/invalid' } });
+    expect(store.isOwner('alice')).toBe(false);
+  });
+
+  it('answers plugin/reloading after disposal, so a late request cannot restore a revoked member', async () => {
+    const old = service();
+    old.addManualMember('owner', 'alice:Alice');
+
+    // 载体注册（可控 connection 注册表，捕获 effect 清理 = fiber 卸载语义）
+    const routes = new Map<string, { fetch: (request: Request) => Promise<Response> }>();
+    const ctx = new Context();
+    const disposeEffects: Array<() => void> = [];
+    ctx.provide('connection', {
+      fetch: {
+        register(route: { path: string; fetch: (request: Request) => Promise<Response> }) {
+          routes.set(route.path, route);
+          return async () => { routes.delete(route.path); };
+        },
+      },
     });
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    const address = server.address();
-    if (!address || typeof address === 'string') throw new Error('HTTP fixture did not bind TCP');
-    const body = JSON.stringify(path === PAIR_RENAME_PATH
-      ? { openid: 'bob', nickname: 'Bob' } : { purpose: 'owner', openid: 'alice:Alice' });
-    const req = request({ hostname: '127.0.0.1', port: address.port, method: 'POST', path,
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } });
-    const response = new Promise<number>((resolve, reject) => {
-      req.on('error', reject);
-      req.on('response', res => { res.resume(); res.on('end', () => resolve(res.statusCode ?? 0)); });
-    });
-    try {
-      req.write(body.slice(0, 1));
-      await dispatched;
-      dispose();
-      const current = service(); current.revokePair('alice', 'owner');
-      req.end(body.slice(1));
-      expect(await response).toBe(503);
-      expect(service().isOwner('alice')).toBe(false);
-    } finally {
-      req.destroy(); dispose();
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      await Promise.all(requests);
-    }
+    const originalEffect = ctx.effect.bind(ctx);
+    vi.spyOn(ctx, 'effect').mockImplementation(((fn: () => (() => void) | void, label?: string) => {
+      const cleanup = fn();
+      if (typeof cleanup === 'function' && String(label).includes('im-qqbot.rpc')) disposeEffects.push(cleanup);
+      return originalEffect(() => { void cleanup; }, label);
+    }) as typeof ctx.effect);
+
+    registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(old, () => []));
+    await new Promise(resolve => { setTimeout(resolve, 20); });
+    const route = routes.get(`/api/${ACCOUNT_RPC_ENDPOINT}`);
+    expect(route).toBeDefined();
+
+    // fiber 卸载 + 现实侧撤销 alice
+    for (const dispose of disposeEffects) dispose();
+    old.revokePair('alice', 'owner');
+
+    // 卸载后的迟到请求：plugin/reloading，不恢复已撤销成员
+    const late = await route!.fetch(new Request(`http://localhost/api/${ACCOUNT_RPC_ENDPOINT}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'late-1', method: ACCOUNT_RPC_ENDPOINT, payload: { method: ACCOUNT_METHODS.pairManual, payload: { purpose: 'owner', openid: 'alice:Alice' } } }),
+    }));
+    const reply = await late.json() as { result: { ok: boolean; error?: { code: string } } };
+    expect(reply.result).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.pluginReloading } });
+    expect(old.isOwner('alice')).toBe(false);
   });
 });

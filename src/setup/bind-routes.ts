@@ -1,17 +1,17 @@
 /**
- * 端内绑定页路由 — /qqbot/im-qqbot/bind
+ * 端内绑定 RPC 处理器 — /api/dsh-qqbot/bind
  *
- * 注册在 dsh-host-webserver（ctx.webServer）的具名路由：
- * - Web 模式：页面同源直接访问
- * - Desktop：渲染进程的 fetch 经 IPC 桥自动附加 Host 认证转发
+ * 经宿主 Connection 共享通道调用（rpc-carrier.ts 注册）：来源围栏与浏览器
+ * 认证由宿主在 handler 之前施加；本模块只做授权后的业务校验。
  *
- * 响应只含 task 级短时效数据（二维码 URL/SVG）与脱敏的 appId；
- * appSecret 绝不出现在任何响应中。manual 提交走与扫码一致的
- * persist 路径（写入 profile patch → HMR 重载生效）。
+ * - bind.state / bind.refresh：扫码状态机相位
+ * - bind.manual / bind.unbind：凭据提交与移除（persist → HMR 重载生效）
+ * - config.get / config.set：配置回显（appSecret 剔除）与白名单写入
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Logger } from '../types.ts';
 import type { BindingService } from './binding-service.ts';
+import type { RpcMethodHandler, RpcResult } from '../rpc-carrier.ts';
+import { rpcFailure, rpcOk } from '../rpc-carrier.ts';
 import {
   persistCredentialsToProfile,
   removeCredentialsFromProfile,
@@ -22,30 +22,8 @@ import {
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
-import {
-  BIND_CONFIG_PATH,
-  BIND_MANUAL_PATH,
-  BIND_REFRESH_PATH,
-  BIND_STATE_PATH,
-  BIND_UNBIND_PATH,
-  type BindStateWire,
-} from '../shared/bind-protocol.ts';
-
-// 协议单一来源：shared/bind-protocol.ts（类型 + 路径常量，客户端共用）
-export { BIND_CONFIG_PATH, BIND_MANUAL_PATH, BIND_REFRESH_PATH, BIND_STATE_PATH, BIND_UNBIND_PATH };
-export type { BindStateWire };
-
-/** dsh-host-webserver 的具名路由注册形状（局部投影，避免硬依赖） */
-export interface WebRoute {
-  kind: 'exact' | 'prefix';
-  path: string;
-  handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
-}
-
-/** ctx.webServer 的局部投影（服务可用性由调用方探测） */
-export interface WebServerLike {
-  register(route: WebRoute): () => void;
-}
+import { BIND_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import type { BindStateWire } from '../shared/bind-protocol.ts';
 
 /** 手动凭据提交的处理结果 */
 export interface ManualSubmitResult {
@@ -61,11 +39,11 @@ export interface UnbindResult {
   error?: string;
 }
 
-/** 路由行为注入 */
-export interface BindRoutesOptions {
+/** 处理器行为注入 */
+export interface BindRpcOptions {
   /**
    * 已绑定态：返回脱敏的 appId（可回显，非机密），null 表示未绑定。
-   * 已绑定 fiber 注册路由时提供；待绑定流程不提供。
+   * 已绑定 fiber 注册处理器时提供；待绑定流程不提供。
    */
   boundAppId?: () => string | null;
   /**
@@ -75,12 +53,12 @@ export interface BindRoutesOptions {
   onManualCredentials?: (credentials: SetupCredentials) => ManualSubmitResult;
   /**
    * 解绑处理（默认：移除 profile patch 中的凭据字段）。
-   * 未绑定态调用返回 409，不触达本回调。
+   * 未绑定态调用返回 not-bound 错误，不触达本回调。
    */
   onUnbind?: () => UnbindResult;
   /**
    * 当前生效配置（apply 时 loader 合并后的值，含默认值填充），
-   * 用于 GET 回显（appSecret 剔除后返回）。
+   * 用于 config.get 回显（appSecret 剔除后返回）。
    */
   currentConfig?: () => Record<string, unknown>;
   /**
@@ -97,7 +75,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'access',
 ]);
 
-/** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
+/** 白名单键的子 Schema（服务端校验：客户端校验仅为体验） */
 const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   requireMention: (v) => booleanSchema(v, 'requireMention'),
   streaming: (v) => booleanSchema(v, 'streaming'),
@@ -124,216 +102,81 @@ function stringSchema(name: string): (value: unknown) => unknown {
   };
 }
 
-/** manual 请求体大小上限（appId + appSecret 远小于此值） */
-const MAX_MANUAL_BODY_BYTES = 4096;
-
 /**
- * config 请求体大小上限：对齐 Schema 的业务边界——白名单字符串字段单个
- * 允许 20000 字符（全中文 UTF-8 约 60KB），allowlist 不设条目上限（openid
- * 短标识，512KB 约容纳 1.4 万条）。上限只是反滥用闸门，语义校验在 Schema。
- */
-const MAX_CONFIG_BODY_BYTES = 512 * 1024;
-
-/**
- * 注册绑定路由（状态查询 / 刷新二维码 / 手动凭据）。
+ * 创建绑定端点的方法处理器（setup/index.ts 经 registerPluginRpc 注册）。
  *
- * @param webServer - ctx.webServer
  * @param service - 绑定状态机；已绑定 fiber 传 null（无扫码流程）
  * @param logger - 日志
  * @param options - 行为注入（bound 态回显、manual 处理）
- * @returns 注销函数（与插件 fiber 生命周期绑定）
  */
-export function registerBindRoutes(
-  webServer: WebServerLike,
+export function createBindRpcHandler(
   service: BindingService | null,
   logger: Logger,
-  options: BindRoutesOptions = {},
-): () => void {
+  options: BindRpcOptions = {},
+): RpcMethodHandler {
   const defaultManual = (credentials: SetupCredentials): ManualSubmitResult => {
     const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
     return persisted ? { persisted: true } : { persisted: false, error: '无法定位 profile 目录或写入失败，请改用环境变量配置' };
   };
   const handleManualSubmit = options.onManualCredentials ?? defaultManual;
-  let active = true;
-  const isActive = () => active;
 
-  const disposers = [
-    webServer.register({
-      kind: 'exact',
-      path: BIND_STATE_PATH,
-      handler: (req, res) => { handleState(req, res, service, options); },
-    }),
-    webServer.register({
-      kind: 'exact',
-      path: BIND_REFRESH_PATH,
-      handler: (req, res) => { handleRefresh(req, res, service); },
-    }),
-    webServer.register({
-      kind: 'exact',
-      path: BIND_MANUAL_PATH,
-      handler: (req, res) => handleManual(req, res, handleManualSubmit, isActive),
-    }),
-    webServer.register({
-      kind: 'exact',
-      path: BIND_UNBIND_PATH,
-      handler: (req, res) => handleUnbind(req, res, options),
-    }),
-    webServer.register({
-      kind: 'exact',
-      path: BIND_CONFIG_PATH,
-      handler: (req, res) => handleConfig(req, res, options, isActive),
-    }),
-  ];
-  logger.info(`im-qqbot: 端内绑定页已就绪: ${BIND_STATE_PATH}`);
-  return () => {
-    active = false;
-    for (const dispose of disposers) dispose();
+  return async (method, payload): Promise<RpcResult> => {
+    switch (method) {
+      case BIND_METHODS.state:
+        return rpcOk(handleState(service, options));
+      case BIND_METHODS.refresh:
+        service?.refresh();
+        return rpcOk({ phase: 'starting' });
+      case BIND_METHODS.manual:
+        return handleManual(payload, handleManualSubmit);
+      case BIND_METHODS.unbind:
+        return handleUnbind(options);
+      case BIND_METHODS.configGet:
+        return handleConfigGet(options);
+      case BIND_METHODS.configSet:
+        return handleConfigSet(payload, options);
+      default:
+        return rpcFailure(RPC_ERROR_CODES.unknownMethod, `未知方法: ${method}`);
+    }
   };
 }
 
-/**
- * 请求来源校验（最小 CSRF 防护）。
- *
- * 带 Origin 的请求必须与 Host 同源；同源 fetch 与 Desktop IPC 桥
- * （后者会删除 origin 头）均放行。本路由数据不敏感且动作无害，
- * 该级别的防护足够。
- */
-function trusted(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  if (origin === undefined) return true;
-  try {
-    return new URL(origin).host === req.headers.host;
-  } catch {
-    return false;
-  }
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-  });
-  res.end(payload);
-}
-
-function handleState(
-  req: IncomingMessage,
-  res: ServerResponse,
-  service: BindingService | null,
-  options: BindRoutesOptions,
-): void {
-  if (!trusted(req)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return;
-  }
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-  // 已绑定优先（appSecret 不回传，appId 非机密可回显）
+/** 状态查询：已绑定优先（appSecret 不回传，appId 非机密可回显） */
+function handleState(service: BindingService | null, options: BindRpcOptions): BindStateWire {
   const boundAppId = options.boundAppId?.() ?? null;
-  if (boundAppId !== null) {
-    sendJson(res, 200, { phase: 'bound', appId: boundAppId });
-    return;
-  }
-  sendJson(res, 200, service === null ? { phase: 'starting' } : service.wireState());
-}
-
-function handleRefresh(req: IncomingMessage, res: ServerResponse, service: BindingService | null): void {
-  if (!trusted(req)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return;
-  }
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-  // 丢弃可能的请求体（refresh 无参数）
-  req.resume();
-  service?.refresh();
-  // 新二维码异步生成，统一由状态轮询收敛
-  sendJson(res, 200, { phase: 'starting' });
-}
-
-/** 读取并解析 JSON 请求体（带大小上限） */
-async function readJsonBody(req: IncomingMessage, maxBytes: number = MAX_MANUAL_BODY_BYTES): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buffer = chunk as Buffer;
-    size += buffer.length;
-    if (size > maxBytes) throw new Error('request body too large');
-    chunks.push(buffer);
-  }
-  if (size === 0) throw new Error('empty request body');
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (boundAppId !== null) return { phase: 'bound', appId: boundAppId };
+  return service === null ? { phase: 'starting' } : service.wireState();
 }
 
 /** 校验手动提交的凭据形态（不打印内容） */
-function parseCredentials(body: unknown): SetupCredentials | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const record = body as Record<string, unknown>;
-  const appId = typeof record.appId === 'string' ? record.appId.trim() : '';
-  const appSecret = typeof record.appSecret === 'string' ? record.appSecret.trim() : '';
+function parseCredentials(body: Record<string, unknown>): SetupCredentials | null {
+  const appId = typeof body.appId === 'string' ? body.appId.trim() : '';
+  const appSecret = typeof body.appSecret === 'string' ? body.appSecret.trim() : '';
   if (appId.length === 0 || appSecret.length === 0) return null;
   if (appId.length > 128 || appSecret.length > 256) return null;
   return { appId, appSecret };
 }
 
-async function handleManual(
-  req: IncomingMessage,
-  res: ServerResponse,
+function handleManual(
+  payload: Record<string, unknown>,
   submit: (credentials: SetupCredentials) => ManualSubmitResult,
-  isActive: () => boolean,
-): Promise<void> {
-  if (!trusted(req)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return;
-  }
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-  let body: unknown;
-  try {
-    body = await readJsonBody(req);
-  } catch (err) {
-    sendJson(res, 400, { ok: false, error: `invalid request body: ${err instanceof Error ? err.message : String(err)}` });
-    return;
-  }
-  if (!isActive()) {
-    sendJson(res, 503, { ok: false, error: 'QQ 插件已重载，请刷新后重试。' });
-    return;
-  }
-  const credentials = parseCredentials(body);
+): RpcResult {
+  const credentials = parseCredentials(payload);
   if (credentials === null) {
-    sendJson(res, 400, { ok: false, error: 'appId 与 appSecret 不能为空' });
-    return;
+    return rpcFailure('bind/invalid-credentials', 'appId 与 appSecret 不能为空');
   }
   const result = submit(credentials);
   if (!result.persisted) {
-    sendJson(res, 500, { ok: false, error: result.error ?? '保存失败' });
-    return;
+    return rpcFailure('bind/persist-failed', result.error ?? '保存失败');
   }
   // 写入 profile patch 触发 HMR 重载，新 fiber 以新凭据启动网关
-  sendJson(res, 200, { ok: true, message: '凭据已保存，插件将自动重载' });
+  return rpcOk({ ok: true, message: '凭据已保存，插件将自动重载' });
 }
 
 /** 解绑：仅已绑定态可执行；移除 profile patch 中的凭据并触发 HMR 重载 */
-function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRoutesOptions): void {
-  if (!trusted(req)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return;
-  }
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-  req.resume();
+function handleUnbind(options: BindRpcOptions): RpcResult {
   if ((options.boundAppId?.() ?? null) === null) {
-    sendJson(res, 409, { ok: false, error: '当前未绑定' });
-    return;
+    return rpcFailure('bind/not-bound', '当前未绑定');
   }
   const result: UnbindResult = options.onUnbind === undefined
     ? (() => {
@@ -351,88 +194,61 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
       })()
     : options.onUnbind();
   if (!result.persisted) {
-    sendJson(res, 500, { ok: false, error: result.error ?? '解绑失败' });
-    return;
+    return rpcFailure('bind/persist-failed', result.error ?? '解绑失败');
   }
   // 移除后写入触发 HMR 重载，插件回到未绑定态（绑定流程重新可用）
-  sendJson(res, 200, { ok: true, message: '已解绑，插件将重载并重新进入绑定流程' });
+  return rpcOk({ ok: true, message: '已解绑，插件将重载并重新进入绑定流程' });
 }
 
 /**
- * 配置读写：
- * - GET：回显当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）
- * - POST：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载
+ * 配置回显：当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）。
  */
-async function handleConfig(
-  req: IncomingMessage,
-  res: ServerResponse,
-  options: BindRoutesOptions,
-  isActive: () => boolean,
-): Promise<void> {
-  if (!trusted(req)) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return;
-  }
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method not allowed' });
-    return;
-  }
-
-  if (req.method === 'GET') {
-    const current = options.currentConfig?.() ?? {};
-    // Never return secrets or configuration belonging to the retired memory backend.
-    const { appSecret: _s, memory: _retired, ...safe } = current;
-    try {
-      const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-      const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
-      sendJson(res, 200, { config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
-    } catch (error) {
-      sendJson(res, 503, { error: error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。' });
-    }
-    return;
-  }
-
-  let body: unknown;
+function handleConfigGet(options: BindRpcOptions): RpcResult {
+  const current = options.currentConfig?.() ?? {};
+  // Never return secrets or configuration belonging to the retired memory backend.
+  const { appSecret: _s, memory: _retired, ...safe } = current;
   try {
-    body = await readJsonBody(req, MAX_CONFIG_BODY_BYTES);
-  } catch (err) {
-    sendJson(res, 400, { ok: false, error: `invalid request body: ${err instanceof Error ? err.message : String(err)}` });
-    return;
+    const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
+    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
+    return rpcOk({ config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
+  } catch (error) {
+    return rpcFailure('config/unreadable', error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。');
   }
-  if (!isActive()) {
-    sendJson(res, 503, { ok: false, error: 'QQ 插件已重载，请刷新后重试。' });
-    return;
-  }
-  if (typeof body !== 'object' || body === null) {
-    sendJson(res, 400, { ok: false, error: '请求体必须是 JSON 对象' });
-    return;
-  }
-  const submitted = body as Record<string, unknown>;
+}
 
+/**
+ * 配置写入：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载。
+ */
+function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptions): RpcResult {
+  if (payload.expectedAppId !== null && (
+    typeof payload.expectedAppId !== 'string'
+    || payload.expectedAppId.length === 0
+    || payload.expectedAppId.length > 128
+  )) {
+    return rpcFailure('config/invalid', '配置保存必须携带预期账号，请刷新配置后重试。');
+  }
   // 白名单与凭据/只读字段拦截
-  for (const key of Object.keys(submitted)) {
-    if (key !== 'accessRevision' && !EDITABLE_CONFIG_KEYS.has(key)) {
+  for (const key of Object.keys(payload)) {
+    if (key !== 'accessRevision' && key !== 'expectedAppId' && !EDITABLE_CONFIG_KEYS.has(key)) {
       const reason = key === 'appId' || key === 'appSecret'
         ? '凭据请使用绑定/更换/解绑功能'
         : key === 'cwd'
           ? 'cwd 为只读字段'
           : '不支持的字段';
-      sendJson(res, 400, { ok: false, error: `${reason}: ${key}` });
-      return;
+      return rpcFailure('config/invalid', `${reason}: ${key}`);
     }
   }
 
   // 逐键 Schema 校验（非法值拒绝，返回首个错误）
-  let validated: Record<string, unknown> = {};
+  let validated: Record<string, unknown>;
   try {
-    validated = Object.fromEntries(Object.entries(submitted).filter(([key]) => key !== 'accessRevision').map(([key, value]) => {
+    validated = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'accessRevision' && key !== 'expectedAppId').map(([key, value]) => {
       const check = EDITABLE_CONFIG_SCHEMAS[key];
       if (check === undefined) throw new TypeError(`不支持的字段: ${key}`);
       return [key, check(value)];
     }));
   } catch (err) {
-    sendJson(res, 400, { ok: false, error: err instanceof TypeError ? err.message : String(err) });
-    return;
+    return rpcFailure('config/invalid', err instanceof TypeError ? err.message : String(err));
   }
 
   let persisted: boolean;
@@ -440,23 +256,25 @@ async function handleConfig(
     const profileDir = getProfileDir() ?? undefined;
     const current = options.currentConfig?.() ?? {};
     const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { revision } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
-    if (validated.access !== undefined && submitted.accessRevision !== revision) {
-      sendJson(res, 409, { ok: false, error: new AccessConfigConflict().message });
-      return;
+    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
+    if (payload.expectedAppId !== (appId.length === 0 ? null : appId)) {
+      return rpcFailure(RPC_ERROR_CODES.accountChanged, 'QQ 账号已变化，请刷新配置后重试。');
+    }
+    if (validated.access !== undefined && payload.accessRevision !== revision) {
+      return rpcFailure(RPC_ERROR_CODES.configConflict, new AccessConfigConflict().message);
     }
     persisted = options.onUpdateConfig === undefined
       ? updateProfileConfig(validated, profileDir, undefined,
         validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId })
       : options.onUpdateConfig(validated);
   } catch (error) {
-    sendJson(res, error instanceof AccessConfigConflict ? 409 : 500,
-      { ok: false, error: error instanceof AccessConfigConflict ? error.message : '无法读取或保存配置，请检查 profile 配置文件。' });
-    return;
+    if (error instanceof AccessConfigConflict) {
+      return rpcFailure(RPC_ERROR_CODES.configConflict, error.message);
+    }
+    return rpcFailure('config/persist-failed', '无法读取或保存配置，请检查 profile 配置文件。');
   }
   if (!persisted) {
-    sendJson(res, 500, { ok: false, error: '无法定位 profile 目录或写入失败' });
-    return;
+    return rpcFailure('config/persist-failed', '无法定位 profile 目录或写入失败');
   }
-  sendJson(res, 200, { ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
+  return rpcOk({ ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
 }

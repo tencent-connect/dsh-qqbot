@@ -1,10 +1,13 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
-import { PAIR_ISSUE_PATH, PAIR_STATUS_PATH, type PairChallenge } from '../shared/pairing-protocol.ts';
+import { ACCOUNT_METHODS, BIND_METHODS, ACCOUNT_RPC_ENDPOINT, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import type { PairChallenge } from '../shared/pairing-protocol.ts';
 import type { ConfigWire } from './config-form-state.ts';
 import { ConfigPanel } from './config-panel.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
+import { RpcError } from './rpc.ts';
+import { QQBotView } from './views.ts';
+import type { BindSnapshot } from './store.ts';
 
 type Dependencies = readonly unknown[];
 type Effect = () => void | (() => void);
@@ -16,17 +19,41 @@ interface Hooks {
   useEffect(effect: Effect, deps: Dependencies): void;
 }
 
-const active = vi.hoisted(() => ({ hooks: undefined as Hooks | undefined }));
+const active = vi.hoisted(() => ({
+  hooks: undefined as Hooks | undefined,
+  bind: { state: null, gone: false, error: null } as BindSnapshot,
+}));
 vi.mock('react', async (importOriginal) => ({
   ...await importOriginal<typeof import('react')>(),
   useState: (initial: unknown) => active.hooks!.useState(initial),
   useRef: (initial: unknown) => active.hooks!.useRef(initial),
   useCallback: (callback: unknown, deps: Dependencies) => active.hooks!.useCallback(callback, deps),
   useEffect: (effect: Effect, deps: Dependencies) => active.hooks!.useEffect(effect, deps),
+  useSyncExternalStore: () => active.bind,
 }));
-vi.mock('./qq-pairing-styles.ts', () => ({ usePairingStyles() {} }));
+vi.mock('./styles.ts', () => ({
+  usePairingStyles() {},
+  useConfigPanelStyles() {},
+  useBindPanelStyles() {},
+  installBindPanelStyles: () => () => {},
+}));
 
-// Exercise the real component handlers and effects with mocked HTTP in the Node test suite.
+// RPC 替身：按 (endpoint, method) 分发，取代旧的 global fetch 桩
+const rpcBus = vi.hoisted(() => ({
+  dispatch: null as null | ((endpoint: string, method: string, payload: Record<string, unknown>) => Promise<unknown>),
+}));
+vi.mock('./rpc.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./rpc.ts')>();
+  return {
+    ...actual,
+    rpcCall: vi.fn(async (endpoint: string, method: string, payload: Record<string, unknown>) => {
+      if (rpcBus.dispatch === null) throw new RpcError('transport/network', 'network');
+      return rpcBus.dispatch(endpoint, method, payload);
+    }),
+  };
+});
+
+// Exercise the real component handlers and effects with a mocked RPC channel in the Node test suite.
 function mount(component: () => ReactNode) {
   const state = new Map<number, unknown>();
   const refs = new Map<number, { current: unknown }>();
@@ -108,10 +135,56 @@ function find(tree: ReactNode, predicate: (props: TestProps) => boolean): ReactE
 afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
-  vi.unstubAllGlobals();
+  rpcBus.dispatch = null;
 });
 
 describe('QQ settings recovery', () => {
+  it('gives configuration and its nested lists a new identity on bound account changes', () => {
+    const panel = (appId: string) => {
+      active.bind = { state: { phase: 'bound', appId }, gone: false, error: null };
+      const view = QQBotView() as ReactElement<{ children: ReactElement[] }>;
+      return view.props.children[1]!;
+    };
+    const first = panel('account-a');
+    const second = panel('account-b');
+    expect(first.key).not.toBeNull();
+    expect(second.key).not.toBe(first.key);
+    expect(first.props).toMatchObject({ appId: 'account-a', bindPhase: 'bound' });
+    expect(second.props).toMatchObject({ appId: 'account-b', bindPhase: 'bound' });
+    expect(panel('account-b').key).toBe(second.key);
+  });
+
+  it.each(['starting', 'waiting', 'saving'])('waits silently when config binds before the %s snapshot converges', async bindPhase => {
+    vi.useFakeTimers();
+    let account: string | null = null;
+    rpcBus.dispatch = async (_endpoint, method) => method === ACCOUNT_METHODS.commands
+      ? { commands: [] }
+      : { config: { appId: 'account-a', model: 'model-a' } };
+    const render = mount(() => ConfigPanel({ bindPhase: account === null ? bindPhase : 'bound', appId: account }));
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+    const pending = render();
+    expect(find(pending, props => !!props.onSubmit)).toBeUndefined();
+    expect(find(pending, props => typeof props.children === 'string' && props.children.includes('配置加载失败'))).toBeUndefined();
+    expect(find(pending, props => props.children === '正在加载配置…')).toBeDefined();
+    account = 'account-a';
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(find(render(), props => !!props.onSubmit)).toBeDefined();
+  });
+
+  it('refuses to display configuration read from a different bound account', async () => {
+    vi.useFakeTimers();
+    rpcBus.dispatch = async (_endpoint, method) => method === ACCOUNT_METHODS.commands
+      ? { commands: [] }
+      : { config: { appId: 'account-b', model: 'private-model-b' } };
+    const render = mount(() => ConfigPanel({ bindPhase: 'bound', appId: 'account-a' }));
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(find(render(), props => !!props.onSubmit)).toBeUndefined();
+    expect(find(render(), props => typeof props.children === 'string' && props.children.includes('账号已变化'))).toBeDefined();
+  });
+
   it('saves with the refreshed access revision while keeping an unsaved mode edit', async () => {
     vi.useFakeTimers();
     const writes: ConfigWire[] = [];
@@ -119,19 +192,22 @@ describe('QQ settings recovery', () => {
       appId: 'bot', accessRevision: 'initial',
       access: { c2cMode: 'allowlist', c2cAllow: ['kept', 'revoked'], groupMode: 'open', groupAllow: [], commandMode: 'open' },
     };
-    vi.stubGlobal('fetch', vi.fn(async (path: string, init: RequestInit) => {
-      expect(path).toBe(BIND_CONFIG_PATH);
-      if (init.method !== 'POST') return Response.json({ config });
-      const patch = JSON.parse(String(init.body)) as ConfigWire;
+    rpcBus.dispatch = async (endpoint, method, payload) => {
+      expect(endpoint).toBe(BIND_RPC_ENDPOINT);
+      if (method === BIND_METHODS.configGet) return { config };
+      expect(method).toBe(BIND_METHODS.configSet);
+      const patch = payload as unknown as ConfigWire;
       writes.push(patch);
-      if (patch.accessRevision !== config.accessRevision) return Response.json({ error: 'conflict' }, { status: 409 });
+      if (patch.accessRevision !== config.accessRevision) {
+        throw new RpcError(RPC_ERROR_CODES.configConflict, 'conflict');
+      }
       config = { ...config, ...patch, accessRevision: `revision-${writes.length}` };
       if (writes.length === 1 && config.access) {
         // Another tab removes a member after the save and before the first readback.
         config = { ...config, accessRevision: 'after-revoke', access: { ...config.access, c2cAllow: ['kept'] } };
       }
-      return Response.json({ ok: true });
-    }));
+      return { ok: true };
+    };
 
     const render = mount(() => ConfigPanel({ bindPhase: 'starting' }));
     const mode = (label: string) => find(render(), props => props.label === label && !!props.onChange)!.props;
@@ -152,27 +228,29 @@ describe('QQ settings recovery', () => {
     save();
     await vi.advanceTimersByTimeAsync(0);
     expect(writes[1]).toMatchObject({
+      expectedAppId: 'bot',
       accessRevision: 'after-revoke',
       access: { c2cAllow: ['kept'], groupMode: 'disabled', commandMode: 'disabled' },
     });
   });
 
-  it('keeps a valid code usable through a missing route and stops on a confirmed end', async () => {
+  it('keeps a valid code usable through a missing endpoint and stops on a confirmed end', async () => {
     vi.useFakeTimers();
     let unavailable = false;
     const challenges: PairChallenge[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
-      if (path === PAIR_ISSUE_PATH) {
+    rpcBus.dispatch = async (endpoint, method) => {
+      expect(endpoint).toBe(ACCOUNT_RPC_ENDPOINT);
+      if (method === ACCOUNT_METHODS.pairIssue) {
         const challenge: PairChallenge = {
           code: 'ABCDEF', purpose: 'allow-c2c', createdAt: Date.now(), expiresAt: Date.now() + 600_000, claims: [],
         };
         challenges.push(challenge);
-        return Response.json({ ...challenge, previousClaims: [] });
+        return { ...challenge, previousClaims: [] };
       }
-      expect(path).toBe(PAIR_STATUS_PATH);
-      if (unavailable) return Response.json({ error: 'not found' }, { status: 404 });
-      return Response.json({ challenges, owners: [], allowC2c: [], allowGroup: [] });
-    }));
+      expect(method).toBe(ACCOUNT_METHODS.pairStatus);
+      if (unavailable) throw new RpcError(RPC_ERROR_CODES.routeMissing, '插件重载中', true);
+      return { challenges, owners: [], allowC2c: [], allowGroup: [] };
+    };
 
     const render = mount(() => PairClaimPanel({ purpose: 'allow-c2c', title: '私聊白名单' }));
     const button = (text: string) => find(render(), props => props.children === text && !!props.onClick)!.props;

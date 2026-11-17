@@ -1,21 +1,20 @@
 /**
  * 绑定全链路集成测试 — 真实 persist 落盘
  *
- * 区别于 bind-routes.test.ts（mock 提交处理）与 persist.test.ts（直调
- * persist）：本文件把路由默认处理器与扫码状态机接到真实的 profile 写盘，
- * 验证「扫码绑定 / 手动绑定 / 配置保存 / 解绑」四条链路在多插件共享的
- * cordis.patch.yml 上不破坏其他插件配置（#53 回归）。
+ * 区别于 bind-routes.test.ts（方法处理器单元）：本文件把 RPC 处理器接到
+ * 真实的 profile 写盘，验证「手动绑定 / 配置保存 / 解绑」等链路在多插件
+ * 共享的 cordis.patch.yml 上不破坏其他插件配置（#53 回归）。
  */
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { QrConnectCallbacks, QrConnectOptions } from '@tencent-connect/qqbot-connector';
-import { registerBindRoutes, type WebRoute } from './bind-routes.ts';
+import { createBindRpcHandler } from './bind-routes.ts';
 import { BindingService } from './binding-service.ts';
 import { persistCredentialsToProfile, accessRevision, readProfileAccess } from './persist.ts';
-import { BIND_CONFIG_PATH, BIND_MANUAL_PATH, BIND_STATE_PATH, BIND_UNBIND_PATH } from '../shared/bind-protocol.ts';
+import { BIND_METHODS } from '../shared/rpc-protocol.ts';
+import type { RpcResult } from '../rpc-carrier.ts';
 
 /** 默认 persist 依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
 const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
@@ -41,55 +40,17 @@ const SHARED_PATCH = [
   '    baseURL: https://example.com/v1',
 ].join('\n');
 
-function fakeReq(method: string, body?: string): IncomingMessage {
-  const req = {
-    method,
-    headers: { host: '127.0.0.1:3080' },
-    resume: vi.fn(),
-    [Symbol.asyncIterator]() {
-      const chunks = body === undefined ? [] : [Buffer.from(body, 'utf8')];
-      let index = 0;
-      return {
-        next: () => Promise.resolve(index < chunks.length
-          ? { done: false, value: chunks[index++] as Buffer }
-          : { done: true as const, value: undefined }),
-      };
-    },
-  };
-  return req as unknown as IncomingMessage;
-}
-
-function fakeRes(): ServerResponse & { statusCode: number; body: string } {
-  const res = {
-    statusCode: 0,
-    body: '',
-    writeHead(status: number) { res.statusCode = status; },
-    end(payload?: string) { if (payload !== undefined) res.body += payload; },
-  };
-  return res as unknown as ServerResponse & { statusCode: number; body: string };
-}
-
-/** 直接注册路由（不走 createHarness 的 manual 包装，让默认 persist 处理器生效） */
-function registerRealRoutes(boundAppId: () => string | null): Map<string, WebRoute> {
-  const routes = new Map<string, WebRoute>();
+/** 直接构造处理器（默认 persist 处理器生效，真实落盘） */
+function createRealHandler(boundAppId: () => string | null): (method: string, payload: Record<string, unknown>) => Promise<RpcResult> {
   const service = { wireState: () => ({ phase: 'starting' }), refresh: vi.fn() };
-  registerBindRoutes(
-    {
-      register(route: WebRoute): () => void {
-        routes.set(route.path, route);
-        return () => { routes.delete(route.path); };
-      },
-    },
+  const handler = createBindRpcHandler(
     service as never,
     { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
     { boundAppId },
   );
-  return routes;
-}
-
-async function invoke(route: WebRoute | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (route === undefined) throw new Error('route not registered');
-  await route.handler(req, res);
+  return (method, payload = {}) => Promise.resolve(handler(method, method === BIND_METHODS.configSet
+    ? { expectedAppId: boundAppId(), ...payload }
+    : payload, new AbortController().signal));
 }
 
 /** 共享断言：其他插件的内容完整保留（im-qqbot 自身字段会被各链路合法修改，不在此断言） */
@@ -121,27 +82,24 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     process.env.QQBOT_APPID = 'test-app';
 
     try {
-      const routes = registerRealRoutes(() => (readFileSync(patchPath, 'utf8').includes('appId:') ? 'test-app' : null));
+      const call = createRealHandler(() => (readFileSync(patchPath, 'utf8').includes('appId:') ? 'test-app' : null));
 
       // 1. 手动绑定（默认处理器 → persistCredentialsToProfile 真写盘）
-      const manualRes = fakeRes();
-      await invoke(routes.get(BIND_MANUAL_PATH), fakeReq('POST', '{"appId":"test-app","appSecret":"test-secret"}'), manualRes);
-      expect(manualRes.statusCode).toBe(200);
+      const manual = await call(BIND_METHODS.manual, { appId: 'test-app', appSecret: 'test-secret' });
+      expect(manual.ok).toBe(true);
       expect(readFileSync(patchPath, 'utf8')).toContain('appId: test-app');
       expectSharedPreserved(patchPath);
 
       // 2. 配置保存（默认处理器 → updateProfileConfig 真写盘）
-      const configRes = fakeRes();
-      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', '{"requireMention":false}'), configRes);
-      expect(configRes.statusCode).toBe(200);
+      const config = await call(BIND_METHODS.configSet, { requireMention: false });
+      expect(config.ok).toBe(true);
       expect(readFileSync(patchPath, 'utf8')).toContain('requireMention: false');
       expect(readFileSync(patchPath, 'utf8')).toContain('appId: test-app');
       expectSharedPreserved(patchPath);
 
       // 3. 解绑（默认处理器 → removeCredentialsFromProfile 真写盘 + 清 env）
-      const unbindRes = fakeRes();
-      await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST'), unbindRes);
-      expect(unbindRes.statusCode).toBe(200);
+      const unbind = await call(BIND_METHODS.unbind);
+      expect(unbind.ok).toBe(true);
       expect(process.env.QQBOT_APPID).toBeUndefined();
       const after = readFileSync(patchPath, 'utf8');
       expect(after).not.toContain('appId: test-app');
@@ -155,17 +113,16 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     }
   });
 
-  it('状态查询不触碰文件（GET 只读）', async () => {
+  it('状态查询不触碰文件（只读）', async () => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-it-'));
     patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
     const before = readFileSync(patchPath, 'utf8');
 
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET'), res);
-    expect(res.statusCode).toBe(200);
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.state);
+    expect(result.ok).toBe(true);
     expect(readFileSync(patchPath, 'utf8')).toBe(before);
   });
 
@@ -175,9 +132,8 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
 
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.configSet, {
       requireMention: false,
       streaming: false,
       showToolResults: true,
@@ -188,13 +144,13 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
       directPrompt: '私聊提示词',
       accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] },
-    })), res);
+    });
 
-    expect(res.statusCode).toBe(200);
+    expect(result.ok).toBe(true);
     const after = readFileSync(patchPath, 'utf8');
     for (const expected of [
       'requireMention: false', 'streaming: false', 'showToolResults: true', 'debug: true',
-      "provider: pi-ai", 'groupPrompt: 群聊提示词', 'directPrompt: 私聊提示词',
+      'provider: pi-ai', 'groupPrompt: 群聊提示词', 'directPrompt: 私聊提示词',
       'c2cMode: allowlist', 'c2cAllow:', '- u1',
     ]) {
       expect(after).toContain(expected);
@@ -203,34 +159,29 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
   });
 
   it.each([
-    ['非法 JSON body', 'not-json{'],
-    ['非对象 body', '"string"'],
-    ['凭据字段', '{"appId":"hack","requireMention":false}'],
-    ['只读 cwd 字段', '{"cwd":"/tmp"}'],
-    ['未知字段', '{"timeoutMs":100}'],
-    ['类型错误（requireMention 传字符串）', '{"requireMention":"yes"}'],
-  ])('配置保存拒绝：%s → 400 且文件不变', async (_name, body) => {
+    ['凭据字段', { appId: 'hack', requireMention: false }],
+    ['只读 cwd 字段', { cwd: '/tmp' }],
+    ['未知字段', { timeoutMs: 100 }],
+    ['类型错误（requireMention 传字符串）', { requireMention: 'yes' }],
+  ])('配置保存拒绝：%s → 错误结果且文件不变', async (_name, payload) => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-rej-'));
     patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
     const before = readFileSync(patchPath, 'utf8');
 
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', body), res);
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.configSet, payload as Record<string, unknown>);
 
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
     expect(readFileSync(patchPath, 'utf8')).toBe(before);
   });
 
-  it('配置保存：无 profile 目录 → 500', async () => {
+  it('配置保存：无 profile 目录 → persist-failed', async () => {
     profileDirState.dir = undefined;
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', '{"requireMention":false}'), res);
-    expect(res.statusCode).toBe(500);
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.configSet, { requireMention: false });
+    expect(result).toMatchObject({ ok: false, error: { code: 'config/persist-failed' } });
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-nodir-')); // 供 afterEach 清理
   });
 
@@ -240,70 +191,60 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
 
-    const routes = registerRealRoutes(() => null);
-    const first = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', '{"requireMention":false}'), first);
-    expect(first.statusCode).toBe(200);
+    const call = createRealHandler(() => null);
+    expect((await call(BIND_METHODS.configSet, { requireMention: false })).ok).toBe(true);
 
     // 拉开 mtime 后重放同值提交
     const { statSync, utimesSync } = await import('node:fs');
     const past = new Date(Date.now() - 1000);
     utimesSync(patchPath, past, past);
 
-    const second = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', '{"requireMention":false}'), second);
-    expect(second.statusCode).toBe(200);
+    expect((await call(BIND_METHODS.configSet, { requireMention: false })).ok).toBe(true);
     expect(statSync(patchPath).mtimeMs).toBe(past.getTime()); // 无变化 → 无写 → mtime 不动
   });
 
-  it('配置保存（长 prompt）：超过 4KB 的请求体正常保存（#69）', async () => {
+  it('配置保存（长 prompt）：超长提示词正常保存（#69）', async () => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-large-'));
     patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
 
-    const routes = registerRealRoutes(() => null);
+    const call = createRealHandler(() => null);
     const longPrompt = '你是一个专业的 QQ 群助手。'.repeat(400); // ~8KB UTF-8
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({ groupPrompt: longPrompt })), res);
+    const result = await call(BIND_METHODS.configSet, { groupPrompt: longPrompt });
 
-    expect(res.statusCode).toBe(200);
-    const after = readFileSync(patchPath, 'utf8');
-    expect(after).toContain('你是一个专业的 QQ 群助手。');
+    expect(result.ok).toBe(true);
+    expect(readFileSync(patchPath, 'utf8')).toContain('你是一个专业的 QQ 群助手。');
     expectSharedPreserved(patchPath);
   });
 
-  it('manual 请求体仍受 4KB 上限约束', async () => {
+  it('manual 凭据字段长度受校验约束', async () => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-manual-cap-'));
     patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
     const before = readFileSync(patchPath, 'utf8');
 
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    const oversized = JSON.stringify({ appId: 'a'.repeat(5000), appSecret: 's' });
-    await invoke(routes.get(BIND_MANUAL_PATH), fakeReq('POST', oversized), res);
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.manual, { appId: 'a'.repeat(5000), appSecret: 's' });
 
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toMatchObject({ ok: false });
+    expect(result).toMatchObject({ ok: false, error: { code: 'bind/invalid-credentials' } });
     expect(readFileSync(patchPath, 'utf8')).toBe(before);
   });
 
-  it('allowlist 大列表可保存（仅受 512KB body 上限约束）', async () => {
+  it('allowlist 大列表可保存', async () => {
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-allow-'));
     patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
     profileDirState.dir = dir;
 
-    const routes = registerRealRoutes(() => null);
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', JSON.stringify({
+    const call = createRealHandler(() => null);
+    const result = await call(BIND_METHODS.configSet, {
       accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: Array.from({ length: 5000 }, (_v, i) => `openid-${i}`), groupMode: 'open', groupAllow: [] },
-    })), res);
+    });
 
-    expect(res.statusCode).toBe(200);
+    expect(result.ok).toBe(true);
     expect(readFileSync(patchPath, 'utf8')).toContain('openid-4999');
     expectSharedPreserved(patchPath);
   });
@@ -345,8 +286,6 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     expect(after).toContain('appSecret: qr-secret');
     expectSharedPreserved(patchPath);
 
-    // 扫码成功后 env 兜底写入（setup 流程语义）：不影响已写盘内容
-    expect(existsSync(patchPath)).toBe(true);
     service.dispose();
   });
 });

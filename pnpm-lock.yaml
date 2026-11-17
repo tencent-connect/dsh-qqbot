@@ -30,6 +30,9 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: 0.2.2-rc.3
         version: 0.2.2-rc.3(5a66ed30ebfeae025fb260d2c5c96077)
+      '@deepseek-ai/dsh-client-connection':
+        specifier: 0.2.2-rc.3
+        version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-scope@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))
       '@deepseek-ai/dsh-llm':
         specifier: 0.2.2-rc.3
         version: 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-error@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))
@@ -105,6 +108,17 @@ packages:
 
   '@deepseek-ai/dsh-brand@0.2.2-rc.3':
     resolution: {integrity: sha512-vX7Ugoqs9GTO/1r/R7K3wZ6Vq1erJHLPvzEr78yxMigCitM0PA4kBZ8i/WOZrsNTLUOu/OiiBqr9HW3CQ4jEww==}
+    peerDependencies:
+      '@deepseek-ai/cordis': ~4.1.0
+
+  '@deepseek-ai/dsh-client-connection@0.2.2-rc.3':
+    resolution: {integrity: sha512-DZf0MBPHWXCVgyknuqOgdOxAMSY7hg3Z8pQwAlFotxJQPEewtvwuFrKmyccKC4K5gbZ6h4uw2KqBQJlZdTEmgQ==}
+    peerDependencies:
+      '@deepseek-ai/cordis': ~4.1.0
+      '@deepseek-ai/dsh-scope': 0.2.2-rc.3
+
+  '@deepseek-ai/dsh-credentials@0.2.2-rc.3':
+    resolution: {integrity: sha512-xizozgwRn1arS+X74v/+AE11iUiaklfdtm85hrptwowVdBeILrPz08/kpxHKrwOV6+nVNRjTVyEqrMyE9yRHBg==}
     peerDependencies:
       '@deepseek-ai/cordis': ~4.1.0
 
@@ -1073,6 +1087,19 @@ snapshots:
   '@deepseek-ai/dsh-brand@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)':
     dependencies:
       '@deepseek-ai/cordis': 4.1.0
+
+  '@deepseek-ai/dsh-client-connection@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)(@deepseek-ai/dsh-scope@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0))':
+    dependencies:
+      '@deepseek-ai/cordis': 4.1.0
+      '@deepseek-ai/dsh-credentials': 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
+      '@deepseek-ai/dsh-scope': 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
+      '@deepseek-ai/schemastery': 3.19.0
+      zod: 4.6.6
+
+  '@deepseek-ai/dsh-credentials@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)':
+    dependencies:
+      '@deepseek-ai/cordis': 4.1.0
+      '@deepseek-ai/dsh-brand': 0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)
 
   '@deepseek-ai/dsh-error@0.2.2-rc.3(@deepseek-ai/cordis@4.1.0)':
     dependencies:
