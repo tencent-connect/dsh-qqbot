@@ -142,7 +142,6 @@ const english = {
   "无法保存机器人配置": "Could not save bot settings.",
   "暂未确认解绑结果。若刷新后仍显示此机器人，可以重试。": "Unbinding could not be confirmed. Refresh and try again if the bot is still listed.",
   "机器人名称": "Bot name",
-  "可选，便于区分机器人": "Optional name to identify this bot",
   "配置已变化，草稿仍保留。": "Configuration changed. Your draft is still available.",
   "合并到最新配置": "Merge into latest settings",
   "草稿已合并，请核对后保存。": "Draft merged. Review and save.",

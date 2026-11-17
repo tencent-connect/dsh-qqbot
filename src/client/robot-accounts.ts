@@ -35,7 +35,11 @@ export function robotBindingKey(robot: WorkbenchRobot): string {
 }
 
 export function accountName(robot: WorkbenchRobot): string {
-  return robot.alias || (robot.primary ? t("主机器人") : t("机器人 {0}", robot.appId));
+  return robot.alias || defaultAccountName(robot);
+}
+
+function defaultAccountName(robot: WorkbenchRobot): string {
+  return robot.primary ? t("主机器人") : t("机器人 {0}", robot.appId);
 }
 
 function editRobot(robot: WorkbenchRobot): EditRobot {
@@ -416,16 +420,30 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
     }, t("撤销修改")),
     h(Button, { size: 'sm', variant: 'primary', type: 'submit', form: formId, disabled: !canSave },
       busy ? t("保存中…") : t("保存")));
+  const enabled = current?.enabled ?? (editor?.kind === 'edit' && editor.baseline.enabled);
+  const enableControl = editor?.kind === 'edit' ? h('div', { className: 'imqr-inline-state' },
+    h('span', null, t("启用机器人")),
+    h(Switch, {
+      checked: enabled,
+      label: t("启用机器人"), disabled: busy,
+      onChange: enabled => {
+        const robot = current ?? editor.baseline;
+        void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
+      },
+    }),
+  ) : null;
   const form = editor?.kind !== 'edit' ? null : h('form', {
       id: formId, className: 'imqr-form', onSubmit: (event: FormEvent) => {
         event.preventDefault();
         if (canSave) void save(patch, true);
       },
     },
-      h('label', { className: 'imqb-field imqr-field' }, t("机器人名称"), h(Input, {
-        value: editor.draft.alias, disabled: busy, placeholder: t("可选，便于区分机器人"), autoComplete: 'off', maxLength: 120,
-        onChange: event => setField('alias', event.currentTarget.value),
-      })),
+      h('div', { className: 'imqr-account-controls', role: 'group', 'aria-label': t("账号信息") },
+        h('label', { className: 'imqr-account-name' }, t("机器人名称"), h(Input, {
+          value: editor.draft.alias, disabled: busy, placeholder: defaultAccountName(editor.baseline),
+          autoComplete: 'off', maxLength: 120, onChange: event => setField('alias', event.currentTarget.value),
+        })),
+        enableControl),
       stale ? h('div', { className: 'imqr-header' },
         h('p', { className: 'imqb-error', role: 'alert' }, t("配置已变化，草稿仍保留。")),
         h(Button, { size: 'sm', variant: 'outline', type: 'button', disabled: busy, onClick: () => {
@@ -438,32 +456,20 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
       rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, t("草稿已合并，请核对后保存。")) : null,
   );
   const startBinding = (): void => startEdit({ kind: 'add', id: crypto.randomUUID() });
-  const enabled = current?.enabled ?? (editor?.kind === 'edit' && editor.baseline.enabled);
-  const accountControls = editor?.kind === 'edit' ? h(Fragment, null,
-    h('h3', null, t("账号信息")),
-    h('div', { className: 'imqr-inline-state' },
-      h('span', null, t("启用机器人")),
-      h(Switch, {
-        checked: enabled,
-        label: t("启用机器人"), disabled: busy,
-        onChange: enabled => {
-          const robot = current ?? editor.baseline;
-          void save({ appId: robot.appId, revision: robot.revision, enabled }, false);
-        },
-      }),
-    ),
+  const credentials = editor?.kind === 'edit' ? h('section', { 'aria-label': t("凭据与访问") },
+    h('h3', null, t("凭据与访问")),
+    h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
+      key: editor.baseline.appId, state: { phase: 'bound', appId: editor.baseline.appId },
+      recheck: () => setReload(value => value + 1),
+      boundActions: {
+        disabled: busy || stale,
+        ...(editor.baseline.primary ? {} : {
+          replace: (appId: string, appSecret: string) => save({ appId, appSecret, revision: editor.baseline.revision }, false),
+        }),
+        unbind: () => openRemove(current ?? editor.baseline),
+      },
+    }),
   ) : null;
-  const credentials = editor?.kind === 'edit' ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
-    key: editor.baseline.appId, state: { phase: 'bound', appId: editor.baseline.appId },
-    recheck: () => setReload(value => value + 1),
-    boundActions: {
-      disabled: busy || stale,
-      ...(editor.baseline.primary ? {} : {
-        replace: (appId: string, appSecret: string) => save({ appId, appSecret, revision: editor.baseline.revision }, false),
-      }),
-      unbind: () => openRemove(current ?? editor.baseline),
-    },
-  }) : null;
   const accountSettings = editor?.kind === 'add'
     ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
         key: bindId, state: bindState?.phase === 'bound' ? { phase: 'saving' } : bindState ?? null,
@@ -473,12 +479,10 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
         ? h(PrimaryAccountSettings, {
             key: robotBindingKey(editor.baseline),
             appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
-            enabled, formId, controls: accountControls,
-            credentials: h('section', { className: 'imqw-primary-settings', 'aria-label': t("凭据与访问") },
-              h('h3', null, t("凭据与访问")), credentials),
+            enabled, formId, defaultName: defaultAccountName(editor.baseline), controls: enableControl, credentials,
             onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
           })
-        : h(Fragment, null, accountControls, form, credentials,
+        : h(Fragment, null, credentials, form,
             h(AccessSettings, {
               key: `access-${editor.baseline.appId}`, appId: editor.baseline.appId, access: editor.draft, busy,
               enabled, onMode: setField, onMembershipChange: () => setReload(value => value + 1),
@@ -582,7 +586,13 @@ const STYLES = `
 .imqr-avatar[data-state='connected']::after { background: var(--dsw-alias-text-green, #29966e); }
 .imqr-avatar[data-state='failed']::after { background: var(--dsw-alias-text-red, #ce5260); }
 .imqr-inline { display: flex; flex-direction: column; gap: 14px; }
-.imqr-inline-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.imqr-account-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; font-size: 13px;
+}
+.imqr-account-name { display: flex; flex: 0 1 280px; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.imqr-account-name > :last-child { box-sizing: border-box; flex: 1 1 160px; min-width: 0; }
+.imqr-account-name input::placeholder { color: var(--dsw-alias-label-secondary); opacity: 1; }
+.imqr-inline-state { display: flex; align-items: center; gap: 8px; }
 .imqr-rail { display: grid; align-content: start; gap: 8px; min-width: 0; }
 .imqr-row {
   display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding: 6px;

@@ -258,14 +258,30 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   const defaults = () => client.get(workbench + 'defaults?appId=' + DUMMY_APP_ID);
   const conversation = async () => (await client.get(workbench + 'conversations?appId=' + DUMMY_APP_ID))
     .conversations.find(row => row.openId === directId && row.scope === 'c2c');
+  const assertPathActionFits = async (input, action) => {
+    const [field, actionBox] = await Promise.all([input.evaluate(element => {
+      const slot = element.closest('.imqw-prompt-path-input');
+      const { x, y, width, height } = slot.firstElementChild.getBoundingClientRect();
+      return { x, y, width, height, slotWidth: slot.getBoundingClientRect().width };
+    }), action.boundingBox()]);
+    assert(field.width <= field.slotWidth + 0.5, 'the path input exceeds its allocated width');
+    assert(actionBox);
+    assert(field.x + field.width <= actionBox.x + 0.5 || field.y + field.height <= actionBox.y + 0.5,
+      'the path input border overlaps its action button');
+  };
   const bind = async (panel, label, file) => {
     await panel.getByRole('tablist', { name: label + '来源' }).getByRole('tab', { name: '文件路径', exact: true }).click();
     const input = panel.getByRole('textbox', { name: label + '文件路径', exact: true });
-    await button(panel, '选择文件').click();
+    const chooseFile = button(panel, '选择文件');
+    await assertPathActionFits(input, chooseFile);
+    await chooseFile.click();
     const picker = page.getByRole('dialog', { name: '选择提示词文件' });
     await picker.getByRole('list', { name: '宿主目录内容' }).waitFor();
-    await picker.getByRole('textbox', { name: '宿主目录路径' }).fill(dirname(dirname(file.path)));
-    await button(picker, '前往').click();
+    const directory = picker.getByRole('textbox', { name: '宿主目录路径' });
+    const go = button(picker, '前往');
+    await assertPathActionFits(directory, go);
+    await directory.fill(dirname(dirname(file.path)));
+    await go.click();
     await picker.getByRole('button', { name: /^prompt documents/ }).click();
     await button(picker, basename(file.path)).click();
     assert.equal(await button(picker, 'hidden-from-picker.pdf').count(), 0);
@@ -454,6 +470,54 @@ async function verifyBotIdentityAndLanguage(page, client) {
   return { bilingualControls: true, identifiesSameNameBots: true, unbindTargetAppId: true };
 }
 
+async function verifyCompactAccountLayout(page, client, dir, until) {
+  await button(page, '设置主机器人').click();
+  const tab = page.getByRole('tabpanel', { name: '账号与权限', exact: true });
+  const credentials = tab.getByRole('region', { name: '凭据与访问', exact: true });
+  const account = tab.getByRole('group', { name: '账号信息', exact: true });
+  const name = account.getByRole('textbox', { name: '机器人名称', exact: true });
+  const enabled = account.getByRole('switch', { name: '启用机器人', exact: true });
+  const scope = tab.getByText('服务范围', { exact: true });
+  const save = button(tab, '保存');
+  await name.waitFor();
+  assert.equal(await name.getAttribute('placeholder'), '主机器人');
+  assert.equal(await name.inputValue(), '');
+  assert(await save.isDisabled());
+  await name.fill('布局验收机器人');
+  await save.click();
+  const alias = async () => (await client.get(workbench + 'robots')).robots.find(bot => bot.primary).alias;
+  await until(async () => (await alias()) === '布局验收机器人', 'custom alias saved');
+  await until(async () => await save.isDisabled(), 'alias editor is ready');
+  await name.fill('');
+  await save.click();
+  await until(async () => (await alias()) === '', 'alias cleared');
+  assert.equal(await name.getAttribute('placeholder'), '主机器人');
+
+  const boxes = async () => {
+    await name.waitFor();
+    const [credBox, groupBox, nameBox, switchBox, scopeBox] = await Promise.all([
+      credentials.boundingBox(), account.boundingBox(), name.boundingBox(), enabled.boundingBox(), scope.boundingBox(),
+    ]);
+    assert(credBox.y + credBox.height <= groupBox.y + 1);
+    assert(groupBox.y + groupBox.height <= scopeBox.y + 1);
+    for (const control of [nameBox, switchBox]) {
+      assert(control.x >= groupBox.x - 1);
+      assert(control.x + control.width <= groupBox.x + groupBox.width + 1);
+    }
+    return { width: groupBox.width, height: groupBox.height, nameWidth: nameBox.width,
+      singleRow: Math.abs(nameBox.y + nameBox.height / 2 - switchBox.y - switchBox.height / 2) < 5 };
+  };
+  const wide = await boxes();
+  assert(wide.singleRow && wide.nameWidth < wide.width / 2);
+  await tab.screenshot({ path: join(dir, 'account-layout.png') });
+  await page.setViewportSize({ width: 480, height: 840 });
+  const narrow = await boxes();
+  assert(!narrow.singleRow);
+  await page.setViewportSize({ width: 1640, height: 1040 });
+  await button(page, '返回会话').click();
+  return { wide, narrow, aliasCanBeSetAndCleared: true };
+}
+
 async function verifyMessagePagination(page) {
   await page.locator('.imqw-peer-select').filter({ hasText: 'messages' }).click();
   const region = page.getByRole('region', { name: 'QQ 消息', exact: true });
@@ -492,6 +556,7 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     await page.goto(login);
     await button(page.getByRole('dialog', { name: '预览版说明' }), '继续').click();
     await button(page, 'QQ 机器人').click();
+    const accountLayout = await verifyCompactAccountLayout(page, client, dir, until);
     await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
     const messages = await verifyMessages(page, client, fixture, until);
     const toolPicker = await verifyToolPicker(page, client, until);
@@ -499,7 +564,7 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     const retention = await verifyRetention(page, client, until, historyFixture);
     const pagination = await verifyMessagePagination(page);
     const identity = await verifyBotIdentityAndLanguage(page, client);
-    return { messages, toolPicker, promptPaths, retention, pagination, identity };
+    return { accountLayout, messages, toolPicker, promptPaths, retention, pagination, identity };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));

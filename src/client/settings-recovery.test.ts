@@ -159,12 +159,16 @@ describe('QQ settings recovery', () => {
       return Response.json({ ok: true });
     }));
     const render = mount(() => PrimaryAccountSettings({
-      appId: robot.appId, revision: 1, enabled: true, formId: 'qq-account', controls: null, credentials: null, onAliasSaved: vi.fn(),
+      appId: robot.appId, revision: 1, enabled: true, formId: 'qq-account', defaultName: '主机器人',
+      controls: null, credentials: null, onAliasSaved: vi.fn(),
     }));
     render();
     await vi.advanceTimersByTimeAsync(0);
+    const name = find(render(), props => props.placeholder === '主机器人')!.props;
+    expect(name.value).toBe('');
+    expect(find(render(), props => props.children === '保存')?.props.disabled).toBe(true);
     const input = { value: '我的机器人' };
-    find(render(), props => props.placeholder === '可选，便于区分机器人')!.props.onChange!({ target: input, currentTarget: input });
+    name.onChange!({ target: input, currentTarget: input });
     find(render(), props => props.onMode !== undefined)!.props.onMode!('groupMode', 'allowlist');
     const save = () => find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
     save();
@@ -203,7 +207,8 @@ describe('QQ settings recovery', () => {
     }));
 
     const render = mount(() => PrimaryAccountSettings({
-      appId: 'bot', revision: 1, enabled: true, formId: 'qq-account', controls: null, credentials: null, onAliasSaved: vi.fn(),
+      appId: 'bot', revision: 1, enabled: true, formId: 'qq-account', defaultName: '主机器人',
+      controls: null, credentials: null, onAliasSaved: vi.fn(),
     }));
     const accessSettings = () => find(render(), props => props.onMode !== undefined)!.props;
     const save = () => find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
@@ -341,7 +346,7 @@ describe('QQ settings recovery', () => {
   it('keeps each additional robot’s own name draft when changing accounts', async () => {
     vi.useFakeTimers();
     const robots: WorkbenchRobot[] = ['alpha', 'beta'].map((appId, index) => ({
-      appId, alias: appId, revision: index + 1, bindingRevision: index + 1,
+      appId, alias: index === 0 ? appId : '', revision: index + 1, bindingRevision: index + 1,
       state: 'connected', primary: false, enabled: true, access: {
         c2cMode: 'open', groupMode: 'open', commandMode: 'open', c2cAllow: [], groupAllow: [],
       },
@@ -359,16 +364,16 @@ describe('QQ settings recovery', () => {
     render();
     await vi.advanceTimersByTimeAsync(0);
     const open = (name: string) => find(render(), props => props['aria-label'] === `设置${name}`)!.props.onClick!();
-    const field = () => find(render(), props => props.placeholder === '可选，便于区分机器人')!.props;
+    const field = () => find(render(), props => props.placeholder?.startsWith('机器人 ') === true)!.props;
     const edit = (value: string) => field().onChange!({ target: { value }, currentTarget: { value } });
     open('alpha');
     edit('草稿甲');
-    open('beta');
-    expect(field().value).toBe('beta');
+    open('机器人 beta');
+    expect(field()).toMatchObject({ value: '', placeholder: '机器人 beta' });
     edit('草稿乙');
     open('alpha');
     expect(field().value).toBe('草稿甲');
-    open('beta');
+    open('机器人 beta');
     expect(field().value).toBe('草稿乙');
   });
 });

@@ -224,13 +224,14 @@ interface PrimaryAccountSettingsProps {
   revision: number;
   enabled: boolean;
   formId: string;
+  defaultName: string;
   controls: ReactNode;
   credentials: ReactNode;
   onAliasSaved(robot: WorkbenchRobot): void;
 }
 
 export function PrimaryAccountSettings({
-  appId, revision, enabled, formId, controls, credentials, onAliasSaved,
+  appId, revision, enabled, formId, defaultName, controls, credentials, onAliasSaved,
 }: PrimaryAccountSettingsProps): ReactNode {
   useConfigPanelStyles();
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
@@ -381,13 +382,14 @@ export function PrimaryAccountSettings({
     createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? t("重试中…") : t("重试")),
   );
   const accountFields = createElement(Fragment, null,
-    controls,
-    draft && createElement('label', { className: 'imqb-field imqr-field' }, t("机器人名称"), createElement(Input, {
-      form: formId, value: draft.form.alias ?? '', disabled: busy || loading,
-      placeholder: t("可选，便于区分机器人"), autoComplete: 'off', maxLength: 120,
-      onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch('alias', event.target.value),
-    })),
     credentials,
+    createElement('div', { className: 'imqr-account-controls', role: 'group', 'aria-label': t("账号信息") },
+      draft && createElement('label', { className: 'imqr-account-name' }, t("机器人名称"), createElement(Input, {
+        form: formId, value: draft.form.alias ?? '', disabled: busy || loading,
+        placeholder: defaultName, autoComplete: 'off', maxLength: 120,
+        onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch('alias', event.target.value),
+      })),
+      controls),
   );
   if (draft === null) {
     return createElement('div', { 'aria-busy': loading }, accountFields, loadFeedback,
