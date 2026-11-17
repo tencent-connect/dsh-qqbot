@@ -33,6 +33,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Settings nav icon follows the theme**: the icon color now tracks the host theme instead of rendering near-black on dark backgrounds.
 - **Question channel survives hot reloads**: plugin hot reloads (saving config, QR binding) used to silently disable the QQ question channel — afterwards `ask_user_question` reached no surface at all or failed outright. The channel now hooks in via events and its lifecycle follows the plugin automatically. The full question flow (multi-question stepping, buttons, timeouts, racing the desktop) is regression-tested.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
+- **`/compact` no longer reports "compaction unavailable"**: preset-scoped services are now re-probed on every call, so a plugin that starts before the preset registry no longer degrades permanently.
 
 ### Internal (developer-facing)
 

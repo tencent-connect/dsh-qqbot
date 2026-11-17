@@ -42,6 +42,20 @@ describe('host adapter', () => {
     expect(adapter.capabilities).toContain('serviceFor(presets实例方法)');
   });
 
+  it('serviceFor：apply 之后才 provide 的 presets 也能解析（不冻结启动形态）', async () => {
+    const compaction = { compactNow: () => {} };
+    const services: Record<string, unknown> = {};
+    const adapter = createHostAdapter(makeCtx(services));
+    expect(adapter.capabilities).toContain('serviceFor(启动未就绪，调用时重探)');
+    expect(await adapter.serviceFor({ ctx: {} }, 'compaction')).toBeUndefined();
+
+    // 模拟 preset 注册表在插件 apply 之后才启动完成
+    services.agentPresets = {
+      serviceFor: (agent: unknown, name: string) => (name === 'compaction' ? compaction : undefined),
+    };
+    expect(await adapter.serviceFor({ ctx: {} }, 'compaction')).toBe(compaction);
+  });
+
   it('serviceFor：无实例方法时走动态模块函数', async () => {
     const compaction = { compactNow: () => {} };
     vi.doMock('@deepseek-ai/dsh-agent-presets', () => ({
