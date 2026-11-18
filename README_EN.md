@@ -177,6 +177,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
 | `/bot-status` | View current session status |
+| `/sendfile` | Send a local file to the current direct chat (path restricted by the `sendFile.restrictPaths` allowlist) |
 | `/bot-help` | View all commands |
 
 ## Core Modules

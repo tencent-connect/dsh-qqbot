@@ -13,6 +13,7 @@ import { newCommand, compactCommand } from './session.ts';
 import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
+import { sendFileCommand } from './sendfile.ts';
 import { helpCommand } from './help.ts';
 import { pingCommand, versionCommand, stopCommand, meCommand } from './misc.ts';
 
@@ -32,6 +33,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     versionCommand(deps),
     meCommand(deps),
     statusCommand(deps),
+    sendFileCommand(deps),
   ];
 
   // help 需要访问完整列表（含自身），通过闭包惰性引用

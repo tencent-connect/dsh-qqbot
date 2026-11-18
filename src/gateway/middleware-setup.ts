@@ -22,6 +22,7 @@ import {
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
+import type { MediaSenderLike } from '../media/send-media.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
@@ -33,6 +34,7 @@ export function setupMiddlewares(
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
+  getMediaSender?: () => MediaSenderLike | undefined,
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
@@ -106,7 +108,7 @@ export function setupMiddlewares(
     // 关闭 autoHelp：help 命令由 qqbot 注册为 /bot-help，
     // 避免 SDK 再自动注册一个无前缀的 /help 造成重复
     autoHelp: false,
-    commands: buildCommandList({ manager, config, logger }),
+    commands: buildCommandList({ manager, config, logger, getMediaSender }),
   });
   bot.use(slash.middleware);
   bot.use(async (ctx, next) => {
