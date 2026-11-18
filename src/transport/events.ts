@@ -46,9 +46,11 @@ export interface ToolResultEvent {
 /** turn/end 事件 */
 export interface TurnEndEvent {
   type: 'turn/end';
-  failed: boolean;
   completed: boolean;
+  failure?: 'model-unavailable' | 'other';
 }
+
+const UNAVAILABLE_MODEL_CODES = new Set(['AUTH', 'ACCOUNT_TOKEN_INVALID', 'UNKNOWN_MODEL', 'MODEL_UNSUPPORTED', 'NO_ADAPTER']);
 
 /** present 工具声明的一个交付文件 */
 export interface PresentedFileRef {
@@ -109,8 +111,16 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
 
     case 'turn/end': {
       const reason = raw.data.reason;
-      const kind = reason !== null && typeof reason === 'object' && 'kind' in reason ? reason.kind : undefined;
-      return { type: 'turn/end', failed: kind === 'error', completed: kind === 'completed' };
+      if (reason === null || typeof reason !== 'object' || !('kind' in reason)) {
+        return { type: 'turn/end', completed: false };
+      }
+      if (reason.kind !== 'error') return { type: 'turn/end', completed: reason.kind === 'completed' };
+      const error = 'error' in reason ? reason.error : undefined;
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+      return {
+        type: 'turn/end', completed: false,
+        failure: typeof code === 'string' && UNAVAILABLE_MODEL_CODES.has(code) ? 'model-unavailable' : 'other',
+      };
     }
 
     case 'deliverables/presented': {

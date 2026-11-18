@@ -203,6 +203,7 @@ interface ConversationAccount {
   agentSettings?(scope: ChatScope, openId: string, existing: boolean): WorkbenchAgentSettings;
   validateAgent?(next: WorkbenchAgentSettings, current: WorkbenchAgentSettings): Promise<void>;
   peerName(scope: ChatScope, openId: string): string;
+  refreshGroupName?(openId: string): Promise<void> | undefined;
   mentionName?(groupId: string, openId: string): string | undefined;
   liveSessionId(scope: ChatScope, openId: string): string | undefined;
   sessionChangePending?(scope: ChatScope, openId: string): boolean;
@@ -229,6 +230,7 @@ async function projectConversations(
   persistence?: SessionPersistence,
   target?: Pick<WorkbenchConversation, 'scope' | 'openId'>,
   summary = false,
+  refreshGroupNames = false,
 ): Promise<WorkbenchConversation[]> {
   const account = robots.conversationAccount(appId);
   if (!account) throw new WorkbenchRequestError(404, '找不到这个 QQ 机器人。');
@@ -256,6 +258,9 @@ async function projectConversations(
   // Bound concurrent stat calls independently of the number of retained peer mappings.
   for (let offset = 0; offset < peers.length; offset += 12) {
     conversations.push(...await Promise.all(peers.slice(offset, offset + 12).map(async ({ key, scope, openId }) => {
+      if (refreshGroupNames && scope === 'group' && allowsConversation(account.access, scope, openId)) {
+        await account.refreshGroupName?.(openId);
+      }
       const binding = bindings.get(key);
       const current = account.liveSessionId(scope, openId) ?? binding?.current ?? robots.prefs.legacySessionId(key);
       const ids = new Set(binding?.history ?? []);
@@ -458,7 +463,9 @@ export function registerWorkbenchConversations(
         return workbenchJson({ error: '请指定一个有效的 AppID 和会话。' }, 400);
       }
       try {
-        return workbenchJson({ conversations: await projectConversations(robots, appId, persistence, target, !target && query.get('summary') === '1') });
+        const summary = !target && query.get('summary') === '1';
+        const refreshGroupNames = query.get('refreshGroupNames') === '1';
+        return workbenchJson({ conversations: await projectConversations(robots, appId, persistence, target, summary, refreshGroupNames) });
       } catch (error) {
         if (!(error instanceof WorkbenchRequestError)) logger.warn('QQ 工作台无法读取会话或宿主持久化。');
         throw error;

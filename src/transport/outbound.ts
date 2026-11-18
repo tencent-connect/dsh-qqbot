@@ -55,6 +55,12 @@ interface ToolCallRecord {
   args: string;
 }
 
+function failureNotice(failure: NonNullable<TurnEndEvent['failure']>): string {
+  return failure === 'model-unavailable'
+    ? '⚠️ 当前模型不可用，请切换模型后重试。'
+    : '⚠️ 本轮处理失败，请稍后重试。';
+}
+
 /**
  * 出站路由器：持有会话级状态，按事件类型分发到处理器。
  * 回合归属与投递目标委托给 TurnTracker（与提问/审批/发文件共享）。
@@ -345,7 +351,7 @@ class OutboundRouter {
     const answer = this.groupAnswers.get(id)?.text;
     const files = this.presentedFiles.get(id) ?? [];
     this.resetTurnState(id);
-    if (!end.completed && !end.failed) return;
+    if (!end.completed && !end.failure) return;
     try {
       if (!await this.flushSession?.(session)) {
         this.logger.warn('QQ group reply skipped because the Session could not be flushed.');
@@ -353,8 +359,8 @@ class OutboundRouter {
       }
       if (this.closed) return;
       if (deliveryTrace(target) !== undefined) assertDeliveryAllowed(target);
-      if (end.failed) {
-        await sendText(this.bot, target, '⚠️ 本轮处理失败，请稍后重试。', this.config.textChunkLimit);
+      if (end.failure) {
+        await sendText(this.bot, target, failureNotice(end.failure), this.config.textChunkLimit);
         return;
       }
       if (answer !== undefined) await sendText(this.bot, target, answer, this.config.textChunkLimit);
@@ -366,14 +372,14 @@ class OutboundRouter {
 
   /**
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
-   * 外层轮次失败不撤销已完成的声明（宿主契约），故失败轮的文件仍投递。
+   * 其他失败沿用宿主已完成的文件声明。模型不可用时只发切换提示。
    */
   private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined, sessionCwd?: string): void {
     const buffer = this.buffers.get(sessionId);
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
     if (buffer !== undefined) {
-      if (!event.failed && buffer.text.trim()) {
+      if (!event.failure && buffer.text.trim()) {
         flushTask = buffer.flush();
       } else {
         buffer.cancel();
@@ -381,7 +387,7 @@ class OutboundRouter {
       this.buffers.delete(sessionId);
     }
     this.streamAttempts.delete(sessionId);
-    const files = this.presentedFiles.get(sessionId) ?? [];
+    const files = event.failure === 'model-unavailable' ? [] : this.presentedFiles.get(sessionId) ?? [];
     this.presentedFiles.delete(sessionId);
     this.presentedCalls.delete(sessionId);
     // assistant/message 已在轮内先行发送的文本可能仍在途：与 turn/end 自身的 flush 一起等待
@@ -390,8 +396,8 @@ class OutboundRouter {
 
     void (async () => {
       await Promise.all([flushTask, pending]);
-      if (plan !== undefined && event.failed) {
-        await this.send(plan.target, '⚠️ 本轮处理失败，请稍后重试。', 'sendTurnEndError');
+      if (plan !== undefined && event.failure) {
+        await this.send(plan.target, failureNotice(event.failure), 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
         await this.deliverer.deliver(plan.target, files, sessionCwd);

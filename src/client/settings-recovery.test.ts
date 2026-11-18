@@ -9,6 +9,9 @@ import { AccessSettings, PrimaryAccountSettings } from './config-panel.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
 import { WorkbenchDefaultsForm } from './workbench-defaults.ts';
 import { RobotAccounts, type RobotAccountsProps } from './robot-accounts.ts';
+import { ConversationSettings } from './workbench-conversation-settings.ts';
+import { selectDraft } from './workbench-state.ts';
+import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 
 type Dependencies = readonly unknown[];
 type Effect = () => void | (() => void);
@@ -123,6 +126,34 @@ afterEach(() => {
 });
 
 describe('QQ settings recovery', () => {
+  it('explains that merging a conversation draft still requires Save', () => {
+    const robot: WorkbenchRobot = {
+      appId: '100', primary: true, enabled: true, alias: '', state: 'connected', revision: 0,
+      access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open', c2cAllow: [], groupAllow: [] },
+    };
+    const peer: WorkbenchConversation = {
+      scope: 'c2c', openId: 'person', name: '联系人', alias: '', receiving: true,
+      retention: '7d', recording: true, admitted: true, revision: 1, sessions: [], sessionCount: 0,
+    };
+    const latest = { ...peer, revision: 2, receiving: false };
+    let draft = { ...selectDraft(peer), alias: '手填备注' };
+    const save = vi.fn();
+    const render = mount(() => ConversationSettings({
+      robot, peer: latest, closeButton: null, archived: false, draft, busy: false,
+      onEdit: next => { draft = next; }, onSave: save, onClearRecords() {},
+    }));
+    const tree = render();
+    expect(find(tree, props => typeof props.children === 'string' && props.children.includes('点击「保存」才会生效'))).toBeDefined();
+    expect(find(tree, props => props.children === '保存')?.props.disabled).toBe(true);
+    find(tree, props => props.children === '合并草稿')!.props.onClick!();
+    expect(draft).toMatchObject({ alias: '手填备注', receiving: false, baseline: { revision: 2 } });
+    expect(save).not.toHaveBeenCalled();
+    const merged = render();
+    expect(find(merged, props => props.children === '保存')?.props.disabled).toBe(false);
+    find(merged, props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
+    expect(save).toHaveBeenCalledExactlyOnceWith(draft);
+  });
+
   it('offers three slash command modes and shows the default without submitting it', () => {
     const onMode = vi.fn();
     const render = mount(() => AccessSettings({

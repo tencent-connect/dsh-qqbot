@@ -530,6 +530,22 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['⚠️ 本轮处理失败，请稍后重试。']);
   });
 
+  it.each([
+    { group: false, streaming: true, code: 'AUTH', status: 401 },
+    { group: true, streaming: false, code: 'AUTH', status: 401 },
+    { group: true, streaming: false, code: 'UNKNOWN_MODEL', status: 404 },
+  ])('sends one model-switch notice on $code (group=$group)', async ({ group, streaming, code, status }) => {
+    vi.useFakeTimers();
+    const f = setup({ group, streaming });
+    f.input();
+    const end = { turn: 1, reason: { kind: 'error', error: { code, status, message: 'internal provider details' } } };
+    f.emit('turn/end', end);
+    f.emit('turn/end', end);
+    await vi.runAllTimersAsync();
+    expect(f.bot.openStream).not.toHaveBeenCalled();
+    expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['⚠️ 当前模型不可用，请切换模型后重试。']);
+  });
+
   it('does not send a terminal failure notice after access is withdrawn', async () => {
     vi.useFakeTimers();
     const f = setup(); f.input();

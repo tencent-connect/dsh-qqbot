@@ -30,6 +30,7 @@ export async function createQQFixture(options = {}) {
   };
   let sequence = 0;
   let origin = 'http://127.0.0.1';
+  let groupName = '';
   const outboundLog = [];
   const commandLog = [];
   const authenticated = new WeakSet();
@@ -94,6 +95,12 @@ export async function createQQFixture(options = {}) {
         persist();
         return json(res, 200, snapshot());
       }
+      if (req.method === 'POST' && path === '/__fixture/group-name') {
+        const { name } = await readJson(req);
+        if (typeof name !== 'string' || name.length > 300) return json(res, 400, { message: 'Invalid fixture group name' });
+        groupName = name;
+        return json(res, 200, snapshot());
+      }
       if (req.method === 'POST' && path === '/__fixture/disconnect') {
         const data = await readJson(req);
         if (data.terminal !== undefined && typeof data.terminal !== 'boolean') return json(res, 400, { message: 'Invalid fixture disconnect option' });
@@ -118,6 +125,10 @@ export async function createQQFixture(options = {}) {
         state.gatewayRequests += 1;
         persist();
         return json(res, 200, { url: origin.replace('http:', 'ws:') + '/gateway' });
+      }
+      const group = /^\/v2\/groups\/(local-fixture-(?:allowed|denied)-group)\/info$/.exec(path);
+      if (req.method === 'GET' && group) {
+        return json(res, 200, { group_openid: group[1], group_name: groupName });
       }
       if (req.method === 'POST' && /\/(?:messages|files)$/u.test(path)) {
         const body = await readJson(req);

@@ -114,7 +114,7 @@ const english = {
   "确认清空": "Confirm clear",
   "确认缩短并保存": "Shorten and save",
   "正在读取默认值…": "Loading defaults…",
-  "会话设置已更新。请确认是否将草稿中的改动合并到最新设置。": "Conversation settings changed. Confirm before merging your edited fields into the latest settings.",
+  "会话设置已更新。点击「合并草稿」会把你改过的字段带到最新设置，核对后点击「保存」才会生效。": "Conversation settings changed. Merge Draft copies your edits onto the latest settings. Review the draft and click Save to apply.",
   "合并草稿": "Merge draft",
   "撤销修改": "Discard changes",
   "保存中…": "Saving…",

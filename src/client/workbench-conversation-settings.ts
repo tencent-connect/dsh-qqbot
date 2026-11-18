@@ -207,7 +207,7 @@ export function ConversationSettings({ robot, peer, agentSource, closeButton, ar
     reading ? h('p', { className: 'imqw-muted', role: 'status' }, t("正在读取默认值…")) : null,
     adoptError ? h('p', { className: 'imqb-error', role: 'alert' }, adoptError) : null,
     stale ? h('div', { className: 'imqw-conflict' },
-      h('p', { className: 'imqb-error', role: 'alert' }, t("会话设置已更新。请确认是否将草稿中的改动合并到最新设置。")),
+      h('p', { className: 'imqb-error', role: 'alert' }, t("会话设置已更新。点击「合并草稿」会把你改过的字段带到最新设置，核对后点击「保存」才会生效。")),
       h(Button, {
         type: 'button', size: 'sm', variant: 'outline', disabled,
         onClick: () => onEdit(mergeDraft(peer, draft, edited)),

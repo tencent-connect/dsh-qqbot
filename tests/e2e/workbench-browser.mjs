@@ -75,7 +75,8 @@ async function verifyMessages(page, client, fixture, until) {
     assert.equal(await refresh.locator('svg').count(), 1);
   }
   const [conversationsResponse] = await Promise.all([
-    page.waitForResponse(response => response.url().includes(workbench + 'conversations?') && response.request().method() === 'GET'),
+    page.waitForResponse(response => new URL(response.url()).pathname === workbench + 'conversations'
+      && new URL(response.url()).searchParams.get('refreshGroupNames') === '1'),
     refreshList.click(),
   ]);
   assert(conversationsResponse.ok());
@@ -130,8 +131,34 @@ async function verifyMessages(page, client, fixture, until) {
   assert(await pane.locator('.imqw-main-head').evaluate(node => node.scrollWidth <= node.clientWidth + 1),
     'header actions fit a narrow viewport');
   await page.setViewportSize({ width: 1640, height: 1040 });
+  const group = row => row.scope === 'group' && row.openId === groupId;
+  const refreshGroup = async name => {
+    await fixture('group-name', { name });
+    const [response] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === workbench + 'conversations'
+        && new URL(response.url()).searchParams.get('refreshGroupNames') === '1'),
+      refreshList.click(),
+    ]);
+    assert(response.ok());
+    return (await response.json()).conversations.find(group);
+  };
+  const named = await refreshGroup('QQ 夹具群名');
+  assert.equal(named.name, 'QQ 夹具群名');
+  await tree.getByText('QQ 夹具群名', { exact: true }).waitFor();
+  await pane.getByRole('heading', { name: 'QQ 夹具群名', exact: true }).waitFor();
+  const saved = await client.post(workbench + 'conversations', {
+    appId: DUMMY_APP_ID, scope: 'group', openId: groupId, alias: '手填群备注', revision: named.revision,
+  });
+  const renamed = await refreshGroup('QQ 最新群名');
+  assert.equal(renamed.name, 'QQ 最新群名');
+  assert.equal(renamed.alias, '手填群备注');
+  assert.equal(renamed.revision, saved.conversation.revision);
+  assert.equal(renamed.currentSessionId, named.currentSessionId);
+  await tree.getByText('手填群备注', { exact: true }).waitFor();
+  await pane.getByRole('heading', { name: '手填群备注', exact: true }).waitFor();
   return { attachment: true, quoteAndSend: true, responseDetails: true, listRefresh: true, messageRefreshAndRetry: true,
-    sendFailure: true, nativeSessionReturn: true, restoreArchivedSession: true, firstSessionAction: true, narrowLayout: true };
+    sendFailure: true, nativeSessionReturn: true, restoreArchivedSession: true, firstSessionAction: true, narrowLayout: true,
+    groupNameRefresh: true, groupAliasPriority: true };
 }
 
 async function verifyToolPicker(page, client, until) {

@@ -39,6 +39,7 @@ import type { DownloadedFile } from '../transport/attachment.ts';
 import { observeTimelineRequests } from '../transport/timeline-observer.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
+import { createGroupNameLookup } from './group-names.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
 import type { PrefsStore } from '../model/prefs-store.ts';
 import type { SendFileRuntime } from '../media/send-file-tool.ts';
@@ -63,6 +64,7 @@ export interface GatewayRuntime extends SendFileRuntime {
   readonly manager: SessionManager;
   readonly state: WorkbenchRobot['state'];
   readonly manual: ManualQqSender;
+  refreshGroupName(openId: string): Promise<void> | undefined;
   deactivate(): void;
 }
 
@@ -125,6 +127,7 @@ export function bootstrapGateway(
     logger,
   } as ConstructorParameters<typeof QQBot>[0]);
   const sendPairingReply = guardConversationPosts(bot, baseUrl, userAgent, allowTarget);
+  const groupName = history?.names && createGroupNameLookup(bot.api, config.appId, history.names, allowTarget);
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
   // ── 中间件链 ──
@@ -160,6 +163,7 @@ export function bootstrapGateway(
           }
         }
       }
+      if (message.kind === 'group') void groupName?.(peer);
     }
     await history.initialize?.(replyTarget);
     if (!canRecord(replyTarget)) return;
@@ -366,6 +370,7 @@ export function bootstrapGateway(
     manual,
     bot: mediaSender, manager, config, targets: turnTracker, active: isActive, allowTarget, mediaRoot,
     get state() { return state; },
+    refreshGroupName: openId => state === 'connected' ? groupName?.(openId, true) : undefined,
     deactivate,
   };
 }

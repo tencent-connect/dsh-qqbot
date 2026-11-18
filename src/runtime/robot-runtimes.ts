@@ -223,7 +223,8 @@ export class RobotRuntimes {
   conversationAccount(appId: string) {
     const record = this.records().find(item => item.appId === appId);
     if (!record) return undefined;
-    const manager = this.slots.get(appId)?.runtime?.manager;
+    const runtime = this.slots.get(appId)?.runtime;
+    const manager = runtime?.manager;
     const members = this.accountAccess(record).store;
     const profiles = members.memberProfiles();
     const config = this.configFor(appId);
@@ -239,6 +240,7 @@ export class RobotRuntimes {
           ?? (existing ? this.legacySettings(config, key) : this.defaults(appId).settings);
       },
       validateAgent: (next: WorkbenchAgentSettings, current: WorkbenchAgentSettings) => validateAgentSettings(this.ctx, config, next, current),
+      refreshGroupName: (openId: string) => runtime?.refreshGroupName(openId),
       peerName: (scope: ChatScope, openId: string) => {
         const legacy = members?.peerName(scope, openId);
         if (legacy?.alias) return legacy.alias;

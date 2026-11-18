@@ -9,7 +9,7 @@ import { PrefsStore } from '../model/prefs-store.ts';
 import { WORKBENCH_CONVERSATIONS_PATH, type WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { ConversationSettingsStore, peerKey, registerWorkbenchConversations, registerWorkbenchSend, workbenchTimelineService } from './workbench-conversations.ts';
 import { legacyAgentSettings } from './workbench-agent-settings.ts';
-import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
+import { ConfigSchema, type AccessControlConfig, type ImQQBotConfig } from '../config.ts';
 import { ManualQqSender, ManualSendConflict } from '../transport/manual-send.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
 import type { ReplyTarget } from '../types.ts';
@@ -92,13 +92,17 @@ it('keeps legacy recording states and applies seven days to newly recorded peers
 });
 
 async function fixture(withPersistence = true, hooks?: {
-  validateAgent: () => Promise<void>;
-  sessionChangePending: () => boolean;
+  validateAgent?: () => Promise<void>;
+  sessionChangePending?: () => boolean;
+  peerName?: (appId: string, openId: string) => string;
+  refreshGroupName?: (appId: string, openId: string) => Promise<void>;
 }) {
   const prefs = new PrefsStore(undefined, { path: join(dir, 'prefs.json') });
   const settingsPath = join(dir, 'settings.json');
   const conversationSettings = new ConversationSettingsStore(settingsPath);
-  const access = { c2cMode: 'allowlist' as const, c2cAllow: ['same'], groupMode: 'disabled' as const, groupAllow: [] };
+  const access: Pick<AccessControlConfig, 'c2cMode' | 'c2cAllow' | 'groupMode' | 'groupAllow'> = {
+    c2cMode: 'allowlist', c2cAllow: ['same'], groupMode: 'disabled', groupAllow: [],
+  };
   const agent = legacyAgentSettings(ConfigSchema({} as ImQQBotConfig));
   const mediaRoot = (appId: string) => join(dir, 'media', appId);
   const stat = vi.fn(async (id: string) => !['old-a', 'group-a', 'current-b'].includes(id) ? undefined : ({
@@ -118,8 +122,9 @@ async function fixture(withPersistence = true, hooks?: {
   const plugin = ctx.plugin(scope => registerWorkbenchConversations(scope, {
     prefs, conversationSettings, timeline,
     conversationAccount: id => ['A', 'B'].includes(id) ? {
-      access, liveSessionId: () => undefined, peerName: () => '', mediaRoot: mediaRoot(id),
-      ...(hooks ? { ...hooks, agentSettings: (scope, openId, existing) =>
+      access, liveSessionId: () => undefined, peerName: (_scope, openId) => hooks?.peerName?.(id, openId) ?? '', mediaRoot: mediaRoot(id),
+      refreshGroupName: async openId => { await hooks?.refreshGroupName?.(id, openId); },
+      ...(hooks ? { validateAgent: hooks.validateAgent, sessionChangePending: hooks.sessionChangePending, agentSettings: (scope, openId, existing) =>
         conversationSettings.get(peerKey(id, scope, openId)).agent
         ?? (!existing ? conversationSettings.template(id)?.settings : undefined) ?? agent } : {}),
     } : undefined,
@@ -139,6 +144,30 @@ async function fixture(withPersistence = true, hooks?: {
     close: async () => { await plugin.dispose(); await host.dispose(); },
   };
 }
+
+it('refreshes the selected robot’s admitted group names on demand without changing settings or bindings', async () => {
+  const names = new Map([['A', '之前的群名'], ['B', '另一台的群名']]);
+  const refreshGroupName = vi.fn(async (appId: string) => { names.set(appId, '最新群名'); });
+  const f = await fixture(true, { refreshGroupName, peerName: appId => names.get(appId) ?? '' });
+  try {
+    f.access.groupMode = 'allowlist';
+    f.access.groupAllow = ['same'];
+    f.prefs.setSessionId(peerKey('A', 'group', 'same'), 'group-a');
+    f.prefs.setSessionId(peerKey('A', 'group', 'denied'), 'old-a');
+    const settings = f.conversationSettings.save(peerKey('A', 'group', 'same'), { revision: 0, alias: '手填备注' });
+    const list = async (query: string) => (await (await f.get(query)).json()).conversations as WorkbenchConversation[];
+    expect((await list('A&summary=1')).find(peer => peer.openId === 'same' && peer.scope === 'group')?.name).toBe('之前的群名');
+    expect(refreshGroupName).not.toHaveBeenCalled();
+    const refreshed = await list('A&summary=1&refreshGroupNames=1');
+    expect(refreshGroupName).toHaveBeenCalledExactlyOnceWith('A', 'same');
+    expect(refreshed.find(peer => peer.openId === 'same' && peer.scope === 'group')).toMatchObject({
+      name: '最新群名', alias: '手填备注', revision: settings.revision, currentSessionId: 'group-a',
+    });
+    expect((await list('B&summary=1')).find(peer => peer.scope === 'group')?.name).toBe('另一台的群名');
+  } finally {
+    await f.close();
+  }
+});
 
 it('projects only the selected robot and hides reserved Session IDs until the Host reports them', async () => {
   const f = await fixture();

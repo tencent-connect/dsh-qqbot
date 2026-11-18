@@ -67,6 +67,7 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [reload, setReload] = useState(0);
+  const refreshNamesFor = useRef<string | undefined>(undefined);
   const [loadError, setLoadError] = useState('');
   const [openError, setOpenError] = useState('');
   const [restoring, setRestoring] = useState<string>();
@@ -114,6 +115,8 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
       const current = (): boolean => !controller.signal.aborted && !mutation.current && started === generation.current;
       try {
         const params = new URLSearchParams({ appId, summary: '1' });
+        if (refreshNamesFor.current === appId) params.set('refreshGroupNames', '1');
+        refreshNamesFor.current = undefined;
         const response = await fetchJson<{ conversations: WorkbenchConversation[] }>(`${WORKBENCH_CONVERSATIONS_PATH}?${params}`, {
           cache: 'no-store', signal: controller.signal,
         });
@@ -338,7 +341,10 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
         h('h2', null, t("QQ 会话")),
         h(Button, {
           type: 'button', variant: 'ghost', size: 'sm', className: 'imqw-icon-action',
-          'aria-label': t("刷新会话列表"), title: t("刷新会话列表"), onClick: () => setReload(value => value + 1),
+          'aria-label': t("刷新会话列表"), title: t("刷新会话列表"), onClick: () => {
+            refreshNamesFor.current = appId;
+            setReload(value => value + 1);
+          },
         }, h(IconRefreshOutlineRegular, { size: 14 }))),
       h('p', { className: 'imqw-muted imqw-tree-caption' }, accountName(robot)),
       h(Input, {

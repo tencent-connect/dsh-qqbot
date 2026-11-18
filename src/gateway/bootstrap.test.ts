@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
-import { MediaFileType, QQBot, runMiddlewareChain, type InteractionEvent, type MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { ApiError, MediaFileType, QQBot, runMiddlewareChain, type InteractionEvent, type MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { createServer, type RequestListener } from 'node:http';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -100,6 +100,7 @@ it('learns names for the same private OpenID from admitted group events even whe
     timeline: new QqTimeline(join(dir, 'timeline'), logger),
     recording: () => false,
   }));
+  const lookup = vi.spyOn(f.bot.api, 'get').mockResolvedValue({ group_openid: 'room', group_name: 'QQ 群名' });
   const send = async (id: string, openId: string, senderName?: string, groupOpenid?: string,
     mentions?: MiddlewareContext['message']['mentions']) => {
     const timestamp = new Date().toISOString();
@@ -139,10 +140,11 @@ it('learns names for the same private OpenID from admitted group events even whe
     await send('blocked-mentions', 'allowed', undefined, 'other-room', [
       { id: 'not-admitted', is_you: true },
     ]);
+    expect(lookup.mock.calls.map(([path]) => path)).toEqual(['/v2/groups/room/info']);
     const names = new QqDisplayNames(join(sandbox.dir!, 'names.json'), { info() {}, warn() {}, error() {}, debug() {} });
     expect(names.peer('gateway-test', 'c2c', 'allowed')).toBe('小明');
     expect(names.peer('gateway-test', 'c2c', 'direct-name')).toBe('私聊昵称');
-    expect(names.peer('gateway-test', 'group', 'room')).toBeUndefined();
+    expect(names.peer('gateway-test', 'group', 'room')).toBe('QQ 群名');
     expect(names.peer('gateway-test', 'c2c', 'prefix-allowed')).toBeUndefined();
     expect(names.peer('gateway-test', 'c2c', 'blocked')).toBeUndefined();
     expect(names.peer('another-bot', 'c2c', 'allowed')).toBeUndefined();
@@ -151,6 +153,49 @@ it('learns names for the same private OpenID from admitted group events even whe
     expect(names.botMention('gateway-test', 'other-room', 'group-bot-id')).toBeUndefined();
     expect(names.botMention('gateway-test', 'other-room', 'not-admitted')).toBeUndefined();
     expect(names.peer('gateway-test', 'c2c', 'mentioned-person')).toBe('成员昵称');
+  } finally {
+    await f.unload();
+  }
+});
+
+it('keeps the last verified group name after a mismatched response, pause, or missing QQ permission', async () => {
+  let paused = false;
+  const f = await gateway({ groupMode: 'allowlist', groupAllow: ['room', 'another-room'] },
+    () => !paused, (dir, logger) => ({
+      names: new QqDisplayNames(join(dir, 'names.json'), logger),
+      timeline: new QqTimeline(join(dir, 'timeline'), logger),
+      recording: () => false,
+    }));
+  const lookup = vi.spyOn(f.bot.api, 'get');
+  const name = () => new QqDisplayNames(join(sandbox.dir!, 'names.json'), {
+    info() {}, warn() {}, error() {}, debug() {},
+  }).peer('gateway-test', 'group', 'room');
+  try {
+    f.ready({});
+    lookup.mockResolvedValueOnce({ group_openid: 'room', group_name: '原群名' });
+    await f.runtime.refreshGroupName('room');
+    expect(name()).toBe('原群名');
+
+    lookup.mockResolvedValueOnce({ group_openid: 'another-room', group_name: '别的群' });
+    await f.runtime.refreshGroupName('room');
+    expect(name()).toBe('原群名');
+
+    const response = Promise.withResolvers<unknown>();
+    lookup.mockImplementationOnce(() => response.promise);
+    const refresh = f.runtime.refreshGroupName('room');
+    const duplicate = f.runtime.refreshGroupName('room');
+    expect(lookup).toHaveBeenCalledTimes(3);
+    paused = true;
+    response.resolve({ group_openid: 'room', group_name: '权限变化后的群名' });
+    await Promise.all([refresh, duplicate]);
+    expect(name()).toBe('原群名');
+    paused = false;
+
+    lookup.mockRejectedValueOnce(new ApiError('permission denied', 403, '/v2/groups/room/info', 11253));
+    await f.runtime.refreshGroupName('room');
+    await f.runtime.refreshGroupName('another-room');
+    expect(lookup).toHaveBeenCalledTimes(4);
+    expect(name()).toBe('原群名');
   } finally {
     await f.unload();
   }

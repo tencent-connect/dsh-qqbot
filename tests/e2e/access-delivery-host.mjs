@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   assertNodeVersion, availablePort, buildHostEnvironment, dummyQQConfig,
-  runLogged, spawnLogged, waitForHost, writePrivateJson,
+  readSessionEvents, runLogged, spawnLogged, waitForHost, writePrivateJson,
 } from './host.mjs';
 import { createFixtureCommands, DUMMY_APP_ID } from './command-protocol.mjs';
 import { verifyGroupQueue } from './group-queue.mjs';
@@ -26,6 +26,8 @@ const commands = [
   ['bot-ping', 'ping', /pong/i],
 ];
 const ordinaryAnswer = 'QQ_ORDINARY_REPLY';
+const modelDenied = 'fixture model authentication rejected';
+const switchModelNotice = '⚠️ 当前模型不可用，请切换模型后重试。';
 const primary = { provider: 'access-delivery-fixture', model: 'primary' };
 const secondary = { provider: primary.provider, model: 'secondary' };
 
@@ -98,11 +100,17 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
   const smoke = createFixtureCommands().smoke;
   let qq, registry, host, round;
   let modelReply;
+  let denyModel = false;
   const model = createServer(async (request, response) => {
     try {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks));
+      if (denyModel) {
+        response.writeHead(401, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: { type: 'invalid_request_error', code: 'invalid_api_key', message: modelDenied } }));
+        return;
+      }
       const userText = JSON.stringify(body.messages.findLast(message => message.role === 'user')?.content ?? '');
       const current = round;
       let answer = ordinaryAnswer;
@@ -210,6 +218,19 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       return round;
     };
     const sessions = await verifyCommands({ client, hostReady, qq, exchange, report, until });
+    const beforeModelFailure = qq.state.observedOutboundRequests;
+    denyModel = true;
+    for (const [scope, sessionId] of Object.entries(sessions)) {
+      await exchange({ scope, identity: 'allowed', command: 'smoke' }, switchModelNotice, 'unavailable model');
+      const failure = await until(async () => (await readSessionEvents(client, sessionId)).findLast(event =>
+        event.type === 'turn/end' && event.data.reason?.kind === 'error' && event.data.reason.error?.code === 'AUTH'
+      ), 'original DSH provider error');
+      assert(failure.data.reason.error.message.includes(modelDenied));
+    }
+    denyModel = false;
+    assert.deepEqual((await outboundSince(beforeModelFailure)).filter(row => row.messageType !== 6).map(row => row.content),
+      [switchModelNotice, switchModelNotice]);
+    report.unavailableModel = { group: true, c2c: true, nativeError: true };
     const queue = await verifyGroupQueue({ client, sessionId: sessions.group, groupId, until, inject, newModelRound, outboundSince, qq });
     await queue.verifyOutbound();
     report.queue = queue.cases;
