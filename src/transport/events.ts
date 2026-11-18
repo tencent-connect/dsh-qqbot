@@ -5,6 +5,7 @@
  *   { type: string, data: Record<string, unknown> }
  * 这里把可识别的事件解析为 discriminated union，未知类型或字段缺失返回 undefined。
  */
+import { isFailedToolResult, type ToolResultData } from './tool-presenter.ts';
 
 /** 原始 dsh 事件（弱类型，来自 ctx.on('session/event')） */
 export interface RawSessionEvent {
@@ -104,10 +105,10 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'tool/result': {
-      const data = raw.data as { message?: { source?: { callId?: string }; isError?: boolean }; error?: unknown };
+      const data = raw.data as ToolResultData & { message?: { source?: { callId?: string } } };
       const callId = data.message?.source?.callId;
       if (!callId) return undefined;
-      return { type: 'tool/result', callId, failed: data.error !== undefined || data.message?.isError === true, raw: raw.data };
+      return { type: 'tool/result', callId, failed: isFailedToolResult(data), raw: raw.data };
     }
 
     case 'turn/end': {

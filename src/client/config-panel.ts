@@ -1,13 +1,14 @@
 import { t } from './qq-locale.ts';
 import { createElement, Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT, BIND_METHODS, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import { RpcError, rpcCall } from './rpc.ts';
 import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot, type WorkbenchRobotsResponse } from '../shared/workbench-protocol.ts';
 
 import { fetchJson, HttpError } from './http.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
 import { SlashCommandList } from './slash-command-list.ts';
-import { COMMANDS_PATH, type SlashCommandDescriptor } from '../shared/command-protocol.ts';
+import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
 
 /** 样式注入标记（幂等） */
@@ -115,7 +116,9 @@ export function AccessSettings({
   useEffect(() => {
     const controller = new AbortController();
     if (!bound || !enabled) return;
-    void fetchJson<{ commands: SlashCommandDescriptor[] }>(appId === undefined ? COMMANDS_PATH : `${COMMANDS_PATH}?appId=${encodeURIComponent(appId)}`, { signal: controller.signal })
+    void rpcCall<{ commands: SlashCommandDescriptor[] }>(
+      ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.commands, { appId }, undefined, controller.signal,
+    )
       .then(result => { if (!controller.signal.aborted) { setCommands(result.commands); setCommandsError(null); } })
       .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();
@@ -208,8 +211,9 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const { config } = await fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH,
-        { cache: 'no-store', signal }, Math.min(1000, remaining));
+      const { config } = await rpcCall<{ config: ConfigWire }>(
+        BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, Math.min(1000, remaining), signal,
+      );
       if (matchesSavedConfig(config, expected)) return config;
     } catch (_error) {
       // The route may disappear while the saved plugin is reloading.
@@ -263,7 +267,7 @@ export function PrimaryAccountSettings({
     let stopped = false;
     setLoading(true);
     setLoadError(null);
-    void fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH, { cache: 'no-store', signal: controller.signal })
+    void rpcCall<{ config: ConfigWire }>(BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, undefined, controller.signal)
       .then(async ({ config }) => {
         const { robots } = await fetchJson<WorkbenchRobotsResponse>(WORKBENCH_ROBOTS_PATH, { cache: 'no-store', signal: controller.signal });
         const robot = robots.find(robot => robot.appId === appId && robot.primary);
@@ -335,14 +339,11 @@ export function PrimaryAccountSettings({
         setResult({ kind: 'confirmed', message: t("配置已保存。") });
         return;
       }
-      const body = await fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({
-          ...changed,
-          expectedAppId: appId,
-          ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }),
-        }),
-      });
+      const body = await rpcCall<{ ok: boolean; error?: string }>(BIND_RPC_ENDPOINT, BIND_METHODS.configSet, {
+        ...changed,
+        expectedAppId: appId,
+        ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }),
+      }, undefined, controller.signal);
       if (!body.ok) throw new Error(body.error ?? t("保存失败，请重试。"));
       // The write is confirmed. A read from the old fiber during HMR must not undo it.
       if (!mounted.current || controller.signal.aborted) return;
@@ -363,7 +364,9 @@ export function PrimaryAccountSettings({
     })()
       .catch((error: unknown) => {
         if (!mounted.current || controller.signal.aborted) return;
-        const detail = error instanceof HttpError && error.status === 409
+        const conflict = (error instanceof HttpError && error.status === 409)
+          || (error instanceof RpcError && (error.code === RPC_ERROR_CODES.configConflict || error.code === RPC_ERROR_CODES.accountChanged));
+        const detail = conflict
           ? t("{0}草稿已保留，请先刷新配置。", error.message)
           : t("保存结果未确认：{0}。草稿已保留，可重试或刷新配置核对。", error instanceof Error ? error.message : String(error));
         setResult({ kind: 'failed', message: aliasSaved ? t("机器人名称已保存。{0}", detail) : detail });

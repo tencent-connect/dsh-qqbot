@@ -14,7 +14,8 @@ import { stageHistoryPackage } from './history-registry.mjs';
 import { verifyWebAnswers } from './web-timed-answer.mjs';
 
 const appQuery = '?appId=' + DUMMY_APP_ID;
-const qqApi = '/qqbot/im-qqbot/';
+const bind = 'dsh-qqbot/bind';
+const account = 'dsh-qqbot/account';
 const workbench = '/api/qqbot/workbench/';
 const groupId = 'local-fixture-allowed-group';
 const userId = identity => 'local-fixture-' + identity + '-user';
@@ -32,7 +33,7 @@ const primary = { provider: 'access-delivery-fixture', model: 'primary' };
 const secondary = { provider: primary.provider, model: 'secondary' };
 
 async function verifyCommands({ client, hostReady, qq, exchange, report, until }) {
-  const { owners } = await client.post(qqApi + 'pair/manual' + appQuery, { purpose: 'owner', openid: userId('allowed') });
+  const { owners } = await client.pluginRpc(account, 'pair.manual', { appId: DUMMY_APP_ID, purpose: 'owner', openid: userId('allowed') });
   assert.deepEqual(owners.map(owner => owner.openid), [userId('allowed')]);
   const bindings = async () => {
     const { conversations } = await client.get(workbench + 'conversations' + appQuery);
@@ -42,10 +43,10 @@ async function verifyCommands({ client, hostReady, qq, exchange, report, until }
 
   let initialBindings;
   for (const [mode, catalogScope] of modes) {
-    const { config } = await client.get(qqApi + 'config');
+    const { config } = await client.pluginRpc(bind, 'config.get');
     if (config.access.commandMode !== mode) {
       const readyCount = qq.state.readyCount;
-      await client.post(qqApi + 'config', { accessRevision: config.accessRevision, expectedAppId: DUMMY_APP_ID,
+      await client.pluginRpc(bind, 'config.set', { accessRevision: config.accessRevision, expectedAppId: DUMMY_APP_ID,
         access: { ...config.access, commandMode: mode } });
       await until(() => qq.state.readyCount > readyCount, 'reconnect with command mode ' + mode, 30_000);
       await hostReady();
@@ -57,7 +58,7 @@ async function verifyCommands({ client, hostReady, qq, exchange, report, until }
     assert.deepEqual(bot.access.c2cAllow, identities.map(userId));
     assert.equal(bot.access.groupMode, 'allowlist');
     assert.deepEqual(bot.access.groupAllow, [groupId]);
-    const catalog = await client.get(qqApi + 'conversations' + appQuery);
+    const catalog = await client.pluginRpc(account, 'commands.list', { appId: DUMMY_APP_ID });
     for (const [name] of commands) {
       assert.equal(catalog.commands.find(command => command.name === name)?.scope, catalogScope, mode + ' /' + name);
     }
@@ -78,7 +79,7 @@ async function verifyCommands({ client, hostReady, qq, exchange, report, until }
     initialBindings ??= current;
     assert.deepEqual(current, initialBindings, 'Changing slash mode must preserve QQ Session bindings.');
   }
-  const pairing = await client.get(qqApi + 'pair/status' + appQuery);
+  const pairing = await client.pluginRpc(account, 'pair.status', { appId: DUMMY_APP_ID });
   assert.deepEqual(pairing.owners.map(owner => owner.openid), [userId('allowed')]);
   assert.deepEqual(Object.keys(initialBindings).sort(), [...identities.map(identity => 'c2c:' + userId(identity)), 'group:' + groupId]);
   assert.equal(new Set(Object.values(initialBindings)).size, 3, 'Expected two private Sessions and one shared group Session.');
@@ -240,12 +241,12 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
     const webTest = { client, sessions, setModelReply, until, outboundSince, qq };
     report.timedWebAnswers = { on: await verifyWebAnswers({ ...webTest, expectPush: true }) };
     const previousReady = qq.state.readyCount;
-    qqConfig.access = (await client.get(qqApi + 'config')).config.access;
+    qqConfig.access = (await client.pluginRpc(bind, 'config.get')).config.access;
     qqConfig.proactiveDelivery.externalTurns = 'off';
     await savePatch();
     await until(() => qq.state.readyCount > previousReady, 'QQ reconnects with Web push disabled', 30_000);
     await hostReady();
-    assert.equal((await client.get(qqApi + 'config')).config.proactiveDelivery.externalTurns, 'off');
+    assert.equal((await client.pluginRpc(bind, 'config.get')).config.proactiveDelivery.externalTurns, 'off');
     const offStart = qq.state.observedOutboundRequests;
     report.timedWebAnswers.off = await verifyWebAnswers({ ...webTest, expectPush: false });
     for (const scope of Object.keys(sessions)) {

@@ -5,6 +5,7 @@ import { Button, IconChevronLeftOutlineRegular, SegmentedControl, Switch } from 
 import { QQ_BOT_LOGO_PATH, installPanelStyles } from './bind-page.ts';
 import { QQWorkbench } from './workbench.ts';
 import { WorkbenchState } from './workbench-state.ts';
+import { setClientConnection } from './rpc.ts';
 import { WorkbenchExtensions } from './workbench-extensions.ts';
 import { QqAnswerAction } from './workbench-answer.ts';
 import type { AgentFormSource, SessionModelSource } from './workbench-agent-form.ts';
@@ -119,6 +120,10 @@ export function apply(ctx: Context): void {
     inject?: (deps: readonly string[], callback: (pageCtx: Context) => (() => void) | undefined) => unknown;
   }).inject;
   if (typeof ctxInject === 'function') {
+    void ctxInject.call(ctx, ['connection'], scope => {
+      setClientConnection(scope.get('connection'));
+      return () => setClientConnection(undefined);
+    });
     // Close the removed page when the host adopts a layout that still contains it.
     void ctxInject.call(ctx, ['sidebarRight'], scope => {
       const sidebar = scope.get('sidebarRight') as Partial<SavedSidebarTabs> | undefined;

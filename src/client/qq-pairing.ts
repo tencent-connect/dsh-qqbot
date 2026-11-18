@@ -9,17 +9,17 @@ import { createElement as h, useCallback, useEffect, useRef, useState, type Reac
 import { Button, DisclosureRow, Input, Modal, IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconCopyOutlineRegular, IconDownloadOutlineRegular, IconPlusOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import { usePairingStyles } from './qq-pairing-styles.ts';
 import { downloadWhitelist, whitelistEntries } from './whitelist-export.ts';
-import { fetchJson } from './http.ts';
+import { rpcCall } from './rpc.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { mergePairResults } from './pairing-results.ts';
 import {
-  PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH,
   type ClaimedMember, type ManualPairResult, type PairChallenge, type PairClaimResult, type PairPurpose, type PairStatusWire,
 } from '../shared/pairing-protocol.ts';
 
 /** 配对状态轮询间隔（进行中的码需要实时反映"已认领"）。 */
 const POLL_MS = 2000;
 
-function usePairStatus(active: boolean, path: string) {
+function usePairStatus(active: boolean, appId?: string) {
   const [status, setStatus] = useState<PairStatusWire | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
@@ -32,11 +32,11 @@ function usePairStatus(active: boolean, path: string) {
   };
   useEffect(() => {
     if (!active) return;
-    let stopped = false;
+    const controller = new AbortController();
     const load = (): void => {
       const request = ++sequence.current;
-      const current = () => !stopped && request === sequence.current;
-      void fetchJson<PairStatusWire>(path, { cache: 'no-store' }).then((snapshot) => {
+      const current = () => !controller.signal.aborted && request === sequence.current;
+      void rpcCall<PairStatusWire>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairStatus, { appId }, undefined, controller.signal).then((snapshot) => {
         if (!current()) return;
         setStatus(snapshot);
         setError(null);
@@ -47,8 +47,8 @@ function usePairStatus(active: boolean, path: string) {
     };
     load();
     const timer = setInterval(load, POLL_MS);
-    return () => { stopped = true; clearInterval(timer); };
-  }, [active, path, tick]);
+    return () => { controller.abort(); clearInterval(timer); };
+  }, [active, appId, tick]);
   return { status, error, reload, applyStatus };
 }
 
@@ -57,8 +57,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   purpose: PairPurpose; title: string; description?: string; hint?: string; enabled?: boolean; canPair?: boolean; appId?: string; onChange?: () => void;
 }): ReactNode {
   usePairingStyles();
-  const endpoint = (path: string) => appId === undefined ? path : `${path}?appId=${encodeURIComponent(appId)}`;
-  const { status, error, reload, applyStatus } = usePairStatus(enabled, endpoint(PAIR_STATUS_PATH));
+  const { status, error, reload, applyStatus } = usePairStatus(enabled, appId);
   const members: ClaimedMember[] = status === null ? [] : purpose === 'owner' ? status.owners : purpose === 'allow-group' ? status.allowGroup : status.allowC2c;
   const [code, setCode] = useState<{ code: string; expiresAt: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,7 +110,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const issue = (): void => {
     if (busy || !canPair) return;
     setBusy(true); setMsg(null);
-    void fetchJson<PairChallenge & { previousClaims: PairClaimResult[] }>(endpoint(PAIR_ISSUE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, previousCode: code?.code }) })
+    void rpcCall<PairChallenge & { previousClaims: PairClaimResult[] }>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairIssue, { appId, purpose, previousCode: code?.code })
       .then((r) => {
         setResults(previous => mergePairResults(previous, r.previousClaims));
         setCode({ code: r.code, expiresAt: r.expiresAt }); setCodeEnded(false); codeSeen.current = false;
@@ -123,7 +122,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const revoke = (openid: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson<PairStatusWire>(endpoint(PAIR_REVOKE_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid }) })
+    void rpcCall<PairStatusWire>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairRevoke, { appId, purpose, openid })
       .then((snapshot) => {
         applyStatus(snapshot);
         setMsg(t("已从{0}移除。", title));
@@ -136,7 +135,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const saveRename = (openid: string, nickname: string): void => {
     if (busy) return;
     setBusy(true); setMsg(null);
-    void fetchJson<PairStatusWire>(endpoint(PAIR_RENAME_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ openid, nickname }) })
+    void rpcCall<PairStatusWire>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairRename, { appId, openid, nickname })
       .then((snapshot) => {
         applyStatus(snapshot);
         setEditing(null);
@@ -149,7 +148,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
   const addManual = (): void => {
     if (busy || !manualOpenid.trim()) return;
     setBusy(true); setMsg(null);
-    void fetchJson<ManualPairResult & PairStatusWire>(endpoint(PAIR_MANUAL_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, openid: manualOpenid }) })
+    void rpcCall<ManualPairResult & PairStatusWire>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairManual, { appId, purpose, openid: manualOpenid })
       .then((r) => {
         applyStatus(r);
         setManualOpenid(r.errors.map(error => error.input).join('\n'));
@@ -166,7 +165,7 @@ export function PairClaimPanel({ purpose, title, description, hint, enabled = tr
     if (busy) return;
     if (code === null) { setAddOpen(false); return; }
     setBusy(true); setMsg(null);
-    void fetchJson(endpoint(PAIR_END_PATH), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ purpose, code: code.code }) })
+    void rpcCall(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.pairEnd, { appId, purpose, code: code.code })
       .then(() => { setAddOpen(false); setCode(null); codeSeen.current = false; reload(); onChange?.(); })
       .catch((error: unknown) => setMsg(error instanceof Error ? error.message : t("结束配对失败，请重试")))
       .finally(() => setBusy(false));

@@ -3,10 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
-import { createServer } from 'node:http';
-import { once } from 'node:events';
-import type { WebRoute } from '../setup/bind-routes.ts';
-import { PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH } from '../shared/pairing-protocol.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
+import type { PairStatusWire, PairChallenge } from '../shared/pairing-protocol.ts';
+import type { RpcResult } from '../rpc-carrier.ts';
 import { expect, it, vi } from 'vitest';
 import { ConfigSchema, type AccessControlConfig, type ImQQBotConfig } from '../config.ts';
 import type { DshAgentRegistry } from '../session/index.ts';
@@ -229,36 +228,39 @@ it('shares the upstream whitelist handlers by AppID across enable, revoke and re
   const agents = { get: vi.fn() } as unknown as DshAgentRegistry;
   const start = vi.spyOn(QQBot.prototype, 'start').mockResolvedValue(undefined);
   const ctx = new Context();
-  const routes = new Map<string, WebRoute>();
+  const routes = new Map<string, (request: Request) => Promise<Response>>();
   const host = ctx.plugin(scope => {
-    scope.provide('webServer', { register(route: WebRoute) {
-      routes.set(route.path, route);
-      return () => { routes.delete(route.path); };
-    } });
+    scope.provide('connection', { fetch: { register(route: { path: string; fetch: (request: Request) => Promise<Response> }) {
+      routes.set(route.path, route.fetch);
+      return async () => { routes.delete(route.path); };
+    } } });
   });
   await host.await();
   let runtime!: RobotRuntimes;
   const plugin = ctx.plugin(scope => { runtime = new RobotRuntimes(scope, agents, logger, store); });
   await plugin.await();
-  const server = createServer((req, res) => {
-    const route = routes.get(new URL(req.url ?? '/', 'http://localhost').pathname);
-    if (route) void route.handler(req, res);
-    else res.writeHead(404).end();
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('Expected a TCP address');
-  const req = (path: string, appId: string, body?: unknown) =>
-    fetch(`http://127.0.0.1:${address.port}${path}?appId=${appId}`, body === undefined ? {} : {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
+  const path = '/api/' + ACCOUNT_RPC_ENDPOINT;
+  const req = async (method: string, appId: string, payload: Record<string, unknown> = {}): Promise<RpcResult> => {
+    const response = await routes.get(path)!(new Request('http://localhost' + path, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request', rpcId: 'test', method: ACCOUNT_RPC_ENDPOINT, payload: { method, payload: { appId, ...payload } },
+      }),
+    }));
+    return (await response.json()).result as RpcResult;
+  };
+  const readStatus = async (appId: string): Promise<PairStatusWire> => {
+    const result = await req(ACCOUNT_METHODS.pairStatus, appId);
+    if (!result.ok) throw new Error(result.error.message);
+    return result.value as PairStatusWire;
+  };
   const create = (appId: string) => runtime.save({
     appId, appSecret: 'fixture-secret', revision: null,
     access: { c2cMode: 'allowlist', groupMode: 'allowlist', commandMode: 'allowlist' },
   });
   const read = (appId: string) => runtime.list().find(robot => robot.appId === appId)!;
   try {
+    await vi.waitFor(() => expect(routes.has(path)).toBe(true));
     await create('robot-a');
     await create('robot-b');
     const membership = [
@@ -267,33 +269,31 @@ it('shares the upstream whitelist handlers by AppID across enable, revoke and re
       ['owner', 'owners', 'owner-aaaa:命令用户'],
     ] as const;
     for (const [purpose, field, openid] of membership) {
-      expect((await req(PAIR_MANUAL_PATH, 'robot-a', { purpose, openid })).status).toBe(200);
-      expect((await (await req(PAIR_STATUS_PATH, 'robot-a')).json())[field]).toHaveLength(1);
-      expect((await (await req(PAIR_STATUS_PATH, 'robot-b')).json())[field]).toHaveLength(0);
+      expect(await req(ACCOUNT_METHODS.pairManual, 'robot-a', { purpose, openid })).toMatchObject({ ok: true });
+      expect((await readStatus('robot-a'))[field]).toHaveLength(1);
+      expect((await readStatus('robot-b'))[field]).toHaveLength(0);
     }
-    expect((await req(PAIR_STATUS_PATH, 'absent')).status).toBe(404);
+    expect(await req(ACCOUNT_METHODS.pairStatus, 'absent')).toMatchObject({ ok: false, error: { code: 'account/not-found' } });
     const stale = read('robot-a').revision;
-    const issued = await req(PAIR_ISSUE_PATH, 'robot-a', { purpose: 'allow-c2c' });
-    expect(issued.status).toBe(200);
-    const { code } = await issued.json();
-    expect((await req(PAIR_REVOKE_PATH, 'robot-a', { purpose: 'allow-c2c', openid: 'contact-aa' })).status).toBe(200);
+    const issued = await req(ACCOUNT_METHODS.pairIssue, 'robot-a', { purpose: 'allow-c2c' });
+    if (!issued.ok) throw new Error(issued.error.message);
+    const { code } = issued.value as PairChallenge;
+    expect(await req(ACCOUNT_METHODS.pairRevoke, 'robot-a', { purpose: 'allow-c2c', openid: 'contact-aa' })).toMatchObject({ ok: true });
     await expect(runtime.save({ appId: 'robot-a', revision: stale, access: { c2cMode: 'open' } })).rejects.toThrow('配置已更新');
     await runtime.save({ appId: 'robot-a', revision: read('robot-a').revision, enabled: false });
-    expect((await req(PAIR_ISSUE_PATH, 'robot-a', { purpose: 'allow-c2c' })).status).toBe(409);
-    expect((await (await req(PAIR_STATUS_PATH, 'robot-a')).json()).challenges).toEqual([]);
-    expect((await req(PAIR_END_PATH, 'robot-a', { purpose: 'allow-c2c', code })).status).toBe(200);
+    expect(await req(ACCOUNT_METHODS.pairIssue, 'robot-a', { purpose: 'allow-c2c' })).toMatchObject({ ok: false, error: { code: 'pair/rejected' } });
+    expect((await readStatus('robot-a')).challenges).toEqual([]);
+    expect(await req(ACCOUNT_METHODS.pairEnd, 'robot-a', { purpose: 'allow-c2c', code })).toMatchObject({ ok: true });
     expect(read('robot-b').enabled).toBe(true);
     runtime.remove('robot-a', read('robot-a').revision, sandbox.dir);
-    expect((await req(PAIR_STATUS_PATH, 'robot-a')).status).toBe(404);
+    expect(await req(ACCOUNT_METHODS.pairStatus, 'robot-a')).toMatchObject({ ok: false, error: { code: 'account/not-found' } });
     await create('robot-a');
-    const restored = await (await req(PAIR_STATUS_PATH, 'robot-a')).json();
+    const restored = await readStatus('robot-a');
     expect(restored.allowC2c).toEqual([]);
     expect(restored.allowGroup).toMatchObject([{ openid: 'group-aaaa', nickname: '群聊' }]);
     expect(restored.owners).toMatchObject([{ openid: 'owner-aaaa', nickname: '命令用户' }]);
     expect(restored.challenges).toEqual([]);
   } finally {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await plugin.dispose();
     await host.dispose();
     start.mockRestore();

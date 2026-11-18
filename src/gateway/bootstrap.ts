@@ -275,7 +275,6 @@ export function bootstrapGateway(
   // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
   const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
-  questionChannel.install(ctx);
   const questionEvents = ctx as unknown as { on(
     event: 'user-questions/request',
     handler: (request: UserQuestionRequest, next: () => Promise<UserQuestionResult>) => Promise<UserQuestionResult>,

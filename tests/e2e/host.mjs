@@ -338,11 +338,20 @@ export async function hostClient(config) {
     if (!response.ok) throw new Error(`Host ${path.split('?')[0]} returned HTTP ${response.status}.`);
     return response.json();
   };
-  return { get: path => request(path), post: (path, data) => request(path, data), rpc: async (method, args = {}) => {
-    const value = await request('/api/' + method, { type: 'client-request', rpcId: crypto.randomUUID(), method, payload: { args } });
-    if (!value.result?.ok) throw new Error(`Host RPC ${method} failed.`);
+  const call = async (method, payload) => {
+    const rpcId = crypto.randomUUID();
+    const value = await request('/api/' + method, { type: 'client-request', rpcId, method, payload });
+    if (value.rpcId !== rpcId || !value.result?.ok) {
+      throw new Error('Host RPC ' + method + ' failed (' + (value.result?.error?.code ?? 'invalid-response') + ').');
+    }
     return value.result.value;
-  } };
+  };
+  return {
+    get: path => request(path),
+    post: (path, data) => request(path, data),
+    rpc: (endpoint, args = {}) => call(endpoint, { args }),
+    pluginRpc: (endpoint, method, payload = {}) => call(endpoint, { method, payload }),
+  };
 }
 
 export async function waitForHost(config, owned, { timeoutMs = 90_000, signal } = {}) {
@@ -353,7 +362,7 @@ export async function waitForHost(config, owned, { timeoutMs = 90_000, signal } 
     if (owned.settled) throw new Error(`Isolated Host exited before readiness; private log: ${config.hostLog}`);
     try {
       client ??= await hostClient(config);
-      const current = await client.get('/qqbot/im-qqbot/config');
+      const current = await client.pluginRpc('dsh-qqbot/bind', 'config.get');
       if (current.config?.appId !== '0000000000') throw new Error('NON_DUMMY_BINDING');
       const { robots } = await client.get('/api/qqbot/workbench/robots');
       if (robots.some(robot => robot.appId !== '0000000000')) throw new Error('NON_DUMMY_BINDING');

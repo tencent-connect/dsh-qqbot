@@ -18,12 +18,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### ⚠️ Behavior Changes
 
+- **In-app surfaces moved onto the host-authenticated channel**: the browser-writable endpoints (binding, config, pairing) no longer serve from self-registered bare routes — everything now mounts on the host `/api` shared channel, where source checks (DNS-rebinding / cross-site defense) and login authentication are enforced by the host and improve automatically with host upgrades. The settings and bind pages now expect a logged-in session (local deployments are unaffected).
+- **Bind from the QQ workbench**: open QQ Bot in the sidebar or Settings in the plugin details, then choose Add bot.
+- **Answer questions in QQ or DSH**: on hosts with question events, questions in QQ turns accept the first answer from QQ or DSH.
 - **Slash commands open by default**: `/preset`, `/model`, and other admin commands were previously limited to allowlisted users; with `access.commandMode` they are open to everyone by default — set it to `allowlist` and configure the command roster to keep them restricted.
 - **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
 
 ### Fixed
 
+- **Fixed the bind page 404 (boot failure)**: in some environments the previous release failed to register the panel routes, leaving the bind page a permanent 404; the root cause was an illegal host-service access and is fixed.
+- **Question channel survives hot reloads**: the question listener follows the robot plugin's lifecycle. Reloading it cancels its pending questions.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
+
+### Internal (developer-facing)
+
+- Added an end-to-end regression on the real host package (`@deepseek-ai/dsh-client-connection` 0.2.2-rc.3): envelope protocol, 404 semantics, owner gating, and fiber-unload deregistration.
 
 ## [0.5.5] - 2026-10-30
 

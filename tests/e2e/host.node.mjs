@@ -136,14 +136,20 @@ test('startup authentication keeps cookies across a local redirect before valida
     authenticatedRequests += 1;
     if (request.url === '/') { response.writeHead(200); response.end('Authenticated'); return; }
     response.setHeader('content-type', 'application/json');
-    if (request.url === '/qqbot/im-qqbot/config') response.end(JSON.stringify({ config: { appId: '0000000000' } }));
+    if (request.url === '/api/dsh-qqbot/bind') {
+      let body = ''; for await (const chunk of request) body += chunk;
+      const envelope = JSON.parse(body);
+      assert.equal(envelope.method, 'dsh-qqbot/bind');
+      assert.equal(envelope.payload.method, 'config.get');
+      response.end(JSON.stringify({ rpcId: envelope.rpcId, result: { ok: true, value: { config: { appId: '0000000000' } } } }));
+    }
     else if (request.url === '/api/qqbot/workbench/robots') {
       response.end(JSON.stringify({ robots: [{ appId: '0000000000', primary: true, state: 'connected' }] }));
     }
     else if (request.url === '/api/session/modelCatalog') {
       let body = ''; for await (const chunk of request) body += chunk;
       assert.equal(JSON.parse(body).method, 'session/modelCatalog');
-      response.end(JSON.stringify({ result: { ok: true, value: { default: config.primary,
+      response.end(JSON.stringify({ rpcId: JSON.parse(body).rpcId, result: { ok: true, value: { default: config.primary,
         groups: [{ id: 'p', models: [{ id: 'a' }, { id: 'b' }] }], failures: [] } } }));
     } else { response.writeHead(404); response.end('{}'); }
   });

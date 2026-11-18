@@ -2,31 +2,59 @@
  * 工具调用结果 → Markdown 格式化
  *
  * 适配 QQ 消息通道：优先用工具自定义的 presentResult 视图，
- * fallback 到 raw text。调用方只传入允许外发的成功结果。
+ * fallback 到结果文本。调用方只允许投递成功结果。
+ *
+ * 数据形态对齐 dsh 的 tool/result 事件（SessionEventMap['tool/result']）：
+ * message 是 ToolResultMessage，content 直接是 ContentBlock[]（如 { type: 'text', text }），
+ * 失败标记在 message.isError，工具私有呈现元数据在 data.meta。
  */
 
 /** dsh-tools 主机平面注册表（presentResult 能力） */
 export interface ToolsRegistryLike {
   get(name: string, scope?: unknown): {
-    presentResult?(args: unknown, result: unknown): unknown;
+    presentResult?(args: unknown, result: ToolResultInput): unknown;
   } | undefined;
 }
 
-/** 工具结果事件数据（tool/result） */
+/** 结果内容块（呈现需要的子集：文本块） */
+export interface ToolContentBlock {
+  type: string;
+  text?: string;
+  content?: ToolContentBlock[];
+  isError?: boolean;
+}
+
+/** presentResult 的入参（dsh-tools ToolResult 的结构化子集） */
+export interface ToolResultInput {
+  content: ToolContentBlock[];
+  isError: boolean;
+  meta?: unknown;
+}
+
+/** 工具结果事件数据（tool/result 的 data） */
 export interface ToolResultData {
-  message: {
-    content: Array<{ type: string; text?: string; content?: unknown; isError?: boolean }>;
+  message?: {
+    content?: ToolContentBlock[];
+    isError?: boolean;
   };
+  error?: unknown;
   meta?: unknown;
 }
 
 /** 工具结果结构化视图（dsh-tools ToolResultView 的结构化子集） */
 type ToolResultView =
-  | { card: 'generic'; title?: string; content?: ReadonlyArray<{ type: string; text?: string }> }
+  | { card: 'generic'; title?: string; content?: readonly ToolContentBlock[] }
   | { card: 'terminal'; title?: string; output?: string; exitCode?: number }
-  | { card: 'diff'; title?: string; diffs: ReadonlyArray<unknown> }
-  | { card: 'read'; title?: string; path?: string; content?: ReadonlyArray<{ type: string; text?: string }> };
+  | { card: 'diff'; title?: string; diffs: readonly unknown[] }
+  | {
+    card: 'read';
+    title?: string;
+    path?: string;
+    lines?: readonly { number: number; text: string }[];
+    content?: readonly ToolContentBlock[];
+  };
 
+/** 结果预览上限，避免单条消息刷屏 */
 const RESULT_PREVIEW_LIMIT = 1500;
 
 /**
@@ -41,26 +69,41 @@ export function formatToolResult(
   toolsRegistry: ToolsRegistryLike | undefined,
   agent: unknown,
 ): string | null {
-  // 尝试工具自定义视图（presentResult）
-  const view = presentResultView(name, rawArgs, data, toolsRegistry, agent);
-  if (view) {
+  if (isFailedToolResult(data)) return null;
+  const content = contentBlocks(data);
+
+  const view = presentResultView(name, rawArgs, content, data.meta, toolsRegistry, agent);
+  if (view !== undefined) {
     const rendered = renderView(name, view);
-    if (rendered) return rendered;
+    if (rendered !== null) return rendered;
   }
 
-  // fallback raw text
-  const block = data.message.content[0];
-  const result = block !== undefined && block.type === 'tool-result' ? textOf(block.content) : textOf(data.message.content);
-  if (!result) return null;
+  const result = textOf(content);
+  if (!result.trim()) return null;
 
   return `🔧 \`${name}\` 完成\n${truncate(result)}`;
+}
+
+/** 读取结果内容块（缺字段时按空处理，不让展示影响主流程） */
+function contentBlocks(data: ToolResultData): ToolContentBlock[] {
+  const content = data.message?.content;
+  if (!Array.isArray(content)) return [];
+  const first = content[0];
+  return first?.type === 'tool-result' && Array.isArray(first.content) ? first.content : content;
+}
+
+export function isFailedToolResult(data: ToolResultData): boolean {
+  const first = data.message?.content?.[0];
+  return data.error !== undefined || data.message?.isError === true
+    || (first?.type === 'tool-result' && first.isError === true);
 }
 
 /** 调用工具自定义 presentResult，失败/不可用时返回 undefined */
 function presentResultView(
   name: string,
   rawArgs: string,
-  data: ToolResultData,
+  content: ToolContentBlock[],
+  meta: unknown,
   toolsRegistry: ToolsRegistryLike | undefined,
   agent: unknown,
 ): ToolResultView | undefined {
@@ -70,12 +113,10 @@ function presentResultView(
     const tool = toolsRegistry.get(name, agent);
     if (tool?.presentResult === undefined) return undefined;
 
-    const block = data.message.content[0];
-    const content = block !== undefined && block.type === 'tool-result' ? block.content : [];
     return tool.presentResult(JSON.parse(rawArgs), {
       content,
-      isError: block?.isError === true,
-      ...(data.meta !== undefined ? { meta: data.meta } : {}),
+      isError: false,
+      ...(meta !== undefined ? { meta } : {}),
     }) as ToolResultView | undefined;
   } catch {
     return undefined;
@@ -91,42 +132,43 @@ function renderView(name: string, view: ToolResultView): string | null {
       const output = (view.output ?? '').trimEnd();
       if (!output) return null;
       const exit = view.exitCode !== undefined && view.exitCode !== 0 ? `\n退出码 ${view.exitCode}` : '';
-      return `${header}\n\`\`\`\n${output}\n\`\`\`${exit}`;
+      return `${header}\n\`\`\`\n${truncate(output)}\n\`\`\`${exit}`;
     }
     case 'diff': {
       return `${header}\n\`\`\`diff\n${truncate(renderDiffs(view.diffs))}\n\`\`\``;
     }
     case 'read': {
-      const content = view.content ? textOf(view.content) : '';
-      if (!content) return null;
+      const body = view.lines !== undefined && view.lines.length > 0
+        ? renderLines(view.lines)
+        : textOf(view.content ?? []);
+      if (!body.trim()) return null;
       const path = view.path ? ` (${view.path})` : '';
-      return `${header}${path}\n\`\`\`\n${truncate(content)}\n\`\`\``;
+      return `${header}${path}\n\`\`\`\n${truncate(body)}\n\`\`\``;
     }
     case 'generic':
     default: {
-      const content = view.content ? textOf(view.content) : '';
-      if (!content) return null;
+      const content = textOf(view.content ?? []);
+      if (!content.trim()) return null;
       return `${header}\n${truncate(content)}`;
     }
   }
 }
 
 /** 提取 content blocks 中的纯文本 */
-function textOf(content: unknown): string {
-  if (!Array.isArray(content)) return '';
+function textOf(content: readonly ToolContentBlock[]): string {
   return content
-    .map((b) => {
-      if (typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text') {
-        return (b as { text?: string }).text ?? '';
-      }
-      return '';
-    })
-    .filter(Boolean)
+    .filter((b) => b !== null && typeof b === 'object' && b.type === 'text')
+    .map((b) => b.text ?? '')
     .join('');
 }
 
+/** 渲染 read 视图的行号正文 */
+function renderLines(lines: readonly { number: number; text: string }[]): string {
+  return lines.map((line) => `${line.number}\t${line.text}`).join('\n');
+}
+
 /** 渲染 diff hunks 为纯文本 */
-function renderDiffs(diffs: ReadonlyArray<unknown>): string {
+function renderDiffs(diffs: readonly unknown[]): string {
   return diffs
     .map((d) => {
       if (typeof d === 'object' && d !== null) {

@@ -1,8 +1,9 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import { ACCOUNT_METHODS, BIND_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import { setClientConnection, type RpcResultLike } from './rpc.ts';
 import { WORKBENCH_ROBOTS_PATH, type WorkbenchRobot } from '../shared/workbench-protocol.ts';
-import { PAIR_ISSUE_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH, type PairChallenge } from '../shared/pairing-protocol.ts';
+import type { PairChallenge } from '../shared/pairing-protocol.ts';
 import { WORKBENCH_DEFAULTS_PATH, type WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import type { ConfigWire } from './config-form-state.ts';
 import { AccessSettings, PrimaryAccountSettings } from './config-panel.ts';
@@ -34,7 +35,7 @@ vi.mock('react', async (importOriginal) => ({
 }));
 vi.mock('./qq-pairing-styles.ts', () => ({ usePairingStyles() {} }));
 
-// Exercise the real component handlers and effects with mocked HTTP in the Node test suite.
+// Exercise the component handlers with mock Host RPC and workbench Fetch services.
 function mount(component: () => ReactNode) {
   const state = new Map<number, unknown>();
   const refs = new Map<number, { current: unknown }>();
@@ -119,7 +120,14 @@ function find(tree: ReactNode, predicate: (props: TestProps) => boolean): ReactE
   return find(tree.props.children, predicate) ?? find(tree.props.footer, predicate);
 }
 
+function stubRpc(handler: (method: string, payload: Record<string, unknown>) => RpcResultLike | Promise<RpcResultLike>): void {
+  setClientConnection({ rpc: { call: async (_channel: string, _endpoint: string, call: {
+    method: string; payload: Record<string, unknown>;
+  }) => handler(call.method, call.payload) } });
+}
+
 afterEach(() => {
+  setClientConnection(undefined);
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -176,19 +184,21 @@ describe('QQ settings recovery', () => {
       access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open', c2cAllow: [], groupAllow: [] },
     };
     vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
-      if (init?.method !== 'POST') {
-        return Response.json(path === WORKBENCH_ROBOTS_PATH ? { robots: [robot] } : { config });
-      }
+      expect(path).toBe(WORKBENCH_ROBOTS_PATH);
+      if (init?.method !== 'POST') return Response.json({ robots: [robot] });
       const body = JSON.parse(String(init.body));
       writes.push({ path, body });
-      if (path === WORKBENCH_ROBOTS_PATH) {
-        robot = { ...robot, alias: body.alias, revision: 2 };
-        return Response.json({ robot });
-      }
-      if (rejectAccess) return Response.json({ error: 'test conflict' }, { status: 409 });
-      config = { ...config, access: body.access, accessRevision: 'access-two' };
-      return Response.json({ ok: true });
+      robot = { ...robot, alias: body.alias, revision: 2 };
+      return Response.json({ robot });
     }));
+    stubRpc((method, body) => {
+      if (method === BIND_METHODS.configGet) return { ok: true, value: { config } };
+      expect(method).toBe(BIND_METHODS.configSet);
+      writes.push({ path: method, body });
+      if (rejectAccess) return { ok: false, error: { code: RPC_ERROR_CODES.configConflict, message: 'test conflict' } };
+      config = { ...config, access: body.access as ConfigWire['access'], accessRevision: 'access-two' };
+      return { ok: true, value: { ok: true } };
+    });
     const render = mount(() => PrimaryAccountSettings({
       appId: robot.appId, revision: 1, enabled: true, formId: 'qq-account', defaultName: '主机器人',
       controls: null, credentials: null, onAliasSaved: vi.fn(),
@@ -204,13 +214,13 @@ describe('QQ settings recovery', () => {
     const save = () => find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
     save();
     await vi.advanceTimersByTimeAsync(0);
-    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_CONFIG_PATH]);
+    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_METHODS.configSet]);
     expect(find(render(), props => typeof props.children === 'string' && props.children.startsWith('机器人名称已保存。'))).toBeDefined();
 
     rejectAccess = false;
     save();
     await vi.advanceTimersByTimeAsync(0);
-    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_CONFIG_PATH, BIND_CONFIG_PATH]);
+    expect(writes.map(write => write.path)).toEqual([WORKBENCH_ROBOTS_PATH, BIND_METHODS.configSet, BIND_METHODS.configSet]);
     expect(writes[2]?.body).toMatchObject({ expectedAppId: robot.appId, accessRevision: 'access-one', access: { groupMode: 'allowlist' } });
     expect(find(render(), props => props.children === '保存')?.props.disabled).toBe(true);
   });
@@ -222,20 +232,23 @@ describe('QQ settings recovery', () => {
       appId: 'bot', accessRevision: 'initial',
       access: { c2cMode: 'allowlist', c2cAllow: ['kept', 'revoked'], groupMode: 'open', groupAllow: [], commandMode: 'open' },
     };
-    vi.stubGlobal('fetch', vi.fn(async (path: string, init: RequestInit) => {
-      if (path === WORKBENCH_ROBOTS_PATH) return Response.json({ robots: [{ appId: 'bot', alias: '', revision: 1, primary: true }] });
-      expect(path).toBe(BIND_CONFIG_PATH);
-      if (init.method !== 'POST') return Response.json({ config });
-      const patch = JSON.parse(String(init.body)) as ConfigWire;
+    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
+      expect(path).toBe(WORKBENCH_ROBOTS_PATH);
+      return Response.json({ robots: [{ appId: 'bot', alias: '', revision: 1, primary: true }] });
+    }));
+    stubRpc((method, payload) => {
+      if (method === BIND_METHODS.configGet) return { ok: true, value: { config } };
+      expect(method).toBe(BIND_METHODS.configSet);
+      const patch = payload as ConfigWire;
       writes.push(patch);
-      if (patch.accessRevision !== config.accessRevision) return Response.json({ error: 'conflict' }, { status: 409 });
+      if (patch.accessRevision !== config.accessRevision) return { ok: false, error: { code: RPC_ERROR_CODES.configConflict, message: 'conflict' } };
       config = { ...config, ...patch, accessRevision: `revision-${writes.length}` };
       if (writes.length === 1 && config.access) {
         // Another tab removes a member after the save and before the first readback.
         config = { ...config, accessRevision: 'after-revoke', access: { ...config.access, c2cAllow: ['kept'] } };
       }
-      return Response.json({ ok: true });
-    }));
+      return { ok: true, value: { ok: true } };
+    });
 
     const render = mount(() => PrimaryAccountSettings({
       appId: 'bot', revision: 1, enabled: true, formId: 'qq-account', defaultName: '主机器人',
@@ -268,18 +281,18 @@ describe('QQ settings recovery', () => {
     vi.useFakeTimers();
     let unavailable = false;
     const challenges: PairChallenge[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (path: string) => {
-      if (path === PAIR_ISSUE_PATH) {
+    stubRpc(method => {
+      if (method === ACCOUNT_METHODS.pairIssue) {
         const challenge: PairChallenge = {
           code: 'ABCDEF', purpose: 'allow-c2c', createdAt: Date.now(), expiresAt: Date.now() + 600_000, claims: [],
         };
         challenges.push(challenge);
-        return Response.json({ ...challenge, previousClaims: [] });
+        return { ok: true, value: { ...challenge, previousClaims: [] } };
       }
-      expect(path).toBe(PAIR_STATUS_PATH);
-      if (unavailable) return Response.json({ error: 'not found' }, { status: 404 });
-      return Response.json({ challenges, owners: [], allowC2c: [], allowGroup: [] });
-    }));
+      expect(method).toBe(ACCOUNT_METHODS.pairStatus);
+      if (unavailable) throw new Error('HTTP 404');
+      return { ok: true, value: { challenges, owners: [], allowC2c: [], allowGroup: [] } };
+    });
 
     const render = mount(() => PairClaimPanel({ purpose: 'allow-c2c', title: '私聊白名单' }));
     const button = (text: string) => find(render(), props => props.children === text && !!props.onClick)!.props;
@@ -313,17 +326,16 @@ describe('QQ settings recovery', () => {
     const empty = { challenges: [], owners: [], allowGroup: [], allowC2c: [] };
     const member = { openid: 'fixture-member', nickname: '待移除成员', scene: 'c2c', createdAt: 1 };
     let removed = false;
-    vi.stubGlobal('fetch', vi.fn(async (path: string, init?: RequestInit) => {
-      if (path.startsWith(PAIR_REVOKE_PATH)) {
-        expect(init?.method).toBe('POST');
-        expect(JSON.parse(String(init?.body))).toEqual({ purpose, openid: member.openid });
+    stubRpc((method, payload) => {
+      if (method === ACCOUNT_METHODS.pairRevoke) {
+        expect(payload).toMatchObject({ purpose, openid: member.openid });
         removed = true;
-        return Response.json({ ...empty, ok: true, message: '已从白名单移除' });
+        return { ok: true, value: { ...empty, ok: true, message: '已从白名单移除' } };
       }
-      expect(path).toBe(PAIR_STATUS_PATH);
-      if (removed) return Response.json({ error: '插件正在重载' }, { status: 503 });
-      return Response.json({ ...empty, [list]: [member] });
-    }));
+      expect(method).toBe(ACCOUNT_METHODS.pairStatus);
+      if (removed) return { ok: false, error: { code: RPC_ERROR_CODES.pluginReloading, message: '插件正在重载' } };
+      return { ok: true, value: { ...empty, [list]: [member] } };
+    });
     const render = mount(() => PairClaimPanel({ purpose, title }));
     render();
     await vi.advanceTimersByTimeAsync(0);

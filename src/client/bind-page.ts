@@ -1,7 +1,7 @@
 /**
  * 端内绑定面板 — 扫码 / 手动填写 / 已绑定编辑
  *
- * 宿主插件注册 /qqbot/im-qqbot/bind 路由（待绑定与已绑定 fiber 均常驻）：
+ * 宿主插件注册绑定 RPC 端点（待绑定与已绑定 fiber 均常驻）：
  * - 未绑定：waiting（二维码）/ starting / saving / failed 相位 + manual 提交
  * - 已绑定：bound 相位（回显脱敏 appId，secret 不回传）+ manual 更换 + 解绑
  * 扫码成功或手动保存均写入 profile patch 并经 HMR 重载生效。
@@ -11,18 +11,13 @@
  * 颜色尽量取 DSW 主题变量（--dsw-alias-*），缺省值兜底。
  *
  * 机器人工作台复用扫码、新增和更换凭据的视图。
- * 运行时仅依赖 react（dsh 客户端平台种子表提供）；宿主通信走同源 fetch，
- * Desktop 下由壳的 IPC 桥自动附加 Host 认证转发。
+ * 绑定通过宿主 Connection 服务调用，Desktop 通过 IPC 桥转发。
  */
 import { createElement, useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import {
-  BIND_MANUAL_PATH,
-  BIND_REFRESH_PATH,
-  BIND_STATE_PATH,
-  type BindStateWire,
-} from '../shared/bind-protocol.ts';
+import type { BindStateWire } from '../shared/bind-protocol.ts';
+import { BIND_METHODS, BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
-import { fetchJson } from './http.ts';
+import { RpcError, rpcCall } from './rpc.ts';
 
 /** 轮询间隔（毫秒）：活跃轮询 / 失败退避 */
 const ACTIVE_POLL_MS = 2000;
@@ -151,7 +146,7 @@ function useBindState(enabled: boolean): { state: BindStateWire | null; gone: bo
       const myGeneration = generation;
       const alive = (): boolean => myGeneration === generation && !stopped;
       try {
-        const body = await fetchJson<BindStateWire>(BIND_STATE_PATH, { cache: 'no-store', signal: controller.signal });
+        const body = await rpcCall<BindStateWire>(BIND_RPC_ENDPOINT, BIND_METHODS.state, {}, undefined, controller.signal);
         sawRoute = true;
         if (!alive()) return;
         setGone(false);
@@ -163,7 +158,7 @@ function useBindState(enabled: boolean): { state: BindStateWire | null; gone: bo
         if (alive()) {
           const message = cause instanceof Error ? cause.message : '无法获取绑定状态';
           setError(message);
-          if (!sawRoute && message.includes('HTTP 404')) setGone(true);
+          if (!sawRoute && cause instanceof RpcError && cause.gone) setGone(true);
         }
       } finally {
         running = false;
@@ -209,11 +204,7 @@ interface BindActions {
 /** 手动提交凭据（填写 / 更换共用） */
 export async function submitManualCredentials(appId: string, appSecret: string): Promise<ManualResult> {
   try {
-    const body = await fetchJson<ManualResult>(BIND_MANUAL_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ appId, appSecret }),
-    });
+    const body = await rpcCall<ManualResult>(BIND_RPC_ENDPOINT, BIND_METHODS.manual, { appId, appSecret });
     return body.ok ? { ok: true, message: body.message } : { ok: false, error: body.error ?? '保存失败，请重试' };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -375,7 +366,7 @@ function UnboundView({ state, recheck, actions }: {
     if (actions) { actions.refresh(); return; }
     setBusy(true);
     setError(null);
-    void fetchJson<{ ok?: boolean }>(BIND_REFRESH_PATH, { method: 'POST' })
+    void rpcCall(BIND_RPC_ENDPOINT, BIND_METHODS.refresh)
       .then(() => { recheck(); })
       .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : '刷新失败，请重试'); })
       .finally(() => { setBusy(false); });
@@ -407,7 +398,7 @@ function FailedView({ reason, recheck }: { reason: string; recheck: () => void }
     if (busy) return;
     setBusy(true);
     setError(null);
-    void fetchJson(BIND_REFRESH_PATH, { method: 'POST' })
+    void rpcCall(BIND_RPC_ENDPOINT, BIND_METHODS.refresh)
       .then(() => { recheck(); })
       .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : '刷新失败，请重试'); })
       .finally(() => { setBusy(false); });

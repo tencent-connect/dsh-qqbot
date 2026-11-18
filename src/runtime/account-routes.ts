@@ -1,15 +1,38 @@
+/**
+ * 账号端点 RPC 处理器 — /api/dsh-qqbot/account
+ *
+ * 经宿主 Connection 共享通道调用（rpc-carrier.ts 注册）：命令清单与
+ * 配对码管理（生成/关闭/手动添加/改名/撤销/状态查询）。来源围栏与
+ * 浏览器认证由宿主施加；本模块只做业务校验。
+ */
+import type { PairPurpose } from '../shared/pairing-protocol.ts';
 import type { Context } from '@deepseek-ai/cordis';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { COMMANDS_PATH } from '../shared/command-protocol.ts';
-import { PAIR_END_PATH, PAIR_ISSUE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH, PAIR_REVOKE_PATH, PAIR_STATUS_PATH } from '../shared/pairing-protocol.ts';
-import { accessRevision } from '../setup/persist.ts';
-import type { WebServerLike } from '../setup/bind-routes.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import type { RpcMethodHandler, RpcResult } from '../rpc-carrier.ts';
+import { registerPluginRpc, rpcFailure, rpcOk } from '../rpc-carrier.ts';
 import type { AccountAccessService } from './account-service.ts';
 
+function field(payload: Record<string, unknown>, name: string, empty = false): string {
+  const value = payload[name];
+  if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > 100_000) throw new Error(`${name} 无效`);
+  return value;
+}
+
+function pairPurpose(payload: Record<string, unknown>): PairPurpose {
+  const purpose = payload.purpose;
+  if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
+  return purpose;
+}
+
+/**
+ * 创建账号端点的方法处理器（src/index.ts 经 registerPluginRpc 注册）。
+ *
+ * @param service - 账号访问服务（配对码与名单）
+ * @param commands - 斜杠命令清单
+ */
 interface AccountRouteTarget {
   service: AccountAccessService;
   enabled: boolean;
-  revision: number;
 }
 
 export function registerAccountRoutes(
@@ -17,88 +40,64 @@ export function registerAccountRoutes(
   resolve: (appId: string | null) => AccountRouteTarget | undefined,
   commands: (target: AccountRouteTarget) => unknown,
 ): void {
-  ctx.inject(['webServer'], scoped => {
-    let active = true;
-    const server = scoped.get('webServer') as WebServerLike;
-    const disposers: Array<() => void> = [];
-    const pairHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-      try {
-        if (!active) return json(res, 503, { error: 'QQ 插件已重载，请刷新后重试' });
-        if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return json(res, 403, { error: '跨来源请求被拒绝' });
-        const { pathname, searchParams } = new URL(req.url ?? '/', 'http://localhost');
-        const appId = searchParams.get('appId');
-        const target = resolve(appId);
-        if (pathname === COMMANDS_PATH) {
-          if (appId !== null && !target) return json(res, 404, { error: '找不到这个 QQ 机器人' });
-          return json(res, 200, { commands: target ? commands(target) : [] });
+  registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(resolve, commands));
+}
+
+export function createAccountRpcHandler(
+  resolve: (appId: string | null) => AccountRouteTarget | undefined,
+  commands: (target: AccountRouteTarget) => unknown,
+): RpcMethodHandler {
+  return async (method, payload): Promise<RpcResult> => {
+    try {
+      const appId = payload.appId === undefined ? null : field(payload, 'appId');
+      const target = resolve(appId);
+      if (method === ACCOUNT_METHODS.commands && !target && appId === null) return rpcOk({ commands: [] });
+      if (!target) return rpcFailure('account/not-found', '找不到这个 QQ 机器人');
+      const { service } = target;
+      switch (method) {
+        case ACCOUNT_METHODS.commands:
+          return rpcOk({ commands: commands(target) });
+        case ACCOUNT_METHODS.pairStatus:
+          return rpcOk(service.pairStatus());
+        case ACCOUNT_METHODS.pairIssue: {
+          if (!target.enabled) return rpcFailure('pair/rejected', '请先启用这台机器人，再生成配对码');
+          const purpose = pairPurpose(payload);
+          const previousCode = payload.previousCode === undefined ? undefined : field(payload, 'previousCode');
+          const previousClaims = previousCode
+            ? service.pairStatus().challenges.find(challenge => challenge.code === previousCode && challenge.purpose === purpose)?.claims ?? []
+            : [];
+          return rpcOk({ ...service.issuePairCode(purpose, previousCode), previousClaims, ...service.pairStatus() });
         }
-        if (!target) return json(res, 404, { error: '找不到这个 QQ 机器人' });
-        const { service } = target;
-        if (pathname === PAIR_STATUS_PATH) return json(res, 200, service.pairStatus());
-        if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
-        const membership = accessRevision(service.currentAccess());
-        const owners = JSON.stringify(service.store.ownerIds());
-        const body = await readBody(req);
-        if (!active) return json(res, 503, { error: 'QQ 插件已重载，请刷新后重试' });
-        const current = resolve(appId);
-        if (current?.service !== service || current.revision !== target.revision
-          || membership !== accessRevision(service.currentAccess()) || owners !== JSON.stringify(service.store.ownerIds())) {
-          return json(res, 409, { error: '机器人配置已变化，请刷新后重试' });
+        case ACCOUNT_METHODS.pairEnd: {
+          const purpose = pairPurpose(payload);
+          service.endPairCode(field(payload, 'code'), purpose);
+          return rpcOk(service.pairStatus());
         }
-        if (pathname === PAIR_ISSUE_PATH) {
-          if (!current.enabled) return json(res, 409, { error: '请先启用这台机器人，再生成配对码' });
-          const purpose = body.purpose;
-          if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
-          const previousCode = body.previousCode === undefined ? undefined : field(body, 'previousCode');
-          const previousClaims = previousCode ? service.pairStatus().challenges.find(challenge => challenge.code === previousCode && challenge.purpose === purpose)?.claims ?? [] : [];
-          return json(res, 200, { ...service.issuePairCode(purpose, previousCode), previousClaims, ...service.pairStatus() });
-        }
-        if (pathname === PAIR_END_PATH) {
-          const purpose = body.purpose;
-          if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
-          service.endPairCode(field(body, 'code'), purpose);
-          return json(res, 200, service.pairStatus());
-        }
-        if (pathname === PAIR_MANUAL_PATH) {
-          const purpose = body.purpose;
-          if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
-          const openid = field(body, 'openid');
+        case ACCOUNT_METHODS.pairManual: {
+          const purpose = pairPurpose(payload);
+          const openid = field(payload, 'openid');
           const result = service.addManualMember(purpose, openid);
-          return json(res, result.ok ? 200 : 400, { ...result, ...service.pairStatus() });
+          if (!result.ok) return rpcFailure('pair/rejected', result.message);
+          return rpcOk({ ...result, ...service.pairStatus() });
         }
-        if (pathname === PAIR_RENAME_PATH) {
-          const openid = field(body, 'openid');
-          const nickname = typeof body.nickname === 'string' ? body.nickname : '';
+        case ACCOUNT_METHODS.pairRename: {
+          const openid = field(payload, 'openid');
+          const nickname = typeof payload.nickname === 'string' ? payload.nickname : '';
           const result = service.renameMember(openid, nickname);
-          return json(res, result.ok ? 200 : 400, { ...result, ...service.pairStatus() });
+          if (!result.ok) return rpcFailure('pair/rejected', result.message);
+          return rpcOk({ ...result, ...service.pairStatus() });
         }
-        if (pathname === PAIR_REVOKE_PATH) {
-          const openid = field(body, 'openid'); const purpose = body.purpose;
-          if (purpose !== 'owner' && purpose !== 'allow-c2c' && purpose !== 'allow-group') throw new Error('认领用途无效');
-          const result = service.revokePair(openid, purpose);
-          return json(res, result.ok ? 200 : 400, { ...result, ...service.pairStatus() });
+        case ACCOUNT_METHODS.pairRevoke: {
+          const purpose = pairPurpose(payload);
+          const result = service.revokePair(field(payload, 'openid'), purpose);
+          if (!result.ok) return rpcFailure('pair/rejected', result.message);
+          return rpcOk({ ...result, ...service.pairStatus() });
         }
-        return json(res, 404, { error: '未知配对操作' });
-      } catch (error) {
-        json(res, 400, { error: error instanceof Error ? error.message : '配对操作失败' });
+        default:
+          return rpcFailure(RPC_ERROR_CODES.unknownMethod, `未知方法: ${method}`);
       }
-    };
-    for (const path of [COMMANDS_PATH, PAIR_STATUS_PATH, PAIR_ISSUE_PATH, PAIR_END_PATH, PAIR_REVOKE_PATH, PAIR_MANUAL_PATH, PAIR_RENAME_PATH]) {
-      disposers.push(server.register({ kind: 'exact', path, handler: pairHandler }));
+    } catch (error) {
+      return rpcFailure('pair/invalid', error instanceof Error ? error.message : '配对操作失败');
     }
-    scoped.effect(() => () => { active = false; for (const dispose of disposers) dispose(); }, 'im-qqbot.conversations');
-  });
+  };
 }
-function field(body: Record<string, unknown>, name: string, empty = false): string {
-  const value = body[name];
-  if (typeof value !== 'string' || (!empty && !value.trim()) || value.length > 100_000) throw new Error(`${name} 无效`);
-  return value;
-}
-async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  let bytes = 0; const chunks: Buffer[] = [];
-  for await (const raw of req) { const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw); bytes += chunk.length; if (bytes > 512 * 1024) throw new Error('请求过大'); chunks.push(chunk); }
-  const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('请求内容无效');
-  return value as Record<string, unknown>;
-}
-function json(res: ServerResponse, code: number, data: unknown): void { res.statusCode = code; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Cache-Control', 'no-store'); res.end(JSON.stringify(data)); }

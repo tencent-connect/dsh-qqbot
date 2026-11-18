@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Context, Service } from '@deepseek-ai/cordis';
+import { Context } from '@deepseek-ai/cordis';
 import { ApiError, type InlineKeyboard, type InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import { bindDelivery, guardSender } from '../transport/delivery-context.ts';
 import { DeliveryLedger } from '../transport/delivery-ledger.ts';
@@ -502,11 +502,53 @@ describe('QuestionChannel.routeRequest', () => {
     await expect(channel.routeRequest(request, next)).resolves.toEqual({ answers: [] });
     expect(next).toHaveBeenCalledTimes(3);
     expect(sent).toHaveLength(0);
-    const pending = channel.routeRequest(request, next);
+    const noProvider = vi.fn(async () => { throw Object.assign(new Error('no answerer'), { code: 'NO_PROVIDER' }); });
+    const pending = channel.routeRequest(request, noProvider);
     await vi.waitFor(() => expect(channel.tryAnswer('c2c', 'x', '2')).toBe(true));
     await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
     expect(sent).toHaveLength(1);
-    expect(next).toHaveBeenCalledTimes(3);
+    expect(noProvider).toHaveBeenCalledOnce();
+  });
+
+  it.each(['native', 'qq'] as const)('settles once when %s answers first and cancels only the question', async (winner) => {
+    const record = makeRecord('qq-session');
+    const sent: SentMessage[] = [];
+    const channel = new QuestionChannel(createManager({
+      findBySessionId: () => record, getSessionRecord: () => record,
+    }), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const turn = new AbortController();
+    const request = { agent: { id: 'qq-session' }, questions: [q2()], signal: turn.signal };
+    const native = Promise.withResolvers<UserQuestionResult>();
+    let questionSignal: AbortSignal | undefined;
+    const pending = channel.routeRequest(request, () => {
+      questionSignal = request.signal;
+      return native.promise;
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    if (winner === 'native') {
+      const result = { answers: [{ id: 'q', selected: ['A'] }] };
+      native.resolve(result);
+      await expect(pending).resolves.toEqual(result);
+    } else {
+      await vi.waitFor(() => expect(channel.tryAnswer('c2c', 'x', '2')).toBe(true));
+      await expect(pending).resolves.toEqual({ answers: [{ id: 'q', selected: ['B'] }] });
+      native.resolve({ answers: [] });
+    }
+    expect(questionSignal?.aborted).toBe(true);
+    expect(turn.signal.aborted).toBe(false);
+    expect(channel.tryAnswer('c2c', 'x', '1')).toBe(false);
+  });
+
+  it('keeps the native answerer available when QQ does not accept the question', async () => {
+    const record = makeRecord('qq-session');
+    const native = { answers: [{ id: 'q', selected: ['A'] }] };
+    const channel = new QuestionChannel(createManager({ findBySessionId: () => record }),
+      { sendMarkdown: vi.fn(async () => { throw new Error('fixture offline'); }) },
+      { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const request = { agent: { id: 'qq-session' }, questions: [q2()] };
+    await expect(channel.routeRequest(request, async () => native)).resolves.toEqual(native);
+    await expect(channel.routeRequest(request, async () => { throw Object.assign(new Error('no answerer'), { code: 'NO_PROVIDER' }); }))
+      .rejects.toMatchObject({ code: 'NO_PROVIDER' });
   });
 });
 
@@ -521,195 +563,67 @@ describe('QuestionChannel.cancelPending', () => {
   });
 });
 
-describe('QuestionChannel.install routing', () => {
-  it('routes QQ sessions to QQ channel and delegates others', async () => {
-    const sent: SentMessage[] = [];
+describe('QuestionChannel waterfall lifecycle', () => {
+  it('uses the current turn target and sends follow-ups to the answer target', async () => {
     const record = makeRecord(sessionKey('c2c', 'u9'));
-    (record as { sessionId?: string }).sessionId = 'sess-qq';
-    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
-    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    let origCalled = 0;
-    const uq = { ask: vi.fn(async () => { origCalled += 1; return { answers: [] }; }) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-
-    await uq.ask({ questions: [q2('x')], agent: { id: 'sess-web' } });
-    expect(origCalled).toBe(1);
-
-    const p = uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
-    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
-    expect(origCalled).toBe(1); // QQ 路径未触碰原实现
-  });
-
-  it('sends the first question to the resolved turn target, follow-ups reply to the answer', async () => {
-    const record = makeRecord(sessionKey('c2c', 'u9'));
-    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const manager = createManager({
+      findBySessionId: id => id === 'sess-qq' ? record : undefined,
+      getSessionRecord: () => record,
+    });
     const sender = createSender([]);
     const pushed: ReplyTarget = { scope: 'c2c', targetId: 'x', forceProactive: true };
-    const ch = new QuestionChannel(
-      manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
-      { targetFor: () => pushed },
-    );
-    const uq = { ask: vi.fn(async () => ({ answers: [] })) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-
-    const p = uq.ask({ questions: [q2('a'), q2('b')], agent: { id: 'sess-qq' } });
-    await sleep(10);
-    expect(sender.sendMarkdown.mock.calls[0]![0]).toEqual(pushed);
-
-    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
-    await sleep(10);
-    expect(sender.sendMarkdown.mock.calls[1]![0]).toEqual(record.replyTarget);
-
-    expect(ch.tryAnswer('c2c', 'u9', '2')).toBe(true);
-    await p;
+    const ch = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 },
+      createLogger(), { targetFor: () => pushed });
+    const result = ch.routeRequest({ questions: [q2('a'), q2('b')], agent: { id: 'sess-qq' } },
+      () => Promise.reject(new Error('no answerer')));
+    await vi.waitFor(() => expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true));
+    await vi.waitFor(() => expect(ch.tryAnswer('c2c', 'u9', '2')).toBe(true));
+    expect((await result).answers.map(answer => answer.selected)).toEqual([['A'], ['B']]);
+    expect(sender.sendMarkdown.mock.calls[0]?.[0]).toMatchObject(pushed);
+    expect(sender.sendMarkdown.mock.calls[1]?.[0]).toMatchObject(record.replyTarget);
   });
 
-  it('delegates to the host when the turn is not delivered to QQ', async () => {
-    const record = makeRecord(sessionKey('group', 'g1'), 'group');
-    const manager = createManager({ findBySessionId: () => record });
-    const sender = createSender([]);
-    const ch = new QuestionChannel(
-      manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
-      { targetFor: () => undefined },
-    );
-    const orig = vi.fn(async () => ({ answers: [] }));
-    const uq = { ask: orig };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-
-    await uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
-
-    expect(orig).toHaveBeenCalledTimes(1);
-    expect(sender.sendMarkdown).not.toHaveBeenCalled();
-  });
-
-  it('uninstall restores the original ask', async () => {
-    const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const original = async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] });
-    const uq = { ask: original };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.ask).not.toBe(original);
-    ch.uninstall();
-    expect(uq.ask).toBe(original);
-  });
-
-  it('routes questions for the same OpenID to separate accounts and stops just one', async () => {
-    const makeChannel = (appId: string) => {
-      const record = makeRecord(`qqbot:${appId}:c2c:shared`);
-      const sender = createSender([]);
-      const manager = createManager({
-        findBySessionId: id => id === appId ? record : undefined,
-        getSessionRecord: (_scope, peer) => peer === 'shared' ? record : undefined,
-      });
-      return {
-        sender,
-        channel: new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger()),
-      };
-    };
-    const first = makeChannel('first');
-    const second = makeChannel('second');
-    const original = vi.fn(async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }));
-    const uq = { ask: original };
-    const ctx = { get: () => uq };
-    first.channel.install(ctx);
-    const sharedAsk = uq.ask;
-    second.channel.install(ctx);
-    expect(uq.ask).toBe(sharedAsk);
-
-    const firstAnswer = uq.ask({ questions: [q2('first')], agent: { id: 'first' } });
-    const canceled = expect(firstAnswer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
-    const secondAnswer = uq.ask({ questions: [q2('second')], agent: { id: 'second' } });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(first.sender.sendMarkdown).toHaveBeenCalledTimes(1);
-    expect(second.sender.sendMarkdown).toHaveBeenCalledTimes(1);
-    first.channel.uninstall();
-    await canceled;
-    expect(uq.ask).toBe(sharedAsk);
-    expect(first.channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
-    expect(second.channel.tryAnswer('c2c', 'shared', '2')).toBe(true);
-    await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
-
-    await uq.ask({ questions: [q2('local')], agent: { id: 'first' } });
-    expect(original).toHaveBeenCalledTimes(1);
-    second.channel.uninstall();
-    expect(uq.ask).toBe(original);
-  });
-
-  it('does not recreate a pending question when the first send finishes after uninstall', async () => {
-    const record = makeRecord(sessionKey('c2c', 'shared'));
-    const { promise, resolve } = Promise.withResolvers<void>();
-    const sender = { sendMarkdown: vi.fn(() => promise) };
-    const channel = new QuestionChannel(
-      createManager({ findBySessionId: () => record }), sender,
-      { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
-    );
-    const uq = { ask: async (_request: UserQuestionRequest): Promise<UserQuestionResult> => ({ answers: [] }) };
-    channel.install({ get: () => uq });
-    const answer = uq.ask({ questions: [q2()], agent: { id: 'session' } });
-    const canceled = expect(answer).rejects.toMatchObject({ code: 'ASK_ABORTED' });
-    expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
-    channel.uninstall();
-    resolve();
-    await canceled;
-    expect(channel.tryAnswer('c2c', 'shared', '1')).toBe(false);
-  });
-
-  it('shares the question dispatcher between Cordis service proxies', async () => {
-    const hostAsk = vi.fn(async () => ({ answers: [] }));
-    class HostQuestions extends Service {
-      constructor(ctx: Context) { super(ctx, 'userQuestions'); }
-      ask(request: UserQuestionRequest): Promise<UserQuestionResult> {
-        return hostAsk(this.ctx, request);
-      }
-    }
+  it('stops only the removed robot and ignores its question even when the send finishes late', async () => {
     const ctx = new Context();
-    const host = ctx.plugin(HostQuestions);
-    await host.await();
-    const record = makeRecord(sessionKey('c2c', 'shared'));
-    const makeChannel = (id: string) => new QuestionChannel(
-      createManager({
-        findBySessionId: session => session === id ? record : undefined,
+    const delayed = Promise.withResolvers<void>();
+    const makeChannel = (appId: string, sender: ReturnType<typeof createSender>) => {
+      const record = makeRecord('qqbot:' + appId + ':c2c:shared');
+      return new QuestionChannel(createManager({
+        findBySessionId: id => id === appId ? record : undefined,
         getSessionRecord: () => record,
-      }),
-      createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
-    );
-    const first = makeChannel('first');
-    const second = makeChannel('second');
+      }), sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    };
+    const firstSender = createSender([]);
+    firstSender.sendMarkdown.mockImplementationOnce(() => delayed.promise);
+    const first = makeChannel('first', firstSender);
+    const second = makeChannel('second', createSender([]));
+    type QuestionEvents = {
+      waterfall(event: string, request: UserQuestionRequest, end: () => Promise<UserQuestionResult>): Promise<UserQuestionResult>;
+    };
     const mount = (channel: QuestionChannel) => ctx.plugin(scope => {
-      channel.install(scope);
+      (scope as unknown as { on(event: string, handle: typeof channel.routeRequest, opts: { global: true }): void })
+        .on('user-questions/request', (request, next) => channel.routeRequest(request, next), { global: true });
       scope.effect(() => () => channel.uninstall());
     });
     const firstFiber = mount(first);
     const secondFiber = mount(second);
+    const ask = (id: string) => (ctx as unknown as QuestionEvents).waterfall(
+      'user-questions/request', { agent: { id }, questions: [q2(id)] }, async () => { throw new Error('no answerer'); },
+    );
     try {
       await Promise.all([firstFiber.await(), secondFiber.await()]);
+      const firstAnswer = expect(ask('first')).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+      await vi.waitFor(() => expect(firstSender.sendMarkdown).toHaveBeenCalledOnce());
       await firstFiber.dispose();
-      const service = ctx.get('userQuestions') as HostQuestions;
-      const secondAnswer = service.ask({ questions: [q2('second')], agent: { id: 'second' } });
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(second.tryAnswer('c2c', 'shared', '2')).toBe(true);
+      delayed.resolve();
+      await firstAnswer;
+      expect(first.tryAnswer('c2c', 'shared', '2')).toBe(false);
+      const secondAnswer = ask('second');
+      await vi.waitFor(() => expect(second.tryAnswer('c2c', 'shared', '2')).toBe(true));
       await expect(secondAnswer).resolves.toEqual({ answers: [{ id: 'second', selected: ['B'] }] });
-      expect(hostAsk).not.toHaveBeenCalled();
-      const local = { questions: [q2('local')], agent: { id: 'first' } };
-      await service.ask(local);
-      expect(hostAsk).toHaveBeenCalledWith(expect.anything(), local);
-      await secondFiber.dispose();
-      expect(Object.getOwnPropertyDescriptor(service, 'ask')).toBeUndefined();
+      await expect(ask('first')).rejects.toThrow('no answerer');
     } finally {
       await Promise.all([firstFiber.dispose(), secondFiber.dispose()]);
-      await host.dispose();
     }
-  });
-
-  it('disables gracefully when the userQuestions service is missing', () => {
-    const sent: SentMessage[] = [];
-    const logger = createLogger();
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, logger);
-    ch.install({ get: () => undefined });
-    expect(logger.warn).not.toHaveBeenCalled();
   });
 });

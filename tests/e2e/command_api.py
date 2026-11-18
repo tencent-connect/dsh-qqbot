@@ -121,8 +121,20 @@ class CommandAPI:
             raise SafetyError('Host paths must be relative to its configured authority')
         return json_request(self.host + path, opener=self.opener)
 
+    def plugin_config(self, method, payload=None):
+        endpoint = 'dsh-qqbot/bind'
+        rpc_id = str(uuid.uuid4())
+        response = json_request(self.host + '/api/' + endpoint, {
+            'type': 'client-request', 'rpcId': rpc_id, 'method': endpoint,
+            'payload': {'method': method, 'payload': payload or {}},
+        }, self.opener)
+        result = response['result']
+        if response.get('rpcId') != rpc_id or not result['ok']:
+            raise RpcError(f'{method}: {result.get("error", {}).get("code", "unknown")}')
+        return result['value']
+
     def config(self):
-        return self.get('/qqbot/im-qqbot/config')['config']
+        return self.plugin_config('config.get')['config']
 
     def assert_dummy(self):
         current = self.config()
@@ -285,7 +297,7 @@ class CommandAPI:
         current = self.assert_dummy()
         changed = any(current.get(key) != value for key, value in expected.items())
         ready_before = self.fixture('status')['readyCount']
-        response = json_request(self.host + '/qqbot/im-qqbot/config', expected, self.opener)
+        response = self.plugin_config('config.set', {**expected, 'expectedAppId': current['appId']})
         if not response.get('ok'):
             raise RuntimeError('Web config did not acknowledge its write')
         deadline = time.monotonic() + 20
