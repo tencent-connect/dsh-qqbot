@@ -46,17 +46,21 @@ function setup(options: { file?: string; group?: boolean; flushSession?: () => P
   vi.spyOn(deliverer, 'deliver').mockImplementation(async (...args) => { try { await deliver(...args); } finally { markDelivered(); } });
   const outbound = createOutboundHandler(manager, sender, config, logger, undefined, deliverer, tracker, options.flushSession ?? (async () => true));
   const emit = (type: string, data: Record<string, unknown> = {}) => outbound.routeSessionEvent({ header: { id: record.sessionId } }, { type, data });
-  const input = (id = 'input-1', turn = 1, platformId = 'platform-1') => {
+  const queue = (id = 'input-1', platformId = 'platform-1') => {
     const registered = ledger.registerInput({ key: deliveryKey('input', initial.scope, initial.targetId, platformId), messageId: id,
       sessionId: record.sessionId, senderId: 'synthetic-member', target: { ...initial, msgId: platformId }, contentHash: deliveryKey(content) });
     if (registered) inputs.register(id);
+    return { id, source: { kind: 'user' }, content };
+  };
+  const input = (id = 'input-1', turn = 1, platformId = 'platform-1') => {
+    const message = queue(id, platformId);
     emit('turn/start', { turn });
-    emit('user/message', { id, source: { kind: 'user' }, content });
+    emit('user/message', message);
   };
   const answer = (text = 'answer', step = 1, turn = 1) => emit('assistant/message', { turn, step, message: { id: `answer-${step}`, content: [{ type: 'text', text }] } });
   const start = (attempt = 1, turn = 1, step = 1) => outbound.routeStreamFrame(record.sessionId, { kind: 'attempt-start', attemptId: `attempt-${attempt}`, revision: attempt * 100, turn, step });
   const chunk = (text: string, index = 0, attempt = 1) => outbound.routeStreamFrame(record.sessionId, { kind: 'text-delta', attemptId: `attempt-${attempt}`, revision: attempt * 100 + index + 1, index, text });
-  return { ledger, inputs, bot, stream, media, record, tracker, outbound, emit, input, answer, start, chunk, deliveryFinished, revoke: () => { authorized = false; } };
+  return { ledger, inputs, bot, stream, media, record, tracker, outbound, emit, queue, input, answer, start, chunk, deliveryFinished, revoke: () => { authorized = false; } };
 }
 
 describe('durable delivery identities', () => {
@@ -450,7 +454,7 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(['answer']);
   });
 
-  it.each(['completed', 'error'] as const)('group emits only the settled answer for %s', async kind => {
+  it.each(['completed', 'max-tokens', 'error'] as const)('group emits only the settled answer for %s', async kind => {
     const f = setup({ group: true });
     f.input();
     f.emit('assistant/message', { turn: 1, step: 1, message: { id: 'before-tool', content: [
@@ -459,12 +463,25 @@ describe('verified native output, retaining upstream delivery features', () => {
     f.emit('tool/call', { turn: 1, callId: 'call', name: 'run_code' });
     f.emit('tool/result', { turn: 1, error: { code: 'CODE_RUN_FAILED' }, message: { source: { callId: 'call' } } });
     expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
-    if (kind === 'completed') f.answer('settled answer', 2);
+    if (kind !== 'error') f.answer('settled answer', 2);
     expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
     f.emit('turn/end', { turn: 1, reason: { kind } });
     await vi.waitFor(() => expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual([
-      kind === 'completed' ? 'settled answer' : '⚠️ 本轮处理失败，请稍后重试。',
+      kind === 'completed' ? 'settled answer' : kind === 'max-tokens'
+        ? 'settled answer\n\n⚠️ 已达到输出上限，回复可能不完整。' : '⚠️ 本轮处理失败，请稍后重试。',
     ]));
+  });
+
+  it('attempts the declared group attachment after a rejected final text', async () => {
+    const f = setup({ group: true });
+    const path = join(directory(), 'report.txt');
+    writeFileSync(path, 'fixture report');
+    vi.mocked(f.bot.sendMarkdown).mockRejectedValueOnce(new Error('QQ rejected text'));
+    f.input();
+    f.answer();
+    f.emit('deliverables/presented', { turn: 1, callId: 'present', files: [{ path }] });
+    f.emit('turn/end', { turn: 1, reason: { kind: 'completed' } });
+    await vi.waitFor(() => expect(f.media.sendFile).toHaveBeenCalledTimes(1));
   });
 
   it.each([false, true])('blocks a web answer when external push is off (QQ input=%s)', async withQqInput => {
@@ -553,6 +570,33 @@ describe('verified native output, retaining upstream delivery features', () => {
     f.revoke();
     await vi.runAllTimersAsync();
     expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { group: true, end: 'sole', expected: true },
+    { group: false, end: 'sole', expected: true },
+    { group: true, end: 'web', expected: false },
+    { group: false, end: 'edited', expected: false },
+    { group: true, end: 'discarded', expected: false },
+    { group: true, end: 'revoked', expected: false },
+  ])('notifies a confirmed QQ input on pre-append failure ($group, $end)', async ({ group, end, expected }) => {
+    vi.useFakeTimers();
+    const f = setup({ group, externalTurns: 'off' });
+    const message = f.queue();
+    const { sessionId } = f.record;
+    f.emit('turn/start', { turn: 1 });
+    f.tracker.noteClaim(sessionId, 1, end === 'edited' ? { ...message, content: [] } : message);
+    if (end === 'web') f.tracker.noteClaim(sessionId, 1, { id: 'web', source: { kind: 'user' }, content });
+    if (end === 'discarded') f.outbound.discardInput(sessionId, message.id);
+    if (end === 'revoked') f.revoke();
+    expect(f.tracker.targetFor(sessionId)).toBeUndefined();
+    const failure = { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN_MODEL', message: 'private details' } } };
+    f.emit('turn/end', failure);
+    f.emit('turn/end', failure);
+    await vi.runAllTimersAsync();
+    expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(
+      expected ? ['⚠️ 当前模型不可用，请切换模型后重试。'] : [],
+    );
   });
 
   it('does not treat a canceled turn as a failure', async () => {

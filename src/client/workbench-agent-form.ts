@@ -213,14 +213,15 @@ export function WorkbenchReplyFields({ settings, scope, disabled, source, onChan
   const scopeId = useId();
   const [promptScope, setPromptScope] = useState<ChatScope>('group');
   const promptScopes = [{ value: 'group', label: t("群聊") }, { value: 'c2c', label: t("私聊") }] as const;
-  const activeScope = scope ?? promptScope;
-  const key = activeScope === 'group' ? 'groupPrompt' : 'directPrompt';
-  const label = activeScope === 'group' ? t("群聊补充提示词") : t("私聊补充提示词");
-  const title = scope ? label : t("补充提示词");
-  const editor = h(PromptEditor, {
-    key, label, value: settings[key], disabled, openPromptFile: source?.openPromptFile, onChange: value => onChange({ [key]: value }),
-    hint: scope ? t("保存后，下次组装模型请求时读取。") : undefined,
-  });
+  const labels = { group: t("群聊补充提示词"), c2c: t("私聊补充提示词") };
+  const title = scope ? labels[scope] : t("补充提示词");
+  const editor = (chat: ChatScope): ReactNode => {
+    const key = chat === 'group' ? 'groupPrompt' : 'directPrompt';
+    return h(PromptEditor, {
+      key, label: labels[chat], value: settings[key], disabled, openPromptFile: source?.openPromptFile,
+      onChange: value => onChange({ [key]: value }), hint: scope ? t("保存后，下次组装模型请求时读取。") : undefined,
+    });
+  };
   return h('div', { className: 'imqw-agent-fields' },
     h('section', { className: 'imqw-prompt-editor', 'aria-label': title },
       h('div', { className: 'imqw-prompt-toolbar' },
@@ -229,9 +230,9 @@ export function WorkbenchReplyFields({ settings, scope, disabled, source, onChan
           id: scopeId, label: t("补充提示词场景"), value: promptScope, onChange: setPromptScope, options: promptScopes,
         }),
       ),
-      scope ? editor : promptScopes.map(({ value }) => h('div', {
+      scope ? editor(scope) : promptScopes.map(({ value }) => h('div', {
         key: value, role: 'tabpanel', id: `${scopeId}-${value}-panel`, 'aria-labelledby': `${scopeId}-${value}`, hidden: value !== promptScope,
-      }, value === promptScope ? editor : null)),
+      }, editor(value))),
     ),
     scope !== 'c2c' ? h('p', { className: 'imqw-receiving imqw-muted' }, t("群聊生成完成后发送整条回复。")) : null,
     ...([

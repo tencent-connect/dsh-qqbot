@@ -242,6 +242,30 @@ it('applies staged model, effort, preset, workspace and native permission on new
   expect(setPermission).toHaveBeenCalledWith(session.agent.session, 'read-only');
 });
 
+it('applies a QQ model command to a restored Session before the next message', async () => {
+  const id = 'session-restored';
+  const prefs = new PrefsStore();
+  prefs.setSessionId(KEY, id, { durable: true });
+  let settings = WORKBENCH_SETTINGS;
+  let model = settings.model!;
+  const handle = fakeHandle(id);
+  const { registry } = createRegistry(async () => ({
+    ...handle, agent: { ...handle.agent, model: { current: () => model, select: value => { model = value; } } },
+  }));
+  const manager = new SessionManager(onDiskCtx(id), registry, ConfigSchema({ appId: APP_ID, appSecret: 'fixture' }), createLogger(), prefs, {
+    read: () => settings, defaults: () => WORKBENCH_SETTINGS,
+    update: (_key, patch) => { settings = { ...settings, ...patch }; return true; },
+  });
+  managers.push(manager);
+  const next = { provider: 'p', model: 'replacement' };
+  await manager.setModelOverride('c2c', PEER, next, { senderId: PEER, replyTarget: REPLY });
+  expect(manager.getEffectiveModel('c2c', PEER)).toEqual(next);
+  expect(settings.model).toEqual(next);
+  expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(id);
+  expect(registry.create).not.toHaveBeenCalled();
+  expect(registry.resume).toHaveBeenCalledTimes(1);
+});
+
 afterEach(async () => {
   await Promise.all(managers.splice(0).map((m) => m.disposeAll()));
   rmSync(env.home, { recursive: true, force: true });

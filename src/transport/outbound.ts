@@ -151,7 +151,8 @@ class OutboundRouter {
     const event = parseEvent(raw);
     if (event === undefined) return;
 
-    const plan = this.tracker.planFor(sessionId);
+    const plan = this.tracker.planFor(sessionId) ?? (event.type === 'turn/end' && event.failure === 'model-unavailable'
+      ? this.tracker.planForModelSetupFailure(sessionId) : undefined);
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
       if (plan?.target.scope === 'group') void this.finishGroup(session, event, plan);
@@ -351,7 +352,7 @@ class OutboundRouter {
     const answer = this.groupAnswers.get(id)?.text;
     const files = this.presentedFiles.get(id) ?? [];
     this.resetTurnState(id);
-    if (!end.completed && !end.failure) return;
+    if (!end.completed && !end.truncated && !end.failure) return;
     try {
       if (!await this.flushSession?.(session)) {
         this.logger.warn('QQ group reply skipped because the Session could not be flushed.');
@@ -363,7 +364,8 @@ class OutboundRouter {
         await sendText(this.bot, target, failureNotice(end.failure), this.config.textChunkLimit);
         return;
       }
-      if (answer !== undefined) await sendText(this.bot, target, answer, this.config.textChunkLimit);
+      const text = end.truncated ? [answer, '⚠️ 已达到输出上限，回复可能不完整。'].filter(Boolean).join('\n\n') : answer;
+      if (text !== undefined) await this.send(target, text, 'sendGroupReply');
       if (!this.closed && files.length > 0) await this.deliverer?.deliver(target, files, session.header.cwd);
     } catch (error) {
       this.logger.warn(`QQ group reply could not be delivered: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type LegacyPreference, type PrefsStore } from '../model/prefs-store.ts';
-import { legacyDerivedSessionId } from '../session/session-id.ts';
+import { legacyDerivedSessionId, mintSessionId } from '../session/session-id.ts';
 import { atomicWrite } from '../shared/atomic-file.ts';
 import type { Logger } from '../types.ts';
 import { deliveryKey } from '../transport/delivery-ledger.ts';
@@ -42,12 +42,21 @@ export async function importLegacyPreferences(options: {
         continue;
       }
       const savedId = ids[key];
-      const derivedId = legacyDerivedSessionId(key);
-      const id = validSessionId(savedId) && await ownsSession(savedId) ? savedId
-        : await ownsSession(derivedId) ? derivedId : undefined;
-      if (savedId !== undefined && id === undefined) {
-        skipped++;
-        continue;
+      let id: string | undefined;
+      if (validSessionId(savedId)) {
+        if (await ownsSession(savedId)) {
+          id = savedId;
+        } else if (/^session-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(savedId)) {
+          // 0.5.5 reserves an ID on /new before a Session exists. Keep the reset
+          // without claiming an ID the current profile cannot verify.
+          id = mintSessionId();
+        } else {
+          skipped++;
+          continue;
+        }
+      } else {
+        const derivedId = legacyDerivedSessionId(key);
+        if (await ownsSession(derivedId)) id = derivedId;
       }
       const model = object(overrides[key]);
       const preset = presets[key];

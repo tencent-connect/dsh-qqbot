@@ -66,6 +66,10 @@ async function verifyMessages(page, client, fixture, until) {
   await history.locator('.imqw-timeline-row').filter({ hasText: '网页发送失败验收' })
     .getByText('QQ 拒绝', { exact: true }).waitFor();
   await fixture('outbound', { mode: 'success' });
+  await text.fill('修改后重新发送');
+  await send.click();
+  await composer.getByRole('status').filter({ hasText: 'QQ 接口已接受' }).waitFor();
+  assert((await fixture('observations')).outbound.some(request => request.content.includes('修改后重新发送')));
 
   const tree = page.getByRole('complementary', { name: 'QQ 会话列表' });
   const refreshList = button(tree, '刷新会话列表');
@@ -92,8 +96,27 @@ async function verifyMessages(page, client, fixture, until) {
 
   const openCurrent = button(pane, '当前 Session');
   const newSession = button(pane, '新建 Session');
+  const submitted = [];
+  await page.route('**/api/qqbot/workbench/conversations/new-session', async route => {
+    submitted.push(route.request().postDataJSON());
+    const conflict = submitted.length === 1;
+    await route.fulfill({ status: conflict ? 409 : 201, json: conflict
+      ? { error: '会话或设置已变化，请刷新后重试。' } : { sessionId: 'test-created-session' } });
+  }, { times: 2 });
+  await page.route(/\/api\/qqbot\/workbench\/conversations\?.*scope=c2c.*openId=/, async route => {
+    const response = await route.fetch();
+    const { conversations } = await response.json();
+    await route.fulfill({ response, json: { conversations: conversations.map(peer => ({
+      ...peer, revision: submitted[0].revision + 1,
+    })) } });
+  }, { times: 1 });
   await newSession.click();
-  await button(page.getByRole('dialog', { name: '新建 QQ Session' }), '取消').click();
+  const modal = page.getByRole('dialog', { name: '新建 QQ Session' });
+  await button(modal, '创建并切换').click();
+  await modal.getByText('会话状态已刷新。请核对设置后再创建。', { exact: true }).waitFor();
+  await button(modal, '创建并切换').click();
+  await modal.waitFor({ state: 'hidden' });
+  assert.deepEqual(submitted.map(item => item.revision), [submitted[0].revision, submitted[0].revision + 1]);
   await openCurrent.click();
   await button(page, '返回 QQ 对话').click();
   await row.waitFor();
@@ -336,6 +359,16 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   await page.getByRole('tab', { name: '新会话默认设置' }).click();
   const defaultsForm = page.getByRole('tabpanel', { name: '新会话默认设置' });
   const baseline = await defaults();
+  const promptScopes = defaultsForm.getByRole('tablist', { name: '补充提示词场景' });
+  const groupSources = defaultsForm.getByRole('tablist', { name: '群聊补充提示词来源' });
+  const scopeDraft = defaultsForm.getByRole('textbox', { name: '群聊补充提示词', exact: true });
+  await groupSources.getByRole('tab', { name: '直接输入' }).click();
+  await scopeDraft.fill('保留群聊的输入草稿');
+  await groupSources.getByRole('tab', { name: '文件路径' }).click();
+  await promptScopes.getByRole('tab', { name: '私聊' }).click();
+  await promptScopes.getByRole('tab', { name: '群聊' }).click();
+  await groupSources.getByRole('tab', { name: '直接输入' }).click();
+  assert.equal(await scopeDraft.inputValue(), '保留群聊的输入草稿');
   await bind(defaultsForm, '群聊补充提示词', word);
   assert.equal(await button(defaultsForm, '编辑原文件').count(), 0);
   if (word.openLog) {
@@ -386,7 +419,16 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
   await conflict.getByRole('alert').filter({ hasText: '文件已被外部修改' }).waitFor();
   assert.equal(await draft.inputValue(), '页面还未写入的草稿');
   assert.equal(await readFile(path, 'utf8'), external);
-  await button(conflict, '取消').click();
+  assert(await button(conflict, '保存到原文件').isDisabled());
+  await button(conflict, '读取最新版本').click();
+  await conflict.getByText('最新文件内容', { exact: true }).waitFor();
+  assert.equal(await draft.inputValue(), '页面还未写入的草稿');
+  assert.equal(await readFile(path, 'utf8'), external);
+  const merged = external + '页面还未写入的草稿';
+  await draft.fill(merged);
+  await button(conflict, '保存到原文件').click();
+  await conflict.waitFor({ state: 'hidden' });
+  assert.equal(await readFile(path, 'utf8'), merged);
   await preview.click();
   await text.filter({ hasText: '外部编辑' }).waitFor();
   await input.fill(path + '.missing.md');

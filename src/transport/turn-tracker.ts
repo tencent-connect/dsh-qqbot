@@ -53,6 +53,7 @@ interface TrackedTurn {
   target: ReplyTarget;
   external: boolean;
   invalid: boolean;
+  preparationInput?: { messageId: string; content: unknown } | null;
 }
 
 /** user/message 事件数据（宿主契约：data 即 UserMessage；兼容 { message } 包裹形态） */
@@ -107,6 +108,31 @@ export class TurnTracker implements DeliveryTargetResolver {
     if (tracked?.inputs.has(messageId)) tracked.invalid = true;
     this.inputs.release(messageId);
     this.inputs.ledger?.discardInput(sessionId, messageId);
+  }
+
+  public noteClaim(sessionId: string, turn: number, message: UserMessageData): void {
+    const tracked = this.turns.get(sessionId);
+    if (!this.verifiesSources || !tracked || tracked.state.turn !== turn || tracked.preparationInput === null) return;
+    const { messageId, source, content } = readUserMessage(message);
+    if (!messageId || classifyTurnInput(source, this.inputs.has(messageId)) !== 'qq'
+      || (tracked.preparationInput && tracked.preparationInput.messageId !== messageId)) {
+      tracked.preparationInput = null;
+      return;
+    }
+    tracked.preparationInput = { messageId, content };
+  }
+
+  /** The Host can fail preparation after claiming the inbox and before appending user/message. */
+  public planForModelSetupFailure(sessionId: string): DeliveryPlan | undefined {
+    const tracked = this.turns.get(sessionId);
+    const candidate = tracked?.preparationInput;
+    if (!tracked || !candidate || tracked.invalid || tracked.state.origin !== null || tracked.state.sawInternal) return undefined;
+    const receipt = this.inputs.claim(candidate.messageId, sessionId, candidate.content, tracked.state.turn, tracked.target);
+    if (!receipt) return undefined;
+    tracked.inputs.add(receipt.messageId);
+    tracked.target = { ...receipt.target };
+    noteTurnInput(tracked.state, 'qq');
+    return this.planFor(sessionId);
   }
 
   /** user/message：按这一条消息归类，不发送 */
@@ -228,8 +254,7 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 }
 
-function readUserMessage(data: Record<string, unknown>): { messageId: string | undefined; source: TurnInputSource | undefined; content: unknown } {
-  const raw = data as UserMessageData;
+function readUserMessage(raw: UserMessageData): { messageId: string | undefined; source: TurnInputSource | undefined; content: unknown } {
   const id = raw.id ?? raw.message?.id;
   return {
     messageId: typeof id === 'string' && id !== '' ? id : undefined,

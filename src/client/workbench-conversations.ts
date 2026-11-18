@@ -257,6 +257,7 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
   const createSession = async (): Promise<void> => {
     if (!newSession || mutation.current) return;
     const { peer: target, settings } = newSession;
+    if (!target.receiving || !target.admitted) return;
     const key = scopedKey(appId, target);
     const controller = new AbortController();
     const input: WorkbenchNewSession = {
@@ -279,6 +280,26 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
     } catch (error) {
       if (controller.signal.aborted) return;
       setCreateError(error instanceof Error ? error.message : t("无法新建 QQ Session。"));
+      if (error instanceof HttpError && error.status === 409) {
+        try {
+          const query = new URLSearchParams({ appId, scope: target.scope, openId: target.openId });
+          const { conversations } = await fetchJson<{ conversations: WorkbenchConversation[] }>(
+            `${WORKBENCH_CONVERSATIONS_PATH}?${query}`, { cache: 'no-store', signal: controller.signal },
+          );
+          const latest = conversations.find(item => conversationKey(item) === conversationKey(target));
+          if (!controller.signal.aborted && latest?.agent) {
+            const agent = latest.agent;
+            setNewSession({ peer: latest, settings: {
+              ...agent,
+              cwd: settings.cwd === target.agent?.cwd ? agent.cwd : settings.cwd,
+              preset: settings.preset === target.agent?.preset ? agent.preset : settings.preset,
+            } });
+            setCreateError(t("会话状态已刷新。请核对设置后再创建。"));
+          }
+        } catch {
+          // A failed refresh leaves the selections and original conflict visible.
+        }
+      }
     } finally {
       if (!controller.signal.aborted) {
         generation.current++;
@@ -501,7 +522,8 @@ export function RobotConversations({ state, robot, agentSource, views, settingsS
       onClose: () => { if (!mutation.current) setNewSession(undefined); },
       footer: h(Fragment, null,
         h(Button, { type: 'button', variant: 'ghost', disabled: !!busyKey, onClick: () => setNewSession(undefined) }, t("取消")),
-        h(Button, { type: 'button', variant: 'primary', disabled: !!busyKey, onClick: () => { void createSession(); } },
+        h(Button, { type: 'button', variant: 'primary', disabled: !!busyKey || !newSession.peer.receiving || !newSession.peer.admitted,
+          onClick: () => { void createSession(); } },
           busyKey ? t("正在创建…") : t("创建并切换")),
       ),
     }, h(WorkbenchAgentFields, {

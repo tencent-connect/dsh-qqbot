@@ -252,6 +252,9 @@ export function bootstrapGateway(
   };
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void, options?: { global?: boolean }): void })
     .on('session/event', routeSessionEvent as (...args: unknown[]) => void, { global: true });
+  ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+    if (active) turnTracker.noteClaim(agent.session.header.id, turn, message);
+  }, { global: true });
   (ctx as unknown as { on(event: 'agent/inbox/discarded', handler: (payload: {
     agent: { session: { header: { id: string } } }; message: { id: string };
   }) => void, options: { global: true }): void }).on('agent/inbox/discarded', ({ agent, message }) => {

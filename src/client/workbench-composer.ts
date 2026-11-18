@@ -186,7 +186,7 @@ export const QqComposer = forwardRef<QqComposerHandle, {
     ) : null,
     h('textarea', {
       ref: input, 'aria-label': t("发送到 QQ 的消息"), rows: 2, maxLength: QQ_MANUAL_MESSAGE_LIMIT,
-      value: draft.text, readOnly: !!operation, disabled: !!disabledReason, placeholder: t("输入消息"),
+      value: draft.text, readOnly: editLocked, disabled: !!disabledReason, placeholder: t("输入消息"),
       onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { edit({ ...draft, text: event.currentTarget.value }); setStatus(''); }, onKeyDown,
     }),
     h('div', { className: 'imqw-composer-toolbar' },

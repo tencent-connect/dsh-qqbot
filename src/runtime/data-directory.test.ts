@@ -53,19 +53,28 @@ it('adopts only 0.5.5 bindings belonging to the current profile and leaves the s
   const explicit = prefix + 'group:explicit';
   const derived = prefix + 'c2c:derived';
   const foreign = prefix + 'group:foreign';
+  const reset = prefix + 'c2c:reset';
+  const pending = 'session-d5bb3dfb-66f3-43b0-9003-472673db9afa';
   const derivedId = legacyDerivedSessionId(derived);
   const original = JSON.stringify({
-    sessionIds: { [explicit]: 'session-one', [foreign]: 'session-two', [prefix + 'group:broken']: 123, 'qqbot:other:group:peer': 'session-one' },
-    overrides: { [derived]: { provider: 'test-provider', model: 'test-model' } }, presets: { [derived]: 'standard' },
+    sessionIds: { [explicit]: 'session-one', [foreign]: 'session-two', [reset]: pending, [prefix + 'group:broken']: 123, 'qqbot:other:group:peer': 'session-one' },
+    overrides: { [derived]: { provider: 'test-provider', model: 'test-model' }, [reset]: { provider: 'test-provider', model: 'reset-model' } },
+    presets: { [derived]: 'standard', [reset]: 'minimal' },
   });
   writeFileSync(source, original);
   const path = join(dir, 'current.json');
   const prefs = new PrefsStore(undefined, { path });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
-  const ownsSession = vi.fn(async (id: string) => id === 'session-one' || id === derivedId);
+  const ownsSession = vi.fn(async (id: string) => id === 'session-one' || id === derivedId || id === legacyDerivedSessionId(reset));
   const options = { source, directory: dir, appId: 'bot', prefs, logger, ownsSession, active: () => true };
   await importLegacyPreferences(options);
-  expect(prefs.listSessionBindings('bot').map(binding => binding.current).sort()).toEqual([derivedId, 'session-one'].sort());
+  const reserved = prefs.getSessionId(reset);
+  expect(reserved).toMatch(/^session-/);
+  expect(reserved).not.toBe(pending);
+  expect(prefs.listSessionBindings('bot').map(binding => binding.current).sort()).toEqual([derivedId, 'session-one', reserved].sort());
+  expect(prefs.getOverride(reset)?.model).toBe('reset-model');
+  expect(prefs.getPreset(reset)).toBe('minimal');
+  expect(ownsSession).not.toHaveBeenCalledWith(legacyDerivedSessionId(reset));
   expect(prefs.getOverride(derived)).toEqual({ provider: 'test-provider', model: 'test-model' });
   expect(prefs.getPreset(derived)).toBe('standard');
   expect(prefs.listSessionBindings('other')).toEqual([]);

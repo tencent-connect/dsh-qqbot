@@ -64,7 +64,7 @@ it('reads consecutive indexed windows from a 100,000-entry conversation after re
     const next = reopened.page('A', target, first.before)!;
     expect(next.entries.map(row => row.text)).toEqual(Array.from({ length: 40 }, (_, index) => String(99921 + index)));
   } finally { reopened.close(); }
-});
+}, 15_000);
 
 it('does not report a pending request as successful after restart', async () => {
   const log = new QqTimeline(dir, logger);

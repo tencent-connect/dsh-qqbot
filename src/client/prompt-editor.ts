@@ -4,7 +4,7 @@ import { createElement as h, Fragment, useEffect, useId, useRef, useState, type 
 import { Button, Input, Modal, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { EXTRA_MAX_CHARS } from '../prompt/extra.ts';
 import { WORKBENCH_PROMPT_EXTENSIONS, WORKBENCH_PROMPT_PATH_LIMIT, WORKBENCH_PROMPT_PREVIEW_PATH, WORKBENCH_PROMPT_WRITE_PATH, type WorkbenchPrompt, type WorkbenchPromptPreview } from '../shared/workbench-agent-settings.ts';
-import { fetchJson } from './http.ts';
+import { fetchJson, HttpError } from './http.ts';
 import { PromptFilePicker } from './prompt-file-picker.ts';
 
 type EditorPage = 'edit' | 'preview';
@@ -191,14 +191,16 @@ function PromptTextEdit({ path, initial, onClose, onSaved }: {
 }): ReactNode {
   const id = useId();
   const [text, setText] = useState(initial.text);
+  const [baseline, setBaseline] = useState(initial);
   const [page, setPage] = useState<EditorPage>('edit');
   const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false);
   const [error, setError] = useState('');
   const request = useRef<AbortController>();
   useEffect(() => () => request.current?.abort(), []);
 
   const save = async (): Promise<void> => {
-    if (request.current || text === initial.text) return;
+    if (request.current || conflict || text === baseline.text) return;
     const controller = new AbortController();
     request.current = controller;
     setSaving(true);
@@ -206,11 +208,37 @@ function PromptTextEdit({ path, initial, onClose, onSaved }: {
     try {
       const snapshot = await fetchJson<WorkbenchPromptPreview>(WORKBENCH_PROMPT_WRITE_PATH, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ path, revision: initial.revision, text }),
+        body: JSON.stringify({ path, revision: baseline.revision, text }),
       });
       if (!controller.signal.aborted) onSaved(snapshot);
     } catch (error) {
-      if (!controller.signal.aborted) setError(error instanceof Error ? error.message : t("无法保存原文件。"));
+      if (!controller.signal.aborted) {
+        if (error instanceof HttpError && error.status === 409) setConflict(true);
+        setError(error instanceof Error ? error.message : t("无法保存原文件。"));
+      }
+    } finally {
+      request.current = undefined;
+      if (!controller.signal.aborted) setSaving(false);
+    }
+  };
+
+  const refresh = async (): Promise<void> => {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setSaving(true);
+    try {
+      const snapshot = await fetchJson<WorkbenchPromptPreview>(WORKBENCH_PROMPT_PREVIEW_PATH, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }), signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (snapshot.kind !== 'text') throw new Error(t("无法预览补充提示词。"));
+      setBaseline(snapshot);
+      setConflict(false);
+      setError('');
+    } catch (error) {
+      if (!controller.signal.aborted) setError(error instanceof Error ? error.message : t("无法预览补充提示词。"));
     } finally {
       request.current = undefined;
       if (!controller.signal.aborted) setSaving(false);
@@ -223,7 +251,8 @@ function PromptTextEdit({ path, initial, onClose, onSaved }: {
     onClose: () => { if (!request.current) onClose(); },
     footer: h(Fragment, null,
       h(Button, { type: 'button', variant: 'ghost', disabled: saving, onClick: onClose }, t("取消")),
-      h(Button, { type: 'button', variant: 'primary', disabled: saving || text === initial.text, onClick: () => { void save(); } },
+      conflict ? h(Button, { type: 'button', variant: 'outline', disabled: saving, onClick: () => { void refresh(); } }, t("读取最新版本")) : null,
+      h(Button, { type: 'button', variant: 'primary', disabled: saving || conflict || text === baseline.text, onClick: () => { void save(); } },
         saving ? t("正在保存…") : t("保存到原文件"))),
   }, h('div', { className: 'imqw-prompt-fields' },
     h('div', { className: 'imqw-prompt-toolbar' },
@@ -236,5 +265,10 @@ function PromptTextEdit({ path, initial, onClose, onSaved }: {
       h('div', { role: 'tabpanel', id: `${id}-preview-panel`, 'aria-labelledby': `${id}-preview`, hidden: page !== 'preview' },
         h('pre', { className: 'imqw-prompt-preview', 'aria-label': t("原文件编辑预览"), tabIndex: 0 }, text || t("文件内容为空。")))),
     error ? h('p', { className: 'imqb-error', role: 'alert' }, error) : null,
+    baseline !== initial && !conflict ? h('details', null,
+      h('summary', null, t("最新文件内容")),
+      h('p', { className: 'imqw-muted', role: 'status' }, t("已保留草稿。请核对最新文件后再保存。")),
+      h('pre', { className: 'imqw-prompt-preview', tabIndex: 0 }, baseline.text || t("文件内容为空。")),
+    ) : null,
   ));
 }

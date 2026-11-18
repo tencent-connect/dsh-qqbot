@@ -247,26 +247,38 @@ export class SessionManager {
   /**
    * 切换模型（fork + 重建会话，保留历史）
    */
-  async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
+  async setModelOverride(
+    scope: ChatScope,
+    peerId: string,
+    route: ModelRoute,
+    revive?: { senderId: string; replyTarget: ReplyTarget },
+  ): Promise<void> {
     this.assertActive();
     const key = this.sessionKey(scope, peerId);
 
-    if (this.switching.has(key) || this.rebuilding.has(key)) {
+    if (this.sessionChangePending(scope, peerId)) {
       throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
     }
 
-    if (!this.peerSettings?.update(key, { model: route, reasoningEffort: '' })) this.modelResolver.setOverride(key, route);
-
     const record = this.sessions.get(key);
-    if (!record) {
-      this.logger.info(`model pref saved (no active session): key=${key} → ${route.provider}/${route.model}`);
-      return;
-    }
-
     this.rebuilding.add(key);
-    try { await this.rebuildSession(record, { route }); }
-    finally { this.rebuilding.delete(key); }
-    this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model}`);
+    try {
+      let restored: SessionRecord | undefined;
+      if (!record && revive) {
+        const id = this.currentSessionId(key);
+        if (id && (this.agents.get(SessionId(id)) || await this.host.sessionExists(id))) {
+          restored = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
+          if (restored.sessionId !== id) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+          restored.agent.model?.select(route);
+        }
+      }
+      const saved = this.peerSettings?.update(key, { model: route, reasoningEffort: '' });
+      if (!saved || (restored && !restored.agent.model)) this.modelResolver.setOverride(key, route);
+      if (record) await this.rebuildSession(record, { route });
+      else if (restored && !restored.agent.model) await this.rebuildSession(restored, { route });
+    } finally {
+      this.rebuilding.delete(key);
+    }
   }
 
   /**
