@@ -218,12 +218,13 @@ QQ 提问通过原生 `followup` 进入 Inbox。同一群或联系人的输入�
 | `/new`（别名 `/reset` `/clear`） | 开始新会话（清空上下文） |
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
 | `/model` | 查看或切换模型 |
+| `/effort [档位]` | 查看当前推理强度与可选档位，空闲时为当前 Session 设置档位。用 `/effort default` 恢复模型默认值 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/stop` | 中止当前生成 |
 | `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |
 | `/bot-version` | 查看版本信息 |
 | `/bot-me` | 查看自己的 OpenID，群聊中同时显示群 OpenID |
-| `/bot-status` | 查看当前会话状态 |
+| `/bot-status` | 查看模型、推理强度、生成状态、排队消息数和上下文占用估算 |
 | `/bot-help` | 查看所有指令 |
 
 ## 核心模块

@@ -6,6 +6,7 @@
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { ModelSelection } from '../model/types.ts';
 
 /** 日志最小接口 */
 export interface AdapterLogger {
@@ -25,6 +26,8 @@ export interface HostAdapter {
   buildForkSeed(events: readonly unknown[], boundary: number): Promise<readonly unknown[] | undefined>;
   /** 会话 header 读取（取 agentPreset 等）；会话不存在、服务缺失或读取失败返回 undefined */
   sessionHeader(sessionId: string): Promise<SessionHeaderLike | undefined>;
+  storedModelSelection(sessionId: string): Promise<ModelSelection | undefined>;
+  contextOccupancy(session: unknown): number | undefined;
   /**
    * 会话是否存在于持久化层。
    *
@@ -43,6 +46,18 @@ export interface HostAdapter {
   attachSessionToWorkspace(sessionId: string, cwd: string): Promise<void>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
+}
+
+interface SessionQueryLike {
+  observeSession(id: string): Promise<Disposable & {
+    projections?: { values: { modelSelection?: { next: ModelSelection | null } } };
+  }>;
+}
+
+interface ContextPressureLike {
+  projectedTokens?: number;
+  pressureTokens?: number;
+  contextWindow?: number;
 }
 
 /** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
@@ -191,6 +206,34 @@ export function createHostAdapter(
         return await readSessionHeader(persistence, sessionId);
       } catch {
         return undefined; // 读不到 preset 不该阻断会话打开，回落到当前 effective preset
+      }
+    },
+
+    async storedModelSelection(sessionId) {
+      const query = safeGet(ctx, 'sessionQuery') as SessionQueryLike | undefined;
+      if (typeof query?.observeSession !== 'function') return undefined;
+      const observation = await query.observeSession(sessionId);
+      try {
+        return observation.projections?.values.modelSelection?.next ?? undefined;
+      } finally {
+        observation[Symbol.dispose]();
+      }
+    },
+
+    contextOccupancy(session) {
+      const projections = safeGet(ctx, 'sessionProjections') as {
+        snapshot(session: unknown, keys: readonly string[]): { values: { contextPressure?: ContextPressureLike } };
+      } | undefined;
+      if (typeof projections?.snapshot !== 'function') return undefined;
+      try {
+        const pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure;
+        const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
+        const window = pressure?.contextWindow;
+        if (used === undefined || !Number.isFinite(used) || used < 0
+          || window === undefined || !Number.isFinite(window) || window <= 0) return undefined;
+        return Math.min(100, Math.round(used / window * 100));
+      } catch {
+        return undefined;
       }
     },
 

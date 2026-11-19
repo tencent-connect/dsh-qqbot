@@ -39,6 +39,7 @@ export function createFixtureCommands(config = {}) {
   const secondaryPreset = identifier(config.presets?.secondary ?? 'minimal', 'secondary preset');
   return Object.freeze({
     help: '/bot-help', status: '/bot-status', model: '/model',
+    effort: '/effort', 'effort-high': '/effort high', 'effort-default': '/effort default', 'effort-invalid': '/effort max',
     'model-primary': `/model ${primaryPath}`,
     'model-short': `/model ${primary.model}`,
     'model-secondary': `/model ${secondaryPath}`,

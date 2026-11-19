@@ -24,7 +24,7 @@ import { resolveAgentCwd, resolveRobotWorkspace } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
-import type { ModelRoute, ModelEntry } from '../model/types.ts';
+import type { ModelRoute, ModelEntry, ModelSelection } from '../model/types.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
@@ -47,6 +47,7 @@ import type {
 
 export class SessionSwitchConflict extends Error {}
 export class SessionArchivedError extends Error {}
+export class ReasoningEffortError extends Error {}
 
 export interface PeerAgentSettings {
   read(key: string): WorkbenchAgentSettings | undefined;
@@ -204,10 +205,94 @@ export class SessionManager {
     return this.sessions.get(key)?.agent.model?.current?.() ?? this.configuredRoute(key);
   }
 
-  private configuredRoute(key: string, settings = this.peerSettings?.read(key)): (ModelRoute & { reasoningEffort?: string }) | undefined {
+  private configuredRoute(key: string, settings = this.peerSettings?.read(key)): ModelSelection | undefined {
     if (!settings) return this.modelResolver.getEffectiveRoute(key);
     const route = settings.model ?? this.modelResolver.resolveDefault(false);
     return { ...route, ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}) };
+  }
+
+  async reasoningSelection(scope: ChatScope, peerId: string): Promise<{
+    target: 'current' | 'next'; selection?: ModelSelection;
+  }> {
+    const key = this.sessionKey(scope, peerId);
+    const id = this.currentSessionId(key);
+    if (!id) return { target: 'next', selection: this.configuredRoute(key) };
+    this.assertBindingOwner(key, id, true);
+    const agent = this.boundAgent(key, id);
+    if (agent) return { target: 'current', selection: agent.model?.current?.() };
+    const exists = await this.host.sessionExists(id);
+    if (this.currentSessionId(key) !== id) throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    const live = this.boundAgent(key, id);
+    if (live) return { target: 'current', selection: live.model?.current?.() };
+    if (exists === false) {
+      return { target: 'next', selection: this.configuredRoute(key) };
+    }
+    const selection = await this.host.storedModelSelection(id);
+    if (this.currentSessionId(key) !== id) throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    return { target: 'current', selection };
+  }
+
+  resolveReasoning(route: ModelRoute) {
+    return this.modelResolver.resolveReasoning(route);
+  }
+
+  async setReasoningEffort(options: {
+    target: ReplyTarget;
+    senderId: string;
+    effort: string;
+    assertAllowed: () => void;
+  }): Promise<string> {
+    const { target, senderId, effort, assertAllowed } = options;
+    const { scope, targetId: peerId } = target;
+    const key = this.sessionKey(scope, peerId);
+    const id = this.currentSessionId(key);
+    const assertCurrent = () => {
+      this.assertActive();
+      assertAllowed();
+      if (this.sessionChangePending(scope, peerId) || this.currentSessionId(key) !== id) {
+        throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+      }
+    };
+    const missing = () => new ReasoningEffortError('当前还没有 Session，请先发一条普通消息再设置推理强度。');
+    assertCurrent();
+    if (!id) throw missing();
+    this.assertBindingOwner(key, id, true);
+    this.assertNotArchived(id);
+    let agent = this.boundAgent(key, id);
+    if (!agent) {
+      const exists = await this.host.sessionExists(id);
+      assertCurrent();
+      if (exists === false) throw missing();
+      agent = (await this.getOrCreate(scope, peerId, senderId, target, id)).agent;
+    }
+    const model = agent.model;
+    const selection = model?.current?.();
+    if (!model || !selection) throw new ReasoningEffortError('当前宿主无法在原 Session 中调整推理强度。');
+    const assertIdle = () => {
+      if (agent.status !== 'idle') throw new ReasoningEffortError('当前正在生成，请等本轮结束后再调整推理强度。');
+    };
+    assertIdle();
+    const { provider, model: modelId } = selection;
+    const reasoning = await this.resolveReasoning(selection);
+    assertCurrent();
+    this.assertBindingOwner(key, id, true);
+    this.assertNotArchived(id);
+    assertIdle();
+    const current = model.current?.();
+    if (agent !== this.boundAgent(key, id) || current?.provider !== provider || current.model !== modelId
+      || current.reasoningEffort !== selection.reasoningEffort) {
+      throw new SessionSwitchConflict('当前模型选择已变化，请重试。');
+    }
+    const supported = reasoning?.efforts.map(item => item.id) ?? [];
+    if (effort !== 'default' && !supported.some(id => id === effort)) {
+      const message = supported.length > 0 ? `可用档位：${supported.join('、')}。也可以使用 /effort default。`
+        : '当前模型没有可选推理档位。';
+      throw new ReasoningEffortError(message);
+    }
+    if (effort !== 'default' || current.reasoningEffort !== undefined) {
+      model.select({ provider, model: modelId, ...(effort === 'default' ? {} : { reasoningEffort: effort }) });
+    }
+    return effort === 'default' ? `默认${reasoning?.defaultEffort ? `（${reasoning.defaultEffort}）` : ''}` : effort;
   }
 
   replyOptions(sessionId: string): Pick<WorkbenchAgentSettings, 'streaming' | 'showToolResults'> {
@@ -434,18 +519,25 @@ export class SessionManager {
     return this.sessions.get(this.sessionKey(scope, peerId));
   }
 
-  getStatus(scope: ChatScope, peerId: string): SessionStatus {
-    const record = this.getSessionRecord(scope, peerId);
-    const route = this.getEffectiveModel(scope, peerId);
+  getStatus(scope: ChatScope, peerId: string): SessionStatus | undefined {
+    const key = this.sessionKey(scope, peerId);
+    const record = this.sessions.get(key);
+    const sessionId = this.currentSessionId(key);
+    if (!sessionId) return undefined;
+    this.assertBindingOwner(key, sessionId, true);
+    const agent = this.boundAgent(key, sessionId);
+    if (!agent) return undefined;
+    const inbox = agent.inbox;
 
     return {
-      active: !!record,
-      sessionId: record?.sessionId,
-      provider: route?.provider,
-      model: route?.model,
-      preset: record?.agentPreset,
+      sessionId,
+      selection: agent.model?.current?.() ?? this.configuredRoute(key),
+      running: agent.status === 'running',
+      queued: inbox && inbox.nextTurn.length + inbox.nextStep.filter(message => message.source?.kind === 'user').length,
+      contextOccupancy: this.host.contextOccupancy(agent.session),
+      preset: record?.agentPreset ?? agent.session.header?.agentPreset,
       lastActivity: record?.lastActivity,
-      messageCount: this.countMessages(record),
+      messageCount: this.countMessages(agent),
     };
   }
 
@@ -490,9 +582,8 @@ export class SessionManager {
     return lines.join('\n');
   }
 
-  private countMessages(record: SessionRecord | undefined): number {
-    if (!record) return 0;
-    const events = this.host.sessionEvents(record.agent.session) as readonly SessionEventLike[];
+  private countMessages(agent: DshAgent): number {
+    const events = this.host.sessionEvents(agent.session) as readonly SessionEventLike[];
     if (!events) return 0;
 
     let count = 0;
@@ -513,6 +604,11 @@ export class SessionManager {
   /** prefs 命中沿用；miss 返回 0.5.x 派生候选，由 getOrCreate 按 resume 结果迁移或铸造 */
   private currentSessionId(sessionKey: string): string | undefined {
     return this.modelResolver.getSessionId(sessionKey) ?? this.modelResolver.legacySessionId(sessionKey);
+  }
+
+  private boundAgent(key: string, sessionId: string): DshAgent | undefined {
+    const record = this.sessions.get(key);
+    return this.agents.get(SessionId(sessionId)) ?? (record?.sessionId === sessionId ? record.agent : undefined);
   }
 
   /** 候选命中后落盘，后续永远走 prefs */
@@ -627,6 +723,7 @@ export class SessionManager {
     peerId: string,
     senderId: string,
     replyTarget: ReplyTarget,
+    resumeOnly?: string,
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
     while (this.switching.has(key)) {
@@ -635,6 +732,9 @@ export class SessionManager {
     this.assertActive();
     const existing = this.sessions.get(key);
     const candidate = existing?.sessionId ?? this.currentSessionId(key);
+    if (resumeOnly !== undefined && candidate !== resumeOnly) {
+      throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    }
     if (candidate !== undefined) this.assertNotArchived(candidate);
 
     if (existing) {
@@ -652,12 +752,15 @@ export class SessionManager {
       this.assertActive();
       this.assertBindingOwner(key, shared.sessionId);
       this.assertNotArchived(shared.sessionId);
+      if (resumeOnly !== undefined && shared.sessionId !== resumeOnly) {
+        throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+      }
       shared.replyTarget = replyTarget;
       shared.lastActivity = Date.now();
       return shared;
     }
 
-    const task = this.openSession(key, scope, peerId, senderId, replyTarget);
+    const task = this.openSession(key, scope, peerId, senderId, replyTarget, resumeOnly);
     this.inflight.set(key, task);
     try {
       const record = await task;
@@ -677,12 +780,16 @@ export class SessionManager {
     peerId: string,
     senderId: string,
     replyTarget: ReplyTarget,
+    resumeOnly?: string,
   ): Promise<SessionRecord> {
     for (;;) {
       this.assertActive();
       const binding = this.modelResolver.getSessionId(key);
+      if (resumeOnly !== undefined && this.currentSessionId(key) !== resumeOnly) {
+        throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+      }
       try {
-        const record = await this.openSessionAttempt(key, binding, scope, peerId, senderId, replyTarget);
+        const record = await this.openSessionAttempt(key, binding, scope, peerId, senderId, replyTarget, resumeOnly !== undefined);
         if (record) return record;
       } catch (error) {
         this.assertActive();
@@ -698,6 +805,7 @@ export class SessionManager {
     peerId: string,
     senderId: string,
     replyTarget: ReplyTarget,
+    resumeOnly: boolean,
   ): Promise<SessionRecord | undefined> {
     const settings = this.peerSettings?.read(key);
     const route = this.configuredRoute(key, settings);
@@ -738,7 +846,7 @@ export class SessionManager {
           });
           this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
         } catch (err) {
-          if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
+          if (resumeOnly || !(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
           if (binding === undefined) sessionId = SessionId(mintSessionId());
         }
       }

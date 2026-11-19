@@ -14,6 +14,7 @@ import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { DshAgent, DshAgentHandle, DshAgentRegistry } from './types.ts';
 import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import type { ModelSelection } from '../model/types.ts';
 import { ApprovalChannel, type ApprovalRequest } from '../features/approval-channel.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 
@@ -166,6 +167,130 @@ function persistedId(): string | undefined {
 function createdIds(registry: { create: { mock: { calls: Array<[{ sessionId: string }]> } } }): string[] {
   return registry.create.mock.calls.map(([options]) => String(options.sessionId));
 }
+
+describe('Session reasoning effort', () => {
+  const route = { provider: 'fixture', model: 'reasoning-model' };
+  const capabilities = { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }], defaultEffort: 'low' } };
+  const change = { target: REPLY, senderId: PEER, assertAllowed: () => {} };
+
+  function reasoningSession({ cold = false } = {}) {
+    const id = 'session-reasoning';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, id);
+    let selection: ModelSelection = route;
+    const select = vi.fn((next: ModelSelection) => { selection = next; });
+    const handle = fakeHandle(id);
+    Object.assign(handle.agent, { model: { current: () => ({ ...selection }), select } });
+    const resolveModelInfo = vi.fn(async () => capabilities);
+    const dispose = vi.fn();
+    const observeSession = vi.fn(async () => ({
+      projections: { values: { modelSelection: { next: { ...route, reasoningEffort: 'high' } } } },
+      [Symbol.dispose]: dispose,
+    }));
+    const services = new Map<string, unknown>([
+      ['llm', { resolveModelInfo }],
+      ['sessionQuery', { observeSession }],
+      ['sessionPersistence', { stat: async (candidate: string) => candidate === id ? { header: {} } : undefined }],
+      ['sessionProjections', { snapshot: () => ({
+        values: { contextPressure: { projectedTokens: 300, pressureTokens: 100, contextWindow: 1000 } },
+      }) }],
+    ]);
+    const { registry } = createRegistry(async () => handle);
+    const manager = createManagerWithCtx({
+      ...registry, get: candidate => !cold && candidate === id ? handle.agent : undefined,
+    }, { get: name => services.get(name) } as Context, createLogger(), prefs);
+    return { id, manager, select, registry, resolveModelInfo, dispose, observeSession, agent: handle.agent };
+  }
+
+  it('sets and resets the native choice for the same Session, validating the exact model', async () => {
+    const { id, manager, select, registry, resolveModelInfo } = reasoningSession();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'max' })).rejects.toThrow('low、high');
+    expect(select).not.toHaveBeenCalled();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).resolves.toBe('high');
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'current', selection: { ...route, reasoningEffort: 'high' },
+    });
+    await expect(manager.setReasoningEffort({ ...change, effort: 'default' })).resolves.toBe('默认（low）');
+    expect(select.mock.calls).toEqual([[{ ...route, reasoningEffort: 'high' }], [route]]);
+    expect(resolveModelInfo).toHaveBeenLastCalledWith(route.provider, route.model);
+    expect(persistedId()).toBe(id);
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('shows new Session defaults without creating a Session or writing a choice', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const manager = createManager(registry);
+    await manager.remove('c2c', PEER);
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'next', selection: expect.objectContaining({ provider: 'p', model: 'm' }),
+    });
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).rejects.toThrow('先发一条普通消息');
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('reads a cold Session without activating it and resumes only that ID for a write', async () => {
+    const { id, manager, registry, dispose, observeSession } = reasoningSession({ cold: true });
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'current', selection: { ...route, reasoningEffort: 'high' },
+    });
+    expect(observeSession).toHaveBeenCalledWith(id);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(registry.resume).not.toHaveBeenCalled();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).resolves.toBe('high');
+    expect(registry.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: id }));
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(id);
+  });
+
+  it('does not create a replacement when the saved Session disappears before resume', async () => {
+    const id = 'session-no-longer-on-disk';
+    new PrefsStore().setSessionId(KEY, id);
+    const { registry } = createRegistry(async () => { throw notFound(id); });
+    const manager = createManagerWithCtx(registry, onDiskCtx(id));
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).rejects.toThrow('not found');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(id);
+  });
+
+  it.each(['generation', 'web selection', 'binding', 'revoked access'] as const)(
+    'protects the current selection when %s changes during the capability lookup',
+    async race => {
+      const { agent, manager, select, resolveModelInfo } = reasoningSession();
+      const catalog = deferred<typeof capabilities>();
+      resolveModelInfo.mockReturnValue(catalog.promise);
+      let allowed = true;
+      const changing = manager.setReasoningEffort({
+        ...change, effort: 'high',
+        assertAllowed: () => { if (!allowed) throw new Error('access revoked'); },
+      });
+      expect(resolveModelInfo).toHaveBeenCalledOnce();
+      if (race === 'generation') Object.assign(agent, { status: 'running' });
+      if (race === 'web selection') agent.model?.select({ provider: 'fixture', model: 'chosen-in-web' });
+      if (race === 'binding') await manager.remove('c2c', PEER);
+      if (race === 'revoked access') allowed = false;
+      const rejected = expect(changing).rejects.toThrow();
+      catalog.resolve(capabilities);
+      await rejected;
+      expect(select.mock.calls).toEqual(race === 'web selection' ? [[{ provider: 'fixture', model: 'chosen-in-web' }]] : []);
+    },
+  );
+
+  it('uses the native next choice, actionable queue and projected context usage for status', () => {
+    const { manager, agent } = reasoningSession();
+    agent.model?.select({ ...route, reasoningEffort: 'high' });
+    Object.assign(agent, {
+      status: 'running',
+      inbox: { nextTurn: [{ id: '1' }], nextStep: [
+        { id: '2', source: { kind: 'user' } }, { id: '3', source: { kind: 'time-context' } },
+      ] },
+    });
+    expect(manager.getStatus('c2c', PEER)).toMatchObject({
+      running: true, selection: { ...route, reasoningEffort: 'high' }, queued: 2, contextOccupancy: 30,
+    });
+  });
+});
 
 beforeEach(() => {
   env.home = mkdtempSync(join(tmpdir(), 'im-qqbot-session-'));

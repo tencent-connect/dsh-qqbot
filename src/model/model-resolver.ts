@@ -13,6 +13,7 @@
  *   > 宿主 agentDefaultModel 服务
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type LlmRuntime from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import type { ModelRoute, ModelEntry } from './types.ts';
@@ -173,6 +174,12 @@ export class ModelResolver {
     if (host) return host;
 
     return { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
+  }
+
+  async resolveReasoning(route: ModelRoute) {
+    const llm = this.getService('llm') as Pick<LlmRuntime, 'resolveModelInfo'> | undefined;
+    if (typeof llm?.resolveModelInfo !== 'function') throw new Error('Host model capabilities are unavailable.');
+    return (await llm.resolveModelInfo(route.provider, route.model)).reasoning;
   }
 
   /**

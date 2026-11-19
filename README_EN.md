@@ -208,11 +208,12 @@ Groups receive the final answer once the turn is saved, or one short notice if t
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/model` | View or switch model |
+| `/effort [level]` | View reasoning effort and available levels. Set the current Session's effort while idle, or use `/effort default` to restore the model default |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
-| `/bot-status` | View current session status |
+| `/bot-status` | View the model, reasoning effort, generation state, queue size, and estimated context usage |
 | `/bot-help` | View all commands |
 
 ## Core Modules

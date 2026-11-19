@@ -5,12 +5,13 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
  * 每个命令拆分为独立文件，此处仅编排。工厂函数注入依赖，统一导出命令列表。
  *
  * 命令按 category 分两类：
- *   - agent：底层 dsh agent 通用能力（new/compact/model/stop）
+ *   - agent：底层 dsh agent 通用能力
  *   - qqbot：插件自身特有（ping/version/status/help）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { newCommand, compactCommand } from './session.ts';
 import { modelCommand } from './model.ts';
+import { effortCommand } from './effort.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
@@ -25,6 +26,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     newCommand(deps),
     compactCommand(deps),
     modelCommand(deps),
+    effortCommand(deps),
     presetCommand(deps),
     stopCommand(deps),
     // QQBot 特有

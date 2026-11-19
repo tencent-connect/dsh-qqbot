@@ -3,7 +3,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
-import type { ModelRoute } from '../model/types.ts';
+import type { ModelSelection } from '../model/types.ts';
 
 /** AgentSetup hook 类型 */
 export type AgentSetup = (agentCtx: Context, agent?: DshAgent) => Promise<void> | void;
@@ -25,8 +25,8 @@ export interface DshAgent {
   readonly id: string;
   readonly ctx: Context;
   readonly model?: {
-    current?(): (ModelRoute & { reasoningEffort?: string }) | undefined;
-    select(route: ModelRoute & { reasoningEffort?: string }): void;
+    current?(): ModelSelection | undefined;
+    select(route: ModelSelection): void;
   };
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
@@ -37,7 +37,7 @@ export interface DshAgent {
     snapshotEvents(): readonly SessionEventLike[];
   };
   readonly inbox?: {
-    readonly nextStep: readonly { id: string }[];
+    readonly nextStep: readonly { id: string; source?: { kind: string } }[];
     readonly nextTurn: readonly { id: string }[];
     remove(id: string): unknown;
   };
@@ -143,15 +143,16 @@ export interface SessionRecord {
   agentPreset?: string;
 }
 
-/** 会话状态信息（/status 用） */
+/** 会话状态信息（/bot-status 用） */
 export interface SessionStatus {
-  active: boolean;
-  sessionId?: string;
-  provider?: string;
-  model?: string;
+  sessionId: string;
+  selection?: ModelSelection;
+  running: boolean;
+  queued?: number;
+  contextOccupancy?: number;
   preset?: string;
   lastActivity?: number;
-  messageCount?: number;
+  messageCount: number;
 }
 
 /** token 用量统计（/cost 用） */

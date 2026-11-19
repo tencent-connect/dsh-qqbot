@@ -24,6 +24,7 @@ const modes = [['open', 'all'], ['allowlist', 'owner'], ['disabled', 'disabled']
 const commands = [
   ['model', 'model', /模型配置/],
   ['preset', 'preset', /Agent Preset/],
+  ['effort', 'effort', /推理强度/],
   ['bot-ping', 'ping', /pong/i],
 ];
 const ordinaryAnswer = 'QQ_ORDINARY_REPLY';
@@ -31,6 +32,89 @@ const modelDenied = 'fixture model authentication rejected';
 const switchModelNotice = '⚠️ 当前模型不可用，请切换模型后重试。';
 const primary = { provider: 'access-delivery-fixture', model: 'primary' };
 const secondary = { provider: primary.provider, model: 'secondary' };
+
+async function verifyReasoning({ client, exchange, inject, newModelRound, outboundSince, qq, until, modelRequests }) {
+  const send = (scope, command, expected) => exchange({ scope, identity: 'allowed', command }, expected, 'reasoning effort');
+  const binding = async scope => {
+    const { conversations } = await client.get(workbench + 'conversations' + appQuery);
+    return conversations.find(row => row.scope === scope && row.openId === (scope === 'group' ? groupId : userId('allowed')))
+      ?.currentSessionId ?? undefined;
+  };
+  const nextSelection = async sessionId => (await client.rpc('session/projections', {
+    request: { sessionId },
+  })).values.modelSelection.next;
+  const waitIdle = sessionId => until(async () => {
+    const state = await client.rpc('session/state', { request: { sessionId } });
+    return state.active && !state.running;
+  }, 'Session is idle');
+  const generate = async (scope, sessionId, effort) => {
+    const before = (await readSessionEvents(client, sessionId)).at(-1)?.seq ?? -1;
+    const firstRequest = modelRequests.length;
+    await send(scope, 'smoke', ordinaryAnswer);
+    await until(async () => (await readSessionEvents(client, sessionId)).some(event =>
+      event.seq > before && event.type === 'turn/end' && event.data.reason.kind === 'completed'), 'reasoning turn completed');
+    await waitIdle(sessionId);
+    const request = (await readSessionEvents(client, sessionId)).find(event => event.seq > before && event.type === 'request/header');
+    assert.equal(request?.data.header.config.reasoningEffort, effort);
+    assert(modelRequests.slice(firstRequest).some(row => row.model === primary.model && row.effort === effort),
+      'Reasoning effort must reach the loopback model.');
+  };
+  const hostDefault = (await client.rpc('session/modelCatalog')).default;
+  const help = await send('c2c', 'help', /通用能力/);
+  assert.match(help, /text="\/effort"/);
+  assert.match(help, /text="\/stop"/);
+  const sessions = {};
+  for (const scope of ['c2c', 'group']) {
+    const menu = await send(scope, 'effort', /新建 Session 默认值[\s\S]*默认（low）/);
+    assert.match(menu, /text="\/effort low"[\s\S]*text="\/effort high"/);
+    assert.doesNotMatch(menu, /text="\/effort max"/);
+    await send(scope, 'effort-high', /先发一条普通消息/);
+    assert.equal(await binding(scope), undefined);
+    await send(scope, 'smoke', ordinaryAnswer);
+    const id = await binding(scope);
+    assert(id, 'The ordinary QQ message establishes a Session.');
+    sessions[scope] = id;
+    await waitIdle(id);
+    const before = await nextSelection(id);
+    await send(scope, 'effort-invalid', /可用档位：low、high/);
+    assert.deepEqual(await nextSelection(id), before);
+    await send(scope, 'effort-high', /推理强度已设为 high/);
+    assert.deepEqual(await nextSelection(id), { ...primary, reasoningEffort: 'high' });
+    await send(scope, 'effort', /当前 Session[\s\S]*推理强度：high/);
+    await generate(scope, id, 'high');
+    const status = await send(scope, 'status', /推理强度: high/);
+    assert.match(status, /生成状态: 空闲[\s\S]*排队消息: 0[\s\S]*上下文占用: 约 [0-9]+%/);
+    await send(scope, 'effort-default', /默认（low）/);
+    assert.deepEqual(await nextSelection(id), primary);
+    await generate(scope, id, 'low');
+    assert.equal(await binding(scope), id);
+  }
+  assert.notEqual(sessions.c2c, sessions.group);
+  assert.deepEqual((await client.rpc('session/modelCatalog')).default, hostDefault);
+
+  const id = sessions.group;
+  const held = newModelRound('EFFORT');
+  const sequence = qq.state.observedOutboundRequests;
+  const { accepted } = await client.rpc('session/prompt', { request: { sessionId: id,
+    requestId: crypto.randomUUID(), mode: 'queue', content: [{ type: 'text', text: held.holder }] } });
+  assert(accepted);
+  await until(() => held.waiting, 'group turn starts');
+  const beforeQueue = (await readSessionEvents(client, id)).at(-1)?.seq ?? -1;
+  await inject({ scope: 'group', identity: 'allowed', command: 'smoke' });
+  await until(async () => (await readSessionEvents(client, id)).some(event =>
+    event.seq > beforeQueue && event.type === 'agent/inbox/spliced' && event.data.target === 'next-turn'
+    && event.data.inserted.length === 1), 'group has a queued QQ message');
+  await send('group', 'status', /生成状态: 正在生成[\s\S]*排队消息: 1/);
+  await send('group', 'effort', /当前 Session[\s\S]*默认（low）/);
+  await send('group', 'effort-high', /请等本轮结束/);
+  assert.deepEqual(await nextSelection(id), primary);
+  held.release();
+  await until(async () => (await outboundSince(sequence)).some(row => row.content === held.answer), 'queued group reply');
+  await send('c2c', 'effort-high', /推理强度已设为 high/);
+  assert.deepEqual(await nextSelection(sessions.c2c), { ...primary, reasoningEffort: 'high' });
+  assert.deepEqual(await nextSelection(sessions.group), primary);
+  return sessions;
+}
 
 async function verifyCommands({ client, hostReady, qq, exchange, report, until }) {
   const { owners } = await client.pluginRpc(account, 'pair.manual', { appId: DUMMY_APP_ID, purpose: 'owner', openid: userId('allowed') });
@@ -100,6 +184,7 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
   const report = { commands: [], ordinaryReplies: [], passed: false };
   const smoke = createFixtureCommands().smoke;
   let qq, registry, host, round;
+  const modelRequests = [];
   let modelReply;
   let denyModel = false;
   const model = createServer(async (request, response) => {
@@ -107,6 +192,7 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks));
+      modelRequests.push({ model: body.model, effort: body.reasoning_effort });
       if (denyModel) {
         response.writeHead(401, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ error: { type: 'invalid_request_error', code: 'invalid_api_key', message: modelDenied } }));
@@ -129,7 +215,8 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       for (const [part, finish_reason] of [[{ role: 'assistant', ...delta }, null], [{}, delta.tool_calls ? 'tool_calls' : 'stop']]) {
         response.write('data: ' + JSON.stringify({ ...base, choices: [{ index: 0, delta: part, finish_reason }] }) + '\n\n');
       }
-      response.end('data: [DONE]\n\n');
+      response.end('data: ' + JSON.stringify({ ...base, choices: [],
+        usage: { prompt_tokens: 1800, completion_tokens: 20, total_tokens: 1820 } }) + '\n\ndata: [DONE]\n\n');
     } catch {
       if (!response.headersSent) response.writeHead(400);
       response.end();
@@ -174,16 +261,21 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       { id: 'agent-default-model', config: primary },
       { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
         baseURL: 'http://127.0.0.1:' + model.address().port + '/v1', apiKeyEnv: 'QQBOT_ACCESS_TEST_KEY',
-        models: [primary, secondary].map(({ model: id }) => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024 })) } } } },
+        reasoning: 'low', compat: { thinkingFormat: 'openai' },
+        models: [primary, secondary].map(({ model: id }) => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024,
+          reasoningEfforts: { low: 'low', high: 'high' } })) } } } },
     ];
     const patchPath = join(config.home, 'profiles', config.profile, 'cordis.patch.yml');
     const savePatch = () => writeFile(patchPath, JSON.stringify(patch, null, 2), { mode: 0o600 });
     await savePatch();
-    host = await spawnLogged(config.node, [...cli, ...profile, '--port', String(port), '--no-open'],
-      { ...launch, logPath: config.hostLog });
-    await writePrivateJson(join(runDir, 'process.json'), { pid: host.child.pid, hostOrigin: config.hostOrigin });
+    const startHost = async () => {
+      host = await spawnLogged(config.node, [...cli, ...profile, '--port', String(port), '--no-open'],
+        { ...launch, logPath: config.hostLog });
+      await writePrivateJson(join(runDir, 'process.json'), { pid: host.child.pid, hostOrigin: config.hostOrigin });
+      return waitForHost(config, host, { signal });
+    };
     const hostReady = () => waitForHost(config, host, { signal });
-    const { client } = await hostReady();
+    let { client } = await startHost();
     const fixture = async (operation, data) => {
       const response = await fetch(qq.origin + '/__fixture/' + operation, {
         method: data === undefined ? 'GET' : 'POST', body: data === undefined ? undefined : JSON.stringify(data),
@@ -211,6 +303,7 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
       assert.equal(reply.path, '/v2' + path + '/messages', label);
       if (expected instanceof RegExp) assert.match(reply.content, expected, label);
       else assert.equal(reply.content, expected, label);
+      return reply.content;
     };
     const newModelRound = name => {
       const gate = Promise.withResolvers();
@@ -218,7 +311,22 @@ async function main([dshSource, corePackage, historyPackage, runDir], signal) {
         inputs: [], replies: [], waiting: false, released: gate.promise, release: gate.resolve };
       return round;
     };
+    const effortSessions = await verifyReasoning({ client, exchange, inject, newModelRound, outboundSince, qq, until, modelRequests });
+    round = undefined;
+    await host.stop();
+    const readyBefore = qq.state.readyCount;
+    config.hostLog = join(runDir, 'restarted-host.log');
+    ({ client } = await startHost());
+    await until(() => qq.state.readyCount > readyBefore, 'gateway reconnects after process restart');
+    await exchange({ scope: 'c2c', identity: 'allowed', command: 'effort' },
+      /当前 Session[\s\S]*推理强度：high/, 'cold native Session choice');
+    await exchange({ scope: 'c2c', identity: 'allowed', command: 'effort-default' },
+      /推理强度已设为 默认（low）/, 'restore default in a cold Session');
+    assert.deepEqual((await client.rpc('session/projections', { request: { sessionId: effortSessions.c2c } }))
+      .values.modelSelection.next, primary);
+    report.reasoning = { group: true, c2c: true, idleAndQueued: true, readAndSetAfterRestart: true };
     const sessions = await verifyCommands({ client, hostReady, qq, exchange, report, until });
+    assert.deepEqual(sessions, { group: effortSessions.group, c2c: effortSessions.c2c });
     const beforeModelFailure = qq.state.observedOutboundRequests;
     denyModel = true;
     for (const [scope, sessionId] of Object.entries(sessions)) {
