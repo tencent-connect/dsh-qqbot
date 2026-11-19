@@ -155,9 +155,11 @@ export interface SwitchTarget {
   sessionId: string;
   cwd?: string;
   createdAt?: number;
+  /** 对话标题（宿主投影快照；拿不到时留空，命令层退回目录名/短 id） */
+  title?: string;
 }
 
 /** /switch 切换桥接目标的结果 */
 export type SwitchResult =
-  | { ok: true; previous: string; target: string; unchanged?: boolean }
+  | { ok: true; previous: string; target: string; unchanged?: boolean; title?: string }
   | { ok: false; reason: 'busy' | 'not-found' | 'unavailable' | 'failed'; message?: string };

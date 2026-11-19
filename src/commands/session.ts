@@ -74,7 +74,17 @@ function dirName(cwd: string | undefined): string {
   return parts[parts.length - 1] ?? cwd;
 }
 
-/** 切换失败的用户可读文案 */
+/**
+   * 候选会话的人类可读名字：标题优先（与 web 侧边栏同源），拿不到才退回短 id。
+   * 标题可能很长，截断到 24 字避免撑爆 QQ 消息。
+   */
+  function displayNameOf(target: SwitchTarget): string {
+    const title = (target.title ?? '').replace(/\s+/g, ' ').trim();
+    if (!title) return shortId(target.sessionId);
+    return title.length > 24 ? `${title.slice(0, 24)}…` : title;
+  }
+
+  /** 切换失败的用户可读文案 */
 function switchFailureMessage(result: SwitchResult): string {
   if (result.ok) return '切换失败';
   switch (result.reason) {
@@ -127,7 +137,7 @@ export function switchCommand({ manager, config, logger }: CommandDeps): Categor
           lines.push('', '可切换的对话（按创建时间倒序）:');
           targets.forEach((target: SwitchTarget, index: number) => {
             const marker = target.sessionId === current ? '（当前）' : '';
-            lines.push(`${index + 1}. ${target.sessionId}  ${dirName(target.cwd)}${marker}`);
+            lines.push(`${index + 1}. ${displayNameOf(target)}  ${dirName(target.cwd)}${marker}`);
           });
         }
         lines.push('', '用法: /switch <序号|session-id 前缀|完整 id> 切换；/switch default 恢复通道默认会话');
@@ -138,7 +148,7 @@ export function switchCommand({ manager, config, logger }: CommandDeps): Categor
       if (args === 'default' || args === 'back') {
         const result = await manager.switchSession(scope, peerId);
         if (!result.ok) return switchFailureMessage(result);
-        return `✅ 已恢复通道默认路由（${shortId(result.target)}），下一条消息立即生效。`;
+        return `✅ 已恢复通道默认路由（${result.title ?? shortId(result.target)}），下一条消息立即生效。`;
       }
 
       // 有参数：序号 / id 前缀 / 完整 id
@@ -173,8 +183,8 @@ export function switchCommand({ manager, config, logger }: CommandDeps): Categor
 
       const result = await manager.switchSession(scope, peerId, targetId);
       if (!result.ok) return switchFailureMessage(result);
-      if (result.unchanged) return `当前已桥接到 ${shortId(result.target)}，无需切换。`;
-      return `✅ 已切换到 ${shortId(result.target)}（原 ${shortId(result.previous)}）\n下一条消息立即生效，将恢复该对话的上下文。`;
+      if (result.unchanged) return `当前已桥接到 ${result.title ?? shortId(result.target)}，无需切换。`;
+      return `✅ 已切换到 ${result.title ?? shortId(result.target)}（原 ${shortId(result.previous)}）\n下一条消息立即生效，将恢复该对话的上下文。`;
     },
   };
 }

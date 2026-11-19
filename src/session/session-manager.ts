@@ -720,11 +720,48 @@ export class SessionManager {
     }
     if (!summaries) return undefined;
 
-    return summaries
+    const targets: SwitchTarget[] = summaries
       .filter((summary) => summary.origin !== 'subagent')
       .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
       .slice(0, limit)
       .map((summary) => ({ sessionId: summary.id, cwd: summary.cwd, createdAt: summary.createdAt }));
+
+    // 标题不是宿主会话摘要的字段：单独问一次投影快照补齐。拿不到就留空，
+    // 命令层退回目录名/短 id——列表的可用性不依赖这一项。
+    const titles = await this.resolveSessionTitles(targets.map((target) => target.sessionId));
+    return targets.map((target) => ({ ...target, title: titles.get(target.sessionId) }));
+  }
+
+  /**
+   * 批量取会话标题（尽力而为）。
+   *
+   * 宿主在 `sessionQuery.readTitleSnapshots` 上提供标题投影；缺席（老宿主/
+   * headless profile）或抛错时返回空表，调用方退回短 id，不影响切换本身。
+   */
+  private async resolveSessionTitles(sessionIds: readonly string[]): Promise<Map<string, string>> {
+    const titles = new Map<string, string>();
+    if (sessionIds.length === 0) return titles;
+
+    const query = this.ctx.get('sessionQuery') as
+      | {
+          readTitleSnapshots?: (
+            ids: readonly string[],
+          ) => Promise<Map<string, string> | Record<string, string>>;
+        }
+      | undefined;
+    if (!query || typeof query.readTitleSnapshots !== 'function') return titles;
+
+    try {
+      const snapshot = await query.readTitleSnapshots(sessionIds);
+      const entries =
+        snapshot instanceof Map ? [...snapshot.entries()] : Object.entries(snapshot ?? {});
+      for (const [id, title] of entries) {
+        if (typeof title === 'string' && title.trim() !== '') titles.set(id, title);
+      }
+    } catch (err) {
+      this.logger.debug?.(`resolve session titles failed: ${errorText(err)}`);
+    }
+    return titles;
   }
 
   /**
@@ -779,7 +816,8 @@ export class SessionManager {
     this.modelResolver.setSessionId(key, targetSessionId);
     await this.disposeForSwitch(key, record);
     this.logger.info(`session switched: key=${key} ${previous} → ${targetSessionId}`);
-    return { ok: true, previous, target: targetSessionId };
+    const titles = await this.resolveSessionTitles([targetSessionId]);
+    return { ok: true, previous, target: targetSessionId, title: titles.get(targetSessionId) };
   }
 
   /** 切换前回收当前记录（不推进绑定；绑定由调用方先写） */
