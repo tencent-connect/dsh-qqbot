@@ -148,8 +148,8 @@
   display: inline-block; width: 24px; height: 24px; margin: 0 2px; vertical-align: middle; object-fit: contain;
 }
 :global(.imqw-message-images) { display: flex; flex-wrap: wrap; gap: 6px; margin-block: 4px; }
-:global(.imqw-message-image) { display: block; width: min(200px, 100%); aspect-ratio: 4 / 3; overflow: hidden; border-radius: 8px; }
-:global(.imqw-message-image) img { display: block; width: 100%; height: 100%; object-fit: contain; background: var(--dsw-alias-bg-layer-2); }
+:global(.imqw-message-image) { display: block; min-width: 0; max-width: 200px; overflow: hidden; border-radius: 8px; }
+:global(.imqw-message-image) img { display: block; max-width: 100%; max-height: 150px; }
 :global(.imqw-timeline-older) { display: flex; justify-content: center; padding-bottom: 8px; }
 :global(.imqw-message-line) button:global(.imqw-message-action) { padding: 0; width: 26px; color: var(--dsw-alias-label-secondary); }
 @media (hover: hover) {

@@ -246,6 +246,15 @@ async function verifyRichMessages(page, client, fixture, until, dir) {
     await image.evaluate(node => node.decode());
     assert(await image.evaluate(node => node.naturalWidth > 0));
   }
+  const stickerLayout = await animation.evaluate(node => {
+    const bubble = node.closest('.imqw-timeline-bubble');
+    const { paddingLeft, paddingRight } = getComputedStyle(bubble);
+    const { width, height } = node.getBoundingClientRect();
+    const innerWidth = bubble.clientWidth - parseFloat(paddingLeft) - parseFloat(paddingRight);
+    return { width, height, blankWidth: innerWidth - width };
+  });
+  assert(Math.abs(stickerLayout.blankWidth) <= 1, 'sticker bubble hugs the preview');
+  assert(Math.abs(stickerLayout.width - stickerLayout.height) <= 1, 'square sticker keeps its aspect ratio');
   await history.screenshot({ path: join(dir, 'workbench-rich-messages.png') });
 
   await fixture('message', { scope: 'group', identity: 'allowed', command: 'model' });
@@ -255,7 +264,7 @@ async function verifyRichMessages(page, client, fixture, until, dir) {
   await row(modelCard).getByRole('heading', { name: /模型配置/ }).waitFor();
   assert(await row(modelCard).locator('code').filter({ hasText: /^\/model / }).count() > 0);
   assert.equal(await row(modelCard).locator('qqbot-cmd-input').count(), 0);
-  return { markdown: true, rawSource: true, inertModelOptions: true, animatedAttachment: true, systemFace: true };
+  return { markdown: true, rawSource: true, inertModelOptions: true, animatedAttachment: true, stickerLayout, systemFace: true };
 }
 
 async function verifyToolPicker(page, client, until) {
