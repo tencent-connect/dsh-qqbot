@@ -626,3 +626,45 @@ describe('OutboundRouter: tool/result', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 });
+
+describe('OutboundRouter: turn/end blocked（归档门禁）', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function setupWithArchive(archived: boolean) {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(c2cTarget);
+    const manager = {
+      findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+      isSessionArchived: vi.fn(() => archived),
+    } as unknown as SessionManager;
+    const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
+    return { outbound, bot };
+  }
+
+  const blockedTurnEnd = { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } };
+  const sid = { header: { id: 'sess-qq' } };
+
+  it('归档会话的 blocked 回合回复可操作提示，而不是静默', async () => {
+    // 归档门禁拒绝的回合没有 user/message，用户侧原本什么都收不到
+    const { outbound, bot } = setupWithArchive(true);
+
+    outbound.routeSessionEvent(sid, blockedTurnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('当前会话已归档'));
+  });
+
+  it('非归档的 blocked 只给通用提示（不误报归档）', async () => {
+    const { outbound, bot } = setupWithArchive(false);
+
+    outbound.routeSessionEvent(sid, blockedTurnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('本轮处理被阻止'));
+    expect(bot.sendMarkdown).not.toHaveBeenCalledWith(c2cTarget, expect.stringContaining('已归档'));
+  });
+});

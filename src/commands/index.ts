@@ -9,7 +9,7 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
  *   - qqbot：插件自身特有（ping/version/status/help）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { newCommand, compactCommand } from './session.ts';
+import { newCommand, compactCommand, unarchiveCommand } from './session.ts';
 import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
@@ -23,6 +23,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   const commands: CategorizedCommand[] = [
     // 通用能力（底层 agent）
     newCommand(deps),
+    unarchiveCommand(deps),
     compactCommand(deps),
     modelCommand(deps),
     presetCommand(deps),

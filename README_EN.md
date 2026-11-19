@@ -171,6 +171,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 |------|------|
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
+| `/unarchive` (alias `/restore`) | Unarchive the current session (archived sessions process no messages) |
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
@@ -178,52 +179,6 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/bot-version` | View version info |
 | `/bot-status` | View current session status |
 | `/bot-help` | View all commands |
-
-## Core Modules
-
-```
-src/
-├── index.ts                    # Cordis plugin entry (async apply)
-├── config.ts                   # Config schema
-├── types.ts                    # Global types
-├── setup.ts                    # Credential binding (QR)
-├── gateway/                    # Gateway assembly
-│   ├── bootstrap.ts            # Startup wiring (session/event listeners, etc.)
-│   └── middleware-setup.ts     # Middleware chain config
-├── transport/                  # Transport layer
-│   ├── inbound.ts              # QQ inbound message → agent.followup()
-│   ├── outbound.ts             # session/event → QQ sendMarkdown
-│   ├── outbound-buffer.ts      # Streaming buffer
-│   ├── streaming-writer.ts     # Streaming writer
-│   ├── reply-target.ts         # Reply target resolution
-│   ├── msgid-cache.ts          # Passive reply msgid cache
-│   ├── reply-limiter.ts        # Passive reply rate limiter
-│   ├── tool-presenter.ts       # Tool-call presentation
-│   └── chunker.ts              # Markdown chunking
-├── session/                    # Session management
-│   ├── session-manager.ts      # QQ peer → Agent mapping
-│   └── idle-evictor.ts         # Idle eviction
-├── model/                      # Model routing
-│   ├── model-resolver.ts       # Route resolution
-│   ├── prefs-store.ts          # Per-peer preference persistence
-│   └── settings-reader.ts      # settings.yaml read-only
-├── features/                   # Interaction features
-│   ├── question-channel.ts     # ask_user_question Q&A channel
-│   ├── approval-channel.ts     # approval confirmation channel
-│   └── answer-parser.ts        # Answer parsing
-├── media/                      # Media
-│   ├── vision-tool.ts          # Image vision understanding
-│   ├── send-file-tool.ts       # Send local files
-│   └── media-cleaner.ts        # Media TTL cleanup
-├── middleware/                 # Middleware
-│   ├── question-answer.ts      # Q&A answer handling
-│   └── attachment.ts           # Attachment handling
-├── shared/                     # Shared utilities
-│   ├── utils.ts                # Common helpers
-│   ├── scope.ts                # scope/peer extraction
-│   └── send-helper.ts          # Chunked send
-└── commands/                   # Slash commands
-```
 
 ## Session Routing
 
