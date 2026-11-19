@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
 - **Turns that did not start in QQ are pushed to QQ**: continuing a bound session from the desktop, or a turn the host starts itself (a schedule, injected context, and the like), delivers the reply to the matching DM or group. It no longer spends the passive-reply quota of the previous QQ message, and it does not attach to that old message. Messages that arrive in QQ stay passive replies, and streaming is unchanged. Proactive messages must be enabled on the QQ Open Platform, or the send fails.
 - **Idle eviction can be disabled**: setting `sessionIdleTimeout` to `0` stops proactive eviction (the default stays 30 minutes).
+- **Unarchive straight from QQ**: new `/unarchive` (alias `/restore`) restores an archived session without going back to the desktop; the archive notice now uses tappable command tags.
 
 ### ⚠️ Behavior Changes
 
@@ -28,6 +29,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Archived sessions no longer go silent**: once a session is archived the host rejects the turn before it starts, so the plugin had nothing to deliver and messages sent in QQ received no reply at all. The plugin now checks the archive state before delivery and replies that the session is archived and the message was not processed, with tappable `/unarchive` and `/new` command tags; `/compact` reports the same condition explicitly. A turn blocked by the archive gate after delivery is reported too instead of staying silent.
 - **Fixed the bind page 404 (boot failure)**: in some environments the previous release failed to register the panel routes, leaving the bind page a permanent 404; the root cause was an illegal host-service access and is fixed.
 - **Fixed an in-flight request blocking remounts**: closing every bind-related page and reopening it no longer has the first status read wait on a stale request (up to 10 seconds when the server hangs).
 - **Settings nav icon follows the theme**: the icon color now tracks the host theme instead of rendering near-black on dark backgrounds.

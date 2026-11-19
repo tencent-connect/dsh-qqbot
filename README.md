@@ -171,6 +171,7 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 |------|------|
 | `/new`（别名 `/reset` `/clear`） | 开始新会话（清空上下文） |
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
+| `/unarchive`（别名 `/restore`） | 取消归档当前会话（归档后消息不会被处理） |
 | `/model` | 查看或切换模型 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/stop` | 中止当前生成 |
@@ -178,61 +179,6 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 | `/bot-version` | 查看版本信息 |
 | `/bot-status` | 查看当前会话状态 |
 | `/bot-help` | 查看所有指令 |
-
-## 核心模块
-
-```
-src/
-├── index.ts                    # Cordis 插件入口（async apply）
-├── config.ts                   # 配置 Schema
-├── types.ts                    # 全局类型定义
-├── setup/                      # 凭据绑定（扫码）
-│   ├── index.ts                # 绑定编排（ensureCredentials）
-│   ├── binding-service.ts      # 扫码状态机（宿主内唯一事实源）
-│   ├── bind-routes.ts          # 端内绑定页路由（/qqbot/im-qqbot/bind）
-│   ├── presenters.ts           # 呈现策略（终端/浏览器降级）
-│   ├── qr-svg.ts               # 二维码 SVG 渲染（宿主侧）
-│   └── persist.ts              # 凭据写入 cordis.patch.yml
-├── client/                     # 浏览器半边（dsh.client Web Bundle）
-│   ├── index.ts                # 侧栏 Tab 注册 + 待绑定自动引导
-│   └── bind-page.ts             # 端内绑定页（二维码 + 状态轮询）
-├── gateway/                    # 网关装配
-│   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
-│   └── middleware-setup.ts     # 中间件链配置
-├── transport/                  # 传输层
-│   ├── inbound.ts              # QQ 入站消息 → agent.followup()
-│   ├── outbound.ts             # session/event → QQ sendMarkdown
-│   ├── outbound-buffer.ts      # 流式缓冲
-│   ├── streaming-writer.ts     # 流式写入
-│   ├── reply-target.ts         # 回复目标解析
-│   ├── msgid-cache.ts          # 被动回复 msgid 缓存
-│   ├── reply-limiter.ts        # 被动回复限流
-│   ├── tool-presenter.ts       # 工具调用展示
-│   └── chunker.ts              # Markdown 文本切分
-├── session/                    # 会话管理层
-│   ├── session-manager.ts      # QQ peer → Agent 映射
-│   └── idle-evictor.ts         # 闲置回收
-├── model/                      # 模型路由层
-│   ├── model-resolver.ts       # 路由解析
-│   ├── prefs-store.ts          # per-peer 偏好持久化
-│   └── settings-reader.ts      # settings.yaml 只读
-├── features/                   # 交互特性
-│   ├── question-channel.ts     # ask_user_question 问答通道
-│   ├── approval-channel.ts     # approval 审批确认通道
-│   └── answer-parser.ts        # 答案解析
-├── media/                      # 多媒体
-│   ├── vision-tool.ts          # 图片视觉理解
-│   ├── send-file-tool.ts       # 发送本地文件
-│   └── media-cleaner.ts        # 媒体 TTL 清理
-├── middleware/                 # 中间件
-│   ├── question-answer.ts      # 问答答案处理
-│   └── attachment.ts           # 附件处理
-├── shared/                     # 共享工具
-│   ├── utils.ts                # 通用函数
-│   ├── scope.ts                # scope/peer 提取
-│   └── send-helper.ts          # 分块发送
-└── commands/                   # 斜杠命令
-```
 
 ## 会话路由
 

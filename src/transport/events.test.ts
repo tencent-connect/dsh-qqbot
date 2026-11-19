@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
+import { extractTurnError, parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
 
 /** 构造 agent/assistant-stream 的 payload（帧字段按宿主 AssistantStreamFrame 形态） */
 function payload(frame: unknown, agentId = 'sess-qq'): unknown {
@@ -108,5 +108,21 @@ describe('parseEvent: tool/result', () => {
 
   it('缺 callId 返回 undefined', () => {
     expect(parseEvent(result({ message: { content: [] } }))).toBeUndefined();
+  });
+});
+
+describe('extractTurnError', () => {
+  it('error：提取 code / message', () => {
+    expect(extractTurnError({ kind: 'error', error: { code: 'E_BROKEN', message: 'boom' } }))
+      .toEqual({ code: 'E_BROKEN', message: 'boom' });
+  });
+
+  it('blocked：归为 TURN_BLOCKED（归档门禁以此收尾，本轮没有 user/message）', () => {
+    expect(extractTurnError({ kind: 'blocked' })?.code).toBe('TURN_BLOCKED');
+  });
+
+  it('正常结束不算失败', () => {
+    expect(extractTurnError({ kind: 'completed' })).toBeUndefined();
+    expect(extractTurnError({ kind: 'interrupted' })).toBeUndefined();
   });
 });
