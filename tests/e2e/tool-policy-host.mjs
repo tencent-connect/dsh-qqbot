@@ -37,7 +37,7 @@ const hostOrigin = 'http://127.0.0.1:' + hostPort;
 const hostLog = join(dir, 'host.log');
 const primary = { provider: 'policy-fixture', model: 'fixture-primary' };
 const secondary = { provider: primary.provider, model: 'fixture-secondary' };
-const qq = await createQQFixture({ primary, secondary, allowModelRequests: true });
+const qq = await createQQFixture({ primary, secondary, allowModelRequests: true, timelineMedia: browser });
 const pending = new Map();
 const requests = [];
 const promptRequests = new Map();
@@ -102,7 +102,7 @@ try {
   await writeFile(join(profileDir, 'cordis.patch.yml'), JSON.stringify([
     { id: 'im-qqbot', config: { appId: DUMMY_APP_ID, appSecret: DUMMY_SECRET, cwd: workspace,
       preset: 'standard', streaming: false, showToolResults: false, proactiveDelivery: { externalTurns: 'off' },
-      media: { enabled: false }, access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open' } } },
+      media: { enabled: browser }, access: { c2cMode: 'open', groupMode: 'open', commandMode: 'open' } } },
     { id: 'agent-default-model', config: primary },
     { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
       baseURL: 'http://127.0.0.1:' + server.address().port + '/v1', apiKeyEnv: 'QQBOT_TOOL_TEST_KEY',

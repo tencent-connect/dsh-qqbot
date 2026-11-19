@@ -120,6 +120,7 @@
     "@types/qrcode": "^1.5.5",
     "@types/react": "~18.3.1",
     "lightningcss": "1.33.0",
+    "mdast-util-from-markdown": "2.0.3",
     "react": "^18.2.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.5.0",

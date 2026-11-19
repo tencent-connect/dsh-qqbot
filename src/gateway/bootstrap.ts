@@ -35,6 +35,7 @@ import type { QqDisplayNames } from '../runtime/qq-display-names.ts';
 import type { WorkbenchRobot } from '../shared/workbench-protocol.ts';
 import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 import { receivedEntryId, timelineText, type QqTimeline } from '../runtime/qq-timeline.ts';
+import { timelinePreviews } from '../runtime/timeline-previews.ts';
 import type { DownloadedFile } from '../transport/attachment.ts';
 import { observeTimelineRequests } from '../transport/timeline-observer.ts';
 import { messageSenderName } from '../shared/message-sender-name.ts';
@@ -139,6 +140,10 @@ export function bootstrapGateway(
   const reportInbound = history && ((target: ReplyTarget, outcome: TimelineInboundOutcome, sessionId?: string) => {
     if (canRecord(target)) history.timeline.reportInbound(config.appId, target, outcome, sessionId);
   });
+  const previews = history && timelinePreviews({
+    appId: config.appId, timeline: history.timeline, media: config.media, mediaRoot, canRecord, logger,
+    getAccessToken: () => bot.api.getToken(),
+  });
   const observe = history && observeTimelineRequests(bot, config.appId, history.timeline, canRecord, isActive);
   setupMiddlewares(bot, config, manager, logger, replyIds, isActive, mediaRoot, receiving, history && (async messageContext => {
     const { message, replyTarget } = messageContext;
@@ -188,7 +193,10 @@ export function bootstrapGateway(
       senderId: message.senderId, senderName,
       attachments: message.attachments?.length || undefined, quote,
     }, true);
-  }), reportInbound, (messageContext, text) => {
+  }), (messageContext, outcome) => {
+    reportInbound?.(messageContext.replyTarget, outcome);
+    if (outcome === 'mention-required') previews?.record(messageContext);
+  }, (messageContext, text) => {
     const target = messageContext.replyTarget;
     const wasAdmitted = allowTarget(target);
     return sendPairingReply(target, text, () => !messageContext.signal.aborted
@@ -353,6 +361,7 @@ export function bootstrapGateway(
         logger.info('Shutting down');
         const cleanups = [
           () => bot.stop(),
+          () => previews?.close(),
           () => outbound.dispose(),
           () => questionChannel.uninstall(),
           () => manager.disposeAll(),

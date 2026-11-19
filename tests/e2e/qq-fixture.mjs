@@ -4,6 +4,7 @@ import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFixtureCommands, DUMMY_APP_ID, DUMMY_SECRET, DUMMY_TOKEN, isFixtureOutboundPath, outboundObservation, parseFixtureMessage } from './command-protocol.mjs';
+import { stickerUrl } from './timeline-media-fixture.mjs';
 
 // The QQ SDK owns this dependency; resolve from its installed location rather than a workstation path.
 const sdkRequire = createRequire(realpathSync(fileURLToPath(import.meta.resolve('@tencent-connect/qqbot-nodejs'))));
@@ -64,6 +65,9 @@ export async function createQQFixture(options = {}) {
     if (ws.readyState !== WebSocket.OPEN || !authenticated.has(ws)) return;
     const allowed = selected.identity === 'allowed';
     const envelope = { id: `local-fixture-message-${state.receivedMessages + 1}`, content: selected.content, timestamp: new Date().toISOString() };
+    if (options.timelineMedia && selected.command === 'timeline-sticker') {
+      envelope.attachments = [{ content_type: 'image/png', filename: 'sticker.png', size: 0, url: stickerUrl }];
+    }
     if (selected.scope === 'c2c') {
       dispatch(ws, 'C2C_MESSAGE_CREATE', { ...envelope, author: { user_openid: `local-fixture-${allowed ? 'allowed' : 'denied'}-user` } });
     } else {

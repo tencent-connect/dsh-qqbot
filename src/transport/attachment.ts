@@ -13,11 +13,19 @@ import * as dns from 'node:dns';
 import type { Logger, RawAttachment } from '../types.ts';
 import type { MediaConfig } from '../config.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
+import { MAX_TIMELINE_IMAGE_BYTES } from '../shared/workbench-timeline-protocol.ts';
 
 /** 默认富媒体下载大小上限（MB），可被 media.maxMB 覆盖 */
 const DEFAULT_MAX_MB = 200;
 /** 下载超时（毫秒） */
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+const PREVIEW_TIMEOUT_MS = 12_000;
+
+interface MediaDownloadOptions {
+  signal?: AbortSignal;
+  getAccessToken?: () => Promise<string>;
+  imagesOnly?: boolean;
+}
 
 /** 下载结果 */
 export interface DownloadedFile {
@@ -157,21 +165,46 @@ async function assertSafeHostname(hostname: string): Promise<void> {
 }
 
 /** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回字节 Buffer（不落盘） */
-async function download(url: string, maxBytes: number): Promise<Buffer> {
+async function download(url: string, maxBytes: number, options: MediaDownloadOptions): Promise<Buffer> {
   const parsed = new URL(normalizeUrl(url));
-  if (parsed.protocol !== 'https:') {
-    throw new Error(`Only HTTPS allowed: ${parsed.protocol}`);
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('Only HTTPS attachment URLs without credentials are allowed');
   }
+  const qqDownload = parsed.hostname === 'multimedia.nt.qq.com.cn' && !parsed.port && parsed.pathname === '/download';
+  if (options.imagesOnly && !qqDownload && (parsed.port || !parsed.hostname.endsWith('.qpic.cn'))) {
+    throw new Error('Image preview requires a QQ media URL');
+  }
+  const timeout = AbortSignal.timeout(options.imagesOnly ? PREVIEW_TIMEOUT_MS : DOWNLOAD_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  signal.throwIfAborted();
   await assertSafeHostname(parsed.hostname);
-
-  const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-  const buf = Buffer.from(await resp.arrayBuffer());
-  if (buf.length > maxBytes) {
-    throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);
+  let response = await fetch(parsed, { signal, redirect: options.imagesOnly ? 'error' : 'follow' });
+  if (qqDownload && options.getAccessToken && (response.status === 401 || response.status === 403)) {
+    await response.body?.cancel();
+    signal.throwIfAborted();
+    const token = await options.getAccessToken();
+    response = await fetch(parsed, { signal, redirect: 'error', headers: { Authorization: 'QQBot ' + token } });
   }
-  return buf;
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    throw new Error('HTTP ' + response.status);
+  }
+  const reader = response.body.getReader();
+  try {
+    if (Number(response.headers.get('content-length')) > maxBytes) throw new Error('Attachment exceeds its size limit');
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) return Buffer.concat(parts, length);
+      length += chunk.value.byteLength;
+      if (length > maxBytes) throw new Error('Attachment exceeds its size limit');
+      parts.push(chunk.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -185,20 +218,23 @@ export async function downloadMediaAttachments(
   media: MediaConfig,
   logger: Logger,
   mediaRoot = MEDIA_ROOT,
+  options: MediaDownloadOptions = {},
 ): Promise<DownloadedFile[]> {
   if (!media.enabled) return [];
 
   const targets = (attachments ?? []).filter(a =>
-    classifyContentType(a.content_type) !== 'voice' && a.url,
+    a.url && (options.imagesOnly ? isImageContentType(a.content_type) : classifyContentType(a.content_type) !== 'voice'),
   );
   if (targets.length === 0) return [];
 
-  mkdirSync(mediaRoot, { recursive: true });
+  mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
 
-  const maxBytes = (media.maxMB ?? DEFAULT_MAX_MB) * 1024 * 1024;
+  const downloadLimit = (media.maxMB ?? DEFAULT_MAX_MB) * 1024 * 1024;
+  const maxBytes = options.imagesOnly ? Math.min(downloadLimit, MAX_TIMELINE_IMAGE_BYTES) : downloadLimit;
 
   const results: DownloadedFile[] = [];
   for (const att of targets) {
+    if (options.signal?.aborted) break;
     const contentType = classifyContentType(att.content_type) as 'image' | 'video' | 'file';
     const destPath = toPosixPath(join(mediaRoot, uniqueFilename(att.filename)));
 
@@ -209,15 +245,22 @@ export async function downloadMediaAttachments(
 
     let buf: Buffer;
     try {
-      buf = await download(att.url, maxBytes);
+      buf = await download(att.url, maxBytes, options);
     } catch (err) {
       logger.warn(`im-qqbot: download failed: ${att.filename} — ${err instanceof Error ? err.message : String(err)}`);
       continue; // 下载失败不加入结果，由 buildDynamicCtx 回退为描述
     }
 
+    if (options.signal?.aborted) break;
+    if (options.imagesOnly && !imageExtension(buf)) continue;
     // 图片按真实格式校正扩展名（QQ 的 content_type 不可信），落盘到最终路径
     const localPath = contentType === 'image' ? toPosixPath(correctImageExt(destPath, buf)) : destPath;
-    writeFileSync(localPath, buf);
+    try {
+      writeFileSync(localPath, buf, { mode: 0o600 });
+    } catch (error) {
+      logger.warn('im-qqbot: unable to save attachment: ' + (error instanceof Error ? error.message : String(error)));
+      continue;
+    }
     logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(buf.length)}) → ${localPath}`);
 
     results.push({ filename: att.filename, contentType, localPath });

@@ -1,4 +1,6 @@
 /** Fixed commands and synthetic peers keep the local fixture away from real QQ targets. */
+import { faceText, formattedText, stickerText } from './timeline-media-fixture.mjs';
+
 export const DUMMY_APP_ID = '0000000000';
 export const DUMMY_SECRET = 'local-fixture-only';
 export const DUMMY_TOKEN = 'local-fixture-token';
@@ -9,6 +11,9 @@ const backgroundMessages = {
   'background-steer-first': 'QQ_BACKGROUND_STEER_FIRST',
   'background-steer-second': 'QQ_BACKGROUND_STEER_SECOND',
   'background-steer-late': 'QQ_BACKGROUND_STEER_LATE',
+  'timeline-rich-text': formattedText,
+  'timeline-sticker': stickerText,
+  'timeline-face': faceText,
 };
 
 function identifier(value, label) {

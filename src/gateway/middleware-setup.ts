@@ -39,7 +39,7 @@ export function setupMiddlewares(
   mediaRoot?: string,
   receiving?: (target: ReplyTarget) => boolean,
   onAdmitted?: (ctx: MiddlewareContext) => void | Promise<void>,
-  onSkipped?: (target: ReplyTarget, outcome: TimelineInboundOutcome) => void,
+  onSkipped?: (ctx: MiddlewareContext, outcome: TimelineInboundOutcome) => void,
   pairingReply: (ctx: MiddlewareContext, text: string) => Promise<unknown> = (ctx, text) => ctx.bot.sendText(ctx.replyTarget, text),
 ): void {
   const blocked = (ctx: MiddlewareContext): boolean => {
@@ -115,11 +115,11 @@ export function setupMiddlewares(
     if (!onSkipped) return;
     const reason = ctx.stopReason;
     if (reason === 'mention-gate:no_mention' || reason === 'mention-gate:other_mention') {
-      onSkipped(ctx.replyTarget, 'mention-required');
+      onSkipped(ctx, 'mention-required');
     } else if (reason?.startsWith('rate-limit:')) {
-      onSkipped(ctx.replyTarget, 'rate-limited');
+      onSkipped(ctx, 'rate-limited');
     } else if (reason === 'concurrency:queue-full') {
-      onSkipped(ctx.replyTarget, 'queue-full');
+      onSkipped(ctx, 'queue-full');
     }
   });
 

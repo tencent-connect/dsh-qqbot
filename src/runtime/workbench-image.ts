@@ -2,8 +2,8 @@ import { constants } from 'node:fs';
 import { lstat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { imageExtension } from '../transport/attachment.ts';
+import { MAX_TIMELINE_IMAGE_BYTES } from '../shared/workbench-timeline-protocol.ts';
 
-const MAX_PREVIEW_BYTES = 8 * 1024 * 1024;
 const mimeTypes: Readonly<Record<string, string>> = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif',
   '.webp': 'image/webp', '.bmp': 'image/bmp',
@@ -17,7 +17,7 @@ export async function workbenchImage(root: string, name: string): Promise<Respon
     const file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     try {
       const stat = await file.stat();
-      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_PREVIEW_BYTES) return undefined;
+      if (!stat.isFile() || stat.size === 0 || stat.size > MAX_TIMELINE_IMAGE_BYTES) return undefined;
       const buffer = Buffer.alloc(stat.size);
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
       if (bytesRead !== buffer.length) return undefined;

@@ -1,11 +1,12 @@
 import { locale, t, useQqLocale } from './qq-locale.ts';
-import { createElement as h, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
-import { Button, IconEllipsisOutlineRegular, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
+import { createElement as h, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Button, IconEllipsisOutlineRegular, MarkdownText, Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives';
 import { canQuoteTimelineEntry, WORKBENCH_TIMELINE_PATH, type TimelineEntry, type TimelineInboundOutcome, type TimelinePage, type TimelineStatus } from '../shared/workbench-timeline-protocol.ts';
 import type { QqWorkbenchViewProps } from '../shared/workbench-extension.ts';
 import type { WorkbenchConversation } from '../shared/workbench-conversation-protocol.ts';
 import { fetchJson, HttpError } from './http.ts';
 import { ComposerState, QqComposer, type QqComposerHandle } from './workbench-composer.ts';
+import { timelineMarkdown } from './timeline-markdown.ts';
 
 function statusLabel(status: TimelineStatus): string {
   return {
@@ -268,6 +269,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
 }): ReactNode {
   const [menuOpen, setMenuOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [showSource, setShowSource] = useState(false);
   const [checking, setChecking] = useState(false);
   const [receiptNote, setReceiptNote] = useState('');
   const menuButton = useRef<HTMLButtonElement>(null);
@@ -279,6 +281,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
   const actions: MenuEntry[] = [];
   if (onReply) actions.push({ id: 'quote', label: t("引用回复") });
   if (linkedSession && openLinked) actions.push({ id: 'session', label: t("打开关联 Session") });
+  if (row.text) actions.push({ id: 'source', label: showSource ? t("查看排版") : t("查看原文") });
   actions.push({ id: 'details', label: detailsOpen ? t("收起响应详情") : t("响应详情") });
   const queryReceipt = async (): Promise<void> => {
     setChecking(true);
@@ -308,7 +311,9 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
           row.quote.senderName ? h('strong', null, row.quote.senderName) : null,
           row.quote.text ? h('div', null, row.quote.displayText ?? row.quote.text) : null,
           row.quote.attachments ? h('span', { className: 'imqw-muted' }, t("引用附件 · {0} 项", row.quote.attachments)) : null) : null,
-        row.text ? h('div', { className: 'imqw-timeline-text' }, row.displayText ?? row.text) : null,
+        row.text ? (showSource
+          ? h('pre', { className: 'imqw-timeline-text imqw-timeline-source', 'aria-label': t("消息原文") }, row.text)
+          : h(MessageMarkdown, { text: row.displayText ?? row.text, hasImage: imageCount > 0 })) : null,
         imageCount > 0 ? h('div', { className: 'imqw-message-images' },
           Array.from({ length: imageCount }, (_, index) => {
             const query = new URLSearchParams({ appId, scope, openId, entryId: row.id, image: String(index) });
@@ -322,6 +327,7 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
             setMenuOpen(false);
             if (id === 'quote') onReply?.(sender);
             if (id === 'session' && menuButton.current) void openLinked?.(row, menuButton.current);
+            if (id === 'source') setShowSource(value => !value);
             if (id === 'details') setDetailsOpen(value => !value);
           },
           anchor: h(Button, { ref: menuButton, type: 'button', size: 'sm', variant: 'ghost', className: 'imqw-message-action',
@@ -344,6 +350,22 @@ function MessageRow({ row, appId, scope, openId, robotName, peerName, openLinked
       receiptNote ? h('p', { className: 'imqw-response-detail', role: 'status' }, receiptNote) : null,
     ),
   );
+}
+
+function MessageMarkdown({ text, hasImage }: { text: string; hasImage: boolean }): ReactNode {
+  const language = useQqLocale();
+  const faceLabel = t("QQ 表情");
+  const stickerLabel = t("表情包");
+  const prepared = useMemo(() => timelineMarkdown(text, { hasImage, faceLabel, stickerLabel }),
+    [text, hasImage, faceLabel, stickerLabel]);
+  const labels = useMemo(() => ({
+    code: { copyLabel: t("复制"), copiedLabel: t("已复制") }, footnotes: t("脚注"),
+  }), [language]);
+  if (!prepared.trim()) return null;
+  if (!MarkdownText) return h('div', { className: 'imqw-timeline-text' }, text);
+  return h('div', { className: 'imqw-timeline-markdown' }, h(MarkdownText, {
+    text: prepared, labels, variant: 'compact', omitHtml: true,
+  }));
 }
 
 function MessageImage({ url, number }: { url: string; number: number }): ReactNode {

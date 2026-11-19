@@ -14,6 +14,7 @@ const stub = (): StubComponent => () => null;
 
 export const Button = stub();
 export const Input = stub();
+export const MarkdownText = stub();
 export const Modal = stub();
 export const Switch = stub();
 export const SegmentedControl = stub();

@@ -79,10 +79,10 @@ export class QqTimeline {
     this.update(appId, target, entry.id, previous => once && previous ? undefined : entry);
   }
 
-  recordImages(appId: string, target: ReplyTarget, localPaths: readonly string[]): void {
-    if (!target.msgId || localPaths.length === 0) return;
+  recordImages(appId: string, target: ReplyTarget, localPaths: readonly string[]): boolean {
+    if (!target.msgId || localPaths.length === 0) return false;
     const id = receivedEntryId(target.msgId);
-    this.update(appId, target, id, previous => {
+    return this.update(appId, target, id, previous => {
       if (previous?.direction !== 'inbound' || previous.imageFiles?.length) return undefined;
       return { ...previous, imageFiles: localPaths.slice(0, MAX_TIMELINE_IMAGES).map(path => basename(path)) };
     });
@@ -196,19 +196,21 @@ export class QqTimeline {
     return parseEntry(entry.body);
   }
 
-  private update(appId: string, target: ReplyTarget, id: string, change: (previous?: StoredEntry) => StoredEntry | undefined): void {
-    if (this.closed) return;
+  private update(appId: string, target: ReplyTarget, id: string, change: (previous?: StoredEntry) => StoredEntry | undefined): boolean {
+    if (this.closed) return false;
     try {
       const db = this.connection();
       const entry = change(this.read(appId, target, id));
-      if (!entry || entry.at < (this.retainAfter?.(appId, target) ?? -Infinity)) return;
+      if (!entry || entry.at < (this.retainAfter?.(appId, target) ?? -Infinity)) return false;
       const key = partition(appId, target);
       db.prepare('INSERT OR IGNORE INTO peers VALUES (?, ?, ?, ?)').run(...key, randomUUID());
       db.prepare(`INSERT INTO messages (app_id, scope, target_id, message_id, at, body) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (app_id, scope, target_id, message_id) DO UPDATE SET at = excluded.at, body = excluded.body`)
         .run(...key, id, entry.at, JSON.stringify(entry));
+      return true;
     } catch {
       this.noteFailure(recordKey(appId, target));
+      return false;
     }
   }
 

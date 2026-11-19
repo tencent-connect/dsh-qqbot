@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
+import { externalImage, faceText, formattedText, stickerGif, stickerText, systemFaceUrl } from './timeline-media-fixture.mjs';
 
 const workbench = '/api/qqbot/workbench/';
 const directId = 'local-fixture-allowed-user';
@@ -182,6 +183,79 @@ async function verifyMessages(page, client, fixture, until) {
   return { attachment: true, quoteAndSend: true, responseDetails: true, listRefresh: true, messageRefreshAndRetry: true,
     sendFailure: true, nativeSessionReturn: true, restoreArchivedSession: true, firstSessionAction: true, narrowLayout: true,
     groupNameRefresh: true, groupAliasPriority: true };
+}
+
+async function verifyRichMessages(page, client, fixture, until, dir) {
+  const pane = page.getByRole('region', { name: '当前 QQ 会话' });
+  const history = pane.getByRole('region', { name: 'QQ 消息', exact: true });
+  const query = new URLSearchParams({ appId: DUMMY_APP_ID, scope: 'group', openId: groupId });
+  const entries = async () => (await client.get(workbench + 'timeline?' + query)).entries;
+  const row = entry => history.locator(`[data-entry-id="${entry.id}"]`);
+  const before = (await fixture('observations')).outbound.length;
+  let externalRequests = 0;
+  await page.route(externalImage, route => {
+    externalRequests++;
+    return route.abort();
+  });
+  await page.route(systemFaceUrl, route => route.fulfill({ contentType: 'image/gif', body: stickerGif }));
+
+  for (const command of ['timeline-rich-text', 'timeline-sticker', 'timeline-face']) {
+    await fixture('message', { scope: 'group', identity: 'allowed', mention: false, command });
+  }
+  const [markdown, sticker, face] = await until(async () => {
+    const records = await entries();
+    const markup = records.find(entry => entry.text === formattedText);
+    const animation = records.find(entry => entry.text === stickerText && entry.imageCount === 1);
+    const emoji = records.find(entry => entry.text === faceText);
+    if (markup && animation && emoji) return [markup, animation, emoji];
+  }, 'Markdown, image, and emoji records');
+  for (const entry of [markdown, sticker, face]) {
+    assert.equal(entry.inboundOutcome, 'mention-required');
+    assert.equal(entry.sessionId, undefined);
+  }
+  assert.equal((await fixture('observations')).outbound.length, before);
+
+  await button(pane, '刷新消息').click();
+  const heading = row(markdown).getByRole('heading', { name: 'Markdown 记录' });
+  await heading.waitFor();
+  assert.equal(await row(markdown).locator('strong').filter({ hasText: '加粗正文' }).count(), 1);
+  assert.equal(await row(markdown).locator('img').count(), 0);
+  assert.equal(externalRequests, 0);
+  const menu = row(markdown).locator('button.imqw-message-action');
+  await menu.click();
+  await page.getByRole('menuitem', { name: '查看原文', exact: true }).click();
+  const raw = row(markdown).locator('pre[aria-label="消息原文"]');
+  await raw.waitFor();
+  assert.equal(await raw.textContent(), formattedText);
+  await menu.click();
+  await page.getByRole('menuitem', { name: '查看排版', exact: true }).click();
+  await heading.waitFor();
+
+  const animation = row(sticker).getByRole('img', { name: 'QQ 图片 1' });
+  await animation.scrollIntoViewIfNeeded();
+  const imageUrl = await animation.getAttribute('src');
+  assert(imageUrl);
+  const preview = await page.request.get(new URL(imageUrl, page.url()).href);
+  assert.equal(preview.headers()['content-type'], 'image/gif');
+  assert.deepEqual(await preview.body(), stickerGif);
+  assert.equal(await row(sticker).getByText(stickerText, { exact: true }).count(), 0);
+  const systemFace = row(face).getByRole('img', { name: '汪汪' });
+  await systemFace.scrollIntoViewIfNeeded();
+  assert.equal(await systemFace.getAttribute('src'), systemFaceUrl);
+  for (const image of [animation, systemFace]) {
+    await image.evaluate(node => node.decode());
+    assert(await image.evaluate(node => node.naturalWidth > 0));
+  }
+  await history.screenshot({ path: join(dir, 'workbench-rich-messages.png') });
+
+  await fixture('message', { scope: 'group', identity: 'allowed', command: 'model' });
+  const modelCard = await until(async () => (await entries()).find(entry =>
+    entry.direction === 'outbound' && entry.text.includes('<qqbot-cmd-input') && entry.text.includes('模型配置')), 'QQ model card');
+  await button(pane, '刷新消息').click();
+  await row(modelCard).getByRole('heading', { name: /模型配置/ }).waitFor();
+  assert(await row(modelCard).locator('code').filter({ hasText: /^\/model / }).count() > 0);
+  assert.equal(await row(modelCard).locator('qqbot-cmd-input').count(), 0);
+  return { markdown: true, rawSource: true, inertModelOptions: true, animatedAttachment: true, systemFace: true };
 }
 
 async function verifyToolPicker(page, client, until) {
@@ -661,12 +735,13 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     const accountLayout = await verifyCompactAccountLayout(page, client, dir, until);
     await page.locator('.imqw-peer-select').filter({ hasText: directId.slice(-8) }).click();
     const messages = await verifyMessages(page, client, fixture, until);
+    const richMessages = await verifyRichMessages(page, client, fixture, until, dir);
     const toolPicker = await verifyToolPicker(page, client, until);
     const promptPaths = await verifyPromptPaths(page, client, until, prompt);
     const retention = await verifyRetention(page, client, until, historyFixture);
     const pagination = await verifyMessagePagination(page);
     const identity = await verifyBotIdentityAndLanguage(page, client);
-    return { accountLayout, messages, toolPicker, promptPaths, retention, pagination, identity };
+    return { accountLayout, messages, richMessages, toolPicker, promptPaths, retention, pagination, identity };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));

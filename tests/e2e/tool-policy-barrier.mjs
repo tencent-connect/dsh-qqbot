@@ -1,5 +1,8 @@
 // Isolated Host fixture. Pause after the real tools.guard stage, before write's body.
 import https from 'node:https';
+import { promises as dns } from 'node:dns';
+import { DUMMY_TOKEN } from './command-protocol.mjs';
+import { stickerGif, stickerUrl } from './timeline-media-fixture.mjs';
 
 export const name = 'qqbot-tool-policy-barrier';
 export const inject = ['agents', 'connection', 'permissionPresets'];
@@ -14,6 +17,24 @@ export function apply(ctx) {
     return request(options, ...args);
   };
   ctx.effect(() => () => { https.request = request; });
+  const resolve4 = dns.resolve4;
+  const fetch = globalThis.fetch;
+  const stickerHost = new URL(stickerUrl).hostname;
+  const resolveFixture = (host, ...args) => host === stickerHost ? Promise.resolve(['203.0.113.1']) : resolve4(host, ...args);
+  const fetchFixture = (input, init) => {
+    if (String(input) !== stickerUrl) return fetch(input, init);
+    init?.signal?.throwIfAborted();
+    const authorized = new Headers(init?.headers).get('authorization') === 'QQBot ' + DUMMY_TOKEN;
+    return Promise.resolve(authorized
+      ? new Response(stickerGif, { headers: { 'content-type': 'image/gif' } })
+      : new Response(null, { status: 403 }));
+  };
+  dns.resolve4 = resolveFixture;
+  globalThis.fetch = fetchFixture;
+  ctx.effect(() => () => {
+    if (dns.resolve4 === resolveFixture) dns.resolve4 = resolve4;
+    if (globalThis.fetch === fetchFixture) globalThis.fetch = fetch;
+  });
   const gates = new Map();
   const children = new Map();
   ctx.on('agent/created', ({ agent }) => {

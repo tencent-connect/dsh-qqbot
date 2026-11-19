@@ -38,6 +38,13 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
 
   export const Input: ForwardRefExoticComponent<InputProps & RefAttributes<HTMLInputElement>>;
 
+  export const MarkdownText: NamedExoticComponent<{
+    text: string;
+    labels: { code: { copyLabel: string; copiedLabel: string }; footnotes: string };
+    variant?: 'body' | 'compact';
+    omitHtml?: boolean;
+  }>;
+
   export interface ModalBaseProps {
     open: boolean;
     onClose: () => void;
