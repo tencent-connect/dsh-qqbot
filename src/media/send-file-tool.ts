@@ -124,6 +124,19 @@ export function registerSendFileTool(
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
       }
 
+      // 0. 外发门禁：只有当前桥接会话可以把文件发到 QQ。
+      //    切走之后旧会话、以及 web 端另开的对话也可能调用这个工具——它们的结果
+      //    只应留在网页端。这里在解析目标之前就拦下，避免误发到手机上。
+      const liveRecord = exec.agent === undefined ? undefined : manager.findByAgent(exec.agent as DshAgent);
+      const sessionId =
+        liveRecord?.sessionId ??
+        (exec.agent as { session?: { header?: { id?: string } } } | undefined)?.session?.header?.id;
+      if (sessionId === undefined || !manager.isCurrentBinding(sessionId)) {
+        throw new Error(
+          'qqbot_send_file: 当前对话没有桥接到 QQ，文件不会外发（只在网页端可见）。不要重试或换 target，直接在回复里给出文件路径即可。',
+        );
+      }
+
       // 1. 解析发送目标：显式 target > 当前会话（exec.agent → SessionRecord）
       let replyTarget: ReplyTarget | undefined;
       if (target !== undefined && target !== '') {

@@ -113,6 +113,46 @@ describe('host adapter', () => {
     expect(await adapter.sessionExists('s1')).toBeUndefined();
     expect(await adapter.sessionHeader('s1')).toBeUndefined();
   });
+
+  it('listSessions：0.5.5 快照形态（字段在 header 里）投影成摘要', async () => {
+    const adapter = createHostAdapter(makeCtx({
+      sessionPersistence: {
+        list: async () => [
+          { header: { id: 's1', cwd: '/proj', createdAt: 100 }, revision: 'r1' },
+          { header: { id: 's2', origin: 'subagent', createdAt: 200 }, revision: 'r2' },
+        ],
+      },
+    }));
+
+    expect(await adapter.listSessions()).toEqual([
+      { id: 's1', cwd: '/proj', createdAt: 100 },
+      { id: 's2', createdAt: 200, origin: 'subagent' },
+    ]);
+  });
+
+  it('listSessions：0.5.2 裸 header 形态同样可读（版本漂移收口在这一层）', async () => {
+    const adapter = createHostAdapter(makeCtx({
+      sessionPersistence: { list: async () => [{ id: 's1', cwd: '/proj' }] },
+    }));
+
+    expect(await adapter.listSessions()).toEqual([{ id: 's1', cwd: '/proj' }]);
+  });
+
+  it('listSessions：服务未注册或无 list → undefined（能力缺失 ≠ 没有会话）', async () => {
+    const missing = createHostAdapter(makeCtx({}));
+    expect(await missing.listSessions()).toBeUndefined();
+    expect(missing.capabilities).toContain('sessionPersistence.list(不可用，/switch 候选枚举降级)');
+
+    const statOnly = createHostAdapter(makeCtx({ sessionPersistence: { stat: async () => undefined } }));
+    expect(await statOnly.listSessions()).toBeUndefined();
+  });
+
+  it('listSessions：后端故障照常抛出（由调用方决定降级）', async () => {
+    const adapter = createHostAdapter(makeCtx({
+      sessionPersistence: { list: async () => { throw new Error('EIO: backend unavailable'); } },
+    }));
+    await expect(adapter.listSessions()).rejects.toThrow(/EIO/);
+  });
 });
 
 describe('attachSessionToWorkspace', () => {
