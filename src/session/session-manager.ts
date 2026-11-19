@@ -702,6 +702,23 @@ export class SessionManager {
   }
 
   /**
+   * 该会话是否仍是所在通道当前桥接的目标。
+   *
+   * QQ 通道同一时刻只桥接一个会话：切走之后旧会话仍可能在 web 端继续用，它的
+   * 产物不该再外发到手机。判据是通道的**当前**绑定 id（per-peer 覆盖 > 派生 id），
+   * 不是「曾经映射过」——后者在切换后仍为真，正是漏发/错发的来源。
+   *
+   * 会话表里没有记录时（宿主重启后的 web 会话、从未经 QQ 创建过的对话）无从确认
+   * 绑定关系，按 false 处理：宁可少发一次，也不把无关对话的产物发到用户手机上。
+   */
+  isCurrentBinding(sessionId: string): boolean {
+    for (const [key, record] of this.sessions) {
+      if (record.sessionId === sessionId) return this.currentSessionId(key) === sessionId;
+    }
+    return false;
+  }
+
+  /**
    * 枚举可切换的会话（/switch 无参列表）。
    *
    * 数据源是宿主持久化层，经 host adapter 读取（不裸调宿主服务：形态在版本间漂移）。

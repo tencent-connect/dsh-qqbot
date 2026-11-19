@@ -171,6 +171,27 @@ describe('currentBoundSessionId', () => {
   });
 });
 
+describe('isCurrentBinding', () => {
+  it('当前桥接会话 → true；切走之后旧会话 → false', async () => {
+    const { manager } = createManagerWithResume();
+    const before = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(manager.isCurrentBinding(before.sessionId)).toBe(true);
+
+    await manager.switchSession('c2c', PEER, 'session-aaaa');
+    const next = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    expect(manager.isCurrentBinding(next.sessionId)).toBe(true);
+    // 旧会话已被回收：既没有活记录，也不再是通道绑定目标
+    expect(manager.isCurrentBinding(before.sessionId)).toBe(false);
+  });
+
+  it('不在会话表里的会话（web 端另开的对话）→ false', () => {
+    const { manager } = createManagerWithResume();
+    // 无从确认绑定关系时宁可少发：文件留在网页端
+    expect(manager.isCurrentBinding('session-zzzz')).toBe(false);
+  });
+});
+
 describe('listSwitchTargets', () => {
   it('过滤 subagent 并按 createdAt 倒序', async () => {
     const { manager } = createManagerWithResume();
