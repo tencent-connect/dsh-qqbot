@@ -27,6 +27,7 @@ async function install(
   save?: (patch: WorkbenchRobotPatch) => WorkbenchRobot | Promise<WorkbenchRobot>,
   createBinding?: () => BindingService,
   remove?: (appId: string, revision: number) => Promise<void>,
+  cachedScannerNickname?: (appId: string, openId: string) => string | undefined,
 ) {
   const ctx = new Context();
   const routes = new Map<string, TestRoute>();
@@ -41,7 +42,7 @@ async function install(
   const plugin = ctx.plugin(scope => {
     registerWorkbenchRoutes(scope, list, save);
     if (remove) registerWorkbenchRobotRemoval(scope, remove);
-    if (createBinding && save) registerWorkbenchRobotBinding(scope, async patch => save(patch), createBinding);
+    if (createBinding && save) registerWorkbenchRobotBinding(scope, async patch => save(patch), createBinding, cachedScannerNickname);
   });
   await plugin.await();
   expect(routes.size).toBe(1 + Number(!!createBinding) + Number(!!remove));
@@ -87,7 +88,8 @@ describe('workbench robot account route', () => {
     expect((await send({ appId: robot.appId, revision: 1 })).status).toBe(503);
   });
   it('uses the owner-only exact registry and projects public fields even when the source carries credentials', async () => {
-    const raw = { ...robot, appSecret: 'fixture-secret', access: { ...robot.access, appSecret: 'nested-secret' } };
+    const publicAccount = { ...robot, platformName: 'QQ 平台名称' };
+    const raw = { ...publicAccount, appSecret: 'fixture-secret', access: { ...robot.access, appSecret: 'nested-secret' } };
     const save = vi.fn(() => raw);
     const { route, dispose } = await install(() => [raw], save);
     try {
@@ -96,10 +98,10 @@ describe('workbench robot account route', () => {
       const response = await route.fetch(new Request(url));
       expect(response.status).toBe(200);
       expect(response.headers.get('cache-control')).toBe('no-store');
-      expect(await response.json()).toEqual({ robots: [robot] });
+      expect(await response.json()).toEqual({ robots: [publicAccount] });
 
       const patch = { appId: robot.appId, revision: 1, access: { commandMode: 'disabled' } };
-      expect(await (await route.fetch(post(patch))).json()).toEqual({ robot });
+      expect(await (await route.fetch(post(patch))).json()).toEqual({ robot: publicAccount });
       expect(save).toHaveBeenCalledWith(patch);
     } finally {
       await dispose();
@@ -197,7 +199,9 @@ describe('binding another workbench robot', () => {
     const { calls, createBinding } = connector();
     const added = { ...robot, primary: false, appId: 'added' };
     const save = vi.fn(() => ({ ...added, appSecret: 'private-credential' }));
-    const { binding, dispose } = await install(() => [robot], save, createBinding);
+    const nickname = vi.fn((appId: string, openId: string) =>
+      appId === added.appId && openId === 'scanning-user' ? '本机器人缓存的昵称' : undefined);
+    const { binding, dispose } = await install(() => [robot], save, createBinding, undefined, nickname);
     try {
       if (!binding) throw new Error('Missing binding route');
       await bindPost(binding, firstId, 'start');
@@ -211,11 +215,12 @@ describe('binding another workbench robot', () => {
       await vi.waitFor(async () => expect(await (await binding.fetch(current)).json()).toMatchObject({ phase: 'waiting' }));
       calls[1]?.callbacks.onSuccess([{ appId: 'added', appSecret: 'private-credential', userOpenid: 'scanning-user' }]);
       await vi.waitFor(async () => {
-        expect(await (await binding.fetch(current)).json()).toEqual({ phase: 'bound', robot: added });
+        expect(await (await binding.fetch(current)).json()).toEqual({
+          phase: 'bound', robot: added, scannerNickname: '本机器人缓存的昵称',
+        });
       });
-      expect(save).toHaveBeenCalledExactlyOnceWith({ appId: 'added', appSecret: 'private-credential', revision: null,
-        access: { c2cMode: 'allowlist', c2cAllow: ['scanning-user'] },
-      });
+      expect(save).toHaveBeenCalledExactlyOnceWith({ appId: 'added', appSecret: 'private-credential', revision: null });
+      expect(nickname).toHaveBeenCalledExactlyOnceWith(added.appId, 'scanning-user');
 
       await bindPost(binding, firstId, 'start');
       await bindPost(binding, firstId, 'cancel');

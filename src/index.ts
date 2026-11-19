@@ -56,7 +56,8 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   registerWorkbenchRoutes(ctx, () => runtime.list(), patch => runtime.save(patch));
   if (profileDir) registerWorkbenchRobotRemoval(ctx, (appId, revision, mode, binding) => runtime.remove(appId, revision, profileDir, mode, binding));
   if (store) registerWorkbenchRobotBinding(ctx, patch => runtime.save(patch),
-    () => new BindingService({ source: 'dsh-qqbot', logger }));
+    () => new BindingService({ source: 'dsh-qqbot', logger }),
+    (appId, openId) => runtime.cachedScannerNickname(appId, openId));
   registerWorkbenchDefaults(ctx, runtime);
   registerWorkbenchGroupGuideImages(ctx);
   registerWorkbenchTools(ctx);

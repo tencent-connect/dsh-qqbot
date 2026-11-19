@@ -1,5 +1,6 @@
 // Isolated Host fixture. Pause after the real tools.guard stage, before write's body.
 import https from 'node:https';
+import http from 'node:http';
 import { promises as dns } from 'node:dns';
 import { DUMMY_TOKEN } from './command-protocol.mjs';
 import { stickerGif, stickerUrl } from './timeline-media-fixture.mjs';
@@ -8,11 +9,18 @@ export const name = 'qqbot-tool-policy-barrier';
 export const inject = ['agents', 'connection', 'permissionPresets'];
 
 export function apply(ctx) {
-  // Unbinding reopens the scanner. Keep the fixture off the real QR service.
+  // Keep QR tests and the scanner opened after unbinding off the real service.
+  const qrOrigin = process.env.QQBOT_TEST_QR_FIXTURE === '1' ? new URL(process.env.QQBOT_BASE_URL) : undefined;
   const request = https.request;
   https.request = (options, ...args) => {
     if (options?.hostname === 'q.qq.com' || options?.host === 'q.qq.com') {
-      throw new Error('The isolated fixture does not start real QQ pairing.');
+      if (qrOrigin?.protocol !== 'http:' || qrOrigin.hostname !== '127.0.0.1'
+        || !['/lite/create_bind_task', '/lite/poll_bind_result'].includes(options.path)) {
+        throw new Error('The isolated fixture does not start real QQ pairing.');
+      }
+      return http.request(new URL('/__fixture/qr' + options.path, qrOrigin), {
+        method: options.method, headers: options.headers, timeout: options.timeout,
+      }, ...args);
     }
     return request(options, ...args);
   };

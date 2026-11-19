@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -189,9 +189,13 @@ it('uses upstream defaults for new robots and retains access for existing AppIDs
     groupMode: 'allowlist', groupAllow: ['saved-group'], commandMode: 'disabled',
   } satisfies AccessControlConfig;
   const existing = store.save({
-    kind: 'additional', appId: 'existing-robot', appSecret: 'fixture-secret', alias: '', enabled: false, revision: 0,
+    kind: 'additional', appId: 'existing-robot', appSecret: 'fixture-secret', alias: '手填名', enabled: false, revision: 0,
     access: savedAccess,
   });
+  writeFileSync(join(sandbox.dir, 'qq-display-names.json'), JSON.stringify({
+    [JSON.stringify([existing.appId, 'bot-mention', 'bot-id', ''])]: 'QQ 名称',
+    [JSON.stringify([existing.appId, 'bot-mention', 'group-bot-id', 'group'])]: '群内称呼',
+  }));
   let runtime!: RobotRuntimes;
   const plugin = new Context().plugin(scope => {
     runtime = new RobotRuntimes(scope, { get: vi.fn() } as unknown as DshAgentRegistry, logger, store);
@@ -204,10 +208,9 @@ it('uses upstream defaults for new robots and retains access for existing AppIDs
     };
     const manual = await runtime.save({ ...credentials, appId: 'manual-robot' });
     expect(manual.access).toEqual(access);
-    const scanned = await runtime.save({
-      ...credentials, appId: 'scanned-robot', access: { c2cMode: 'allowlist', c2cAllow: ['scanning-user'] },
-    });
-    expect(scanned.access).toEqual({ ...access, c2cMode: 'allowlist', c2cAllow: ['scanning-user'] });
+    expect(manual.platformName).toBeUndefined();
+    expect(runtime.list().find(robot => robot.appId === existing.appId))
+      .toMatchObject({ alias: '手填名', platformName: 'QQ 名称' });
     await expect(runtime.save({ ...credentials, appId: existing.appId })).rejects.toThrow('这个机器人已添加');
     expect(store.get(existing.appId)).toEqual(existing);
 

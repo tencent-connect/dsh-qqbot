@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { basename, dirname, join } from 'node:path';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
 import { externalImage, faceText, formattedText, stickerGif, stickerText, systemFaceUrl } from './timeline-media-fixture.mjs';
+import { cachedBotName, scannedBot } from './qr-binding-fixture.mjs';
 
 const workbench = '/api/qqbot/workbench/';
 const directId = 'local-fixture-allowed-user';
@@ -282,7 +283,7 @@ async function verifyToolPicker(page, client, until) {
     await dialog.getByRole('group', { name: '工具分类' }).waitFor();
     return dialog;
   };
-  await button(page, '设置主机器人').click();
+  await button(page, '设置' + cachedBotName).click();
   await page.getByRole('tab', { name: '新会话默认设置' }).click();
   const defaultsForm = page.getByRole('tabpanel', { name: '新会话默认设置' });
   const baseline = await defaults();
@@ -438,7 +439,7 @@ async function verifyPromptPaths(page, client, until, { path, initial, edited, w
     return { dialog, field };
   };
 
-  await button(page, '设置主机器人').click();
+  await button(page, '设置' + cachedBotName).click();
   await page.getByRole('tab', { name: '新会话默认设置' }).click();
   const defaultsForm = page.getByRole('tabpanel', { name: '新会话默认设置' });
   const baseline = await defaults();
@@ -643,20 +644,57 @@ async function verifyBotIdentityAndLanguage(page, client) {
   const other = '0000000001';
   const alias = '同名测试机器人';
   await client.post(workbench + 'robots', { appId: DUMMY_APP_ID, revision: primary.revision, alias });
-  await client.post(workbench + 'robots', { appId: other, revision: null, appSecret: DUMMY_SECRET, enabled: false, alias });
+  const { robot: fallback } = await client.post(workbench + 'robots', {
+    appId: other, revision: null, appSecret: DUMMY_SECRET, enabled: false,
+  });
   const firstRow = page.locator('.imqr-row').filter({ hasText: DUMMY_APP_ID });
   const secondRow = page.locator('.imqr-row').filter({ hasText: other });
+  await secondRow.getByText('机器人 ' + other, { exact: true }).waitFor();
+  await client.post(workbench + 'robots', { appId: other, revision: fallback.revision, alias });
   for (const row of [firstRow, secondRow]) await row.getByText(alias, { exact: true }).waitFor();
   await button(secondRow, '解绑' + alias).click();
   const confirmation = page.getByRole('dialog', { name: '解绑「' + alias + '」？' });
   await confirmation.getByText('AppID ' + other, { exact: true }).waitFor();
   assert.equal(await confirmation.getByText('AppID ' + DUMMY_APP_ID, { exact: true }).count(), 0);
   await button(confirmation, '取消').click();
-  return { bilingualControls: true, identifiesSameNameBots: true, unbindTargetAppId: true };
+  return { bilingualControls: true, identifiesSameNameBots: true, unbindTargetAppId: true, appIdFallback: true };
+}
+
+async function verifyScannedRobot(page, client, fixture, until) {
+  const getRobots = async () => (await client.get(workbench + 'robots')).robots;
+  const primary = (await getRobots()).find(bot => bot.primary);
+  await button(page, '添加机器人').click();
+  const link = page.getByRole('link', { name: '在浏览器中打开绑定页' });
+  await link.waitFor();
+  const taskId = new URL(await link.getAttribute('href')).searchParams.get('task_id');
+  assert(taskId);
+  await fixture('scan', { taskId });
+
+  const robot = await until(async () => (await getRobots()).find(bot =>
+    bot.appId === scannedBot.appId && bot.state === 'connected' && bot.platformName === scannedBot.name),
+  'the scanned bot exposes its QQ name after READY');
+  assert.equal(robot.alias, '');
+  assert.deepEqual(robot.access, {
+    c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'open',
+  });
+  const row = page.locator('.imqr-row').filter({ hasText: scannedBot.appId });
+  await row.getByText(scannedBot.name, { exact: true }).waitFor();
+  const tab = page.getByRole('tabpanel', { name: '账号与权限', exact: true });
+  await tab.getByRole('status').getByText('扫码账号 ' + scannedBot.nickname, { exact: true }).waitFor();
+  const name = tab.getByRole('textbox', { name: '机器人名称', exact: true });
+  assert.equal(await name.getAttribute('placeholder'), scannedBot.name);
+  assert.equal(await name.inputValue(), '');
+
+  await client.post(workbench + 'robots/remove', {
+    appId: robot.appId, revision: robot.revision, bindingRevision: robot.bindingRevision, mode: 'retain',
+  });
+  await until(async () => (await fixture('status')).activeConnections === 1, 'the synthetic scanned gateway stopped');
+  assert.deepEqual((await getRobots()).find(bot => bot.primary), primary);
+  return { defaultAccessOpen: true, readyDisplayName: true, scannerNicknameFromSameApp: true, primaryUnchanged: true };
 }
 
 async function verifyCompactAccountLayout(page, client, dir, until) {
-  await button(page, '设置主机器人').click();
+  await button(page, '设置' + cachedBotName).click();
   const tab = page.getByRole('tabpanel', { name: '账号与权限', exact: true });
   const credentials = tab.getByRole('region', { name: '凭据与访问', exact: true });
   const account = tab.getByRole('group', { name: '账号信息', exact: true });
@@ -665,18 +703,21 @@ async function verifyCompactAccountLayout(page, client, dir, until) {
   const scope = tab.getByText('服务范围', { exact: true });
   const save = button(tab, '保存');
   await name.waitFor();
-  assert.equal(await name.getAttribute('placeholder'), '主机器人');
+  assert.equal(await name.getAttribute('placeholder'), cachedBotName);
   assert.equal(await name.inputValue(), '');
   assert(await save.isDisabled());
   await name.fill('布局验收机器人');
   await save.click();
   const alias = async () => (await client.get(workbench + 'robots')).robots.find(bot => bot.primary).alias;
   await until(async () => (await alias()) === '布局验收机器人', 'custom alias saved');
+  const row = page.locator('.imqr-row').filter({ hasText: DUMMY_APP_ID });
+  await row.getByText('布局验收机器人', { exact: true }).waitFor();
   await until(async () => await save.isDisabled(), 'alias editor is ready');
   await name.fill('');
   await save.click();
   await until(async () => (await alias()) === '', 'alias cleared');
-  assert.equal(await name.getAttribute('placeholder'), '主机器人');
+  await row.getByText(cachedBotName, { exact: true }).waitFor();
+  assert.equal(await name.getAttribute('placeholder'), cachedBotName);
 
   const boxes = async () => {
     await name.waitFor();
@@ -750,7 +791,8 @@ export async function verifyWorkbenchBrowser({ source, hostOrigin, hostLog, clie
     const retention = await verifyRetention(page, client, until, historyFixture);
     const pagination = await verifyMessagePagination(page);
     const identity = await verifyBotIdentityAndLanguage(page, client);
-    return { accountLayout, messages, richMessages, toolPicker, promptPaths, retention, pagination, identity };
+    const binding = await verifyScannedRobot(page, client, fixture, until);
+    return { accountLayout, messages, richMessages, toolPicker, promptPaths, retention, pagination, identity, binding };
   } catch (error) {
     await page?.screenshot({ path: join(dir, 'workbench-failure.png') }).catch(() => {});
     throw new Error(String(error.stack ?? error).replace(/([?&]token=)[^\s&"]+/g, '$1[redacted]'));

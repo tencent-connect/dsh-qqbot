@@ -14,6 +14,7 @@ import { QqTimeline } from '../../lib/runtime/qq-timeline.js';
 import { atomicWrite } from '../../lib/shared/atomic-file.js';
 import { deliveryKey } from '../../lib/transport/delivery-ledger.js';
 import { stageHistoryPackage } from './history-registry.mjs';
+import { cachedBotName, scannedBot } from './qr-binding-fixture.mjs';
 
 const [source, corePackage, historyPackage, dir, expected = 'fixed', ...flags] = process.argv.slice(2);
 const browser = flags.includes('--browser');
@@ -37,7 +38,7 @@ const hostOrigin = 'http://127.0.0.1:' + hostPort;
 const hostLog = join(dir, 'host.log');
 const primary = { provider: 'policy-fixture', model: 'fixture-primary' };
 const secondary = { provider: primary.provider, model: 'fixture-secondary' };
-const qq = await createQQFixture({ primary, secondary, allowModelRequests: true, timelineMedia: browser });
+const qq = await createQQFixture({ primary, secondary, allowModelRequests: true, timelineMedia: browser, scanBindings: browser });
 const pending = new Map();
 const requests = [];
 const promptRequests = new Map();
@@ -91,6 +92,7 @@ try {
     if ((name.startsWith('QQBOT_') && !['QQBOT_DATA_DIR', 'QQBOT_BASE_URL', 'QQBOT_TOKEN_BASE_URL', 'QQBOT_TOOL_TEST_KEY'].includes(name))
       || name === 'NODE_OPTIONS') delete env[name];
   }
+  if (browser) env.QQBOT_TEST_QR_FIXTURE = '1';
   const cli = ['--import', 'tsx/esm', 'apps/cli/src/bin.ts'];
   const select = ['--profile', profile];
   const install = { cwd: source, env, logPath: join(dir, 'install.log') };
@@ -118,6 +120,11 @@ try {
     const timedId = 'local-fixture-already-timed';
     const settings = (recording, alias = '') => ({ alias, receiving: true, recording, revision: 0 });
     await mkdir(qqData, { recursive: true });
+    await writeFile(join(qqData, 'qq-display-names.json'), JSON.stringify({
+      [JSON.stringify([DUMMY_APP_ID, 'bot-mention', 'local-fixture-bot', ''])]: cachedBotName,
+      [JSON.stringify([DUMMY_APP_ID, 'c2c', scannedBot.userOpenid])]: '另一个 AppID 的昵称',
+      [JSON.stringify([scannedBot.appId, 'c2c', scannedBot.userOpenid])]: scannedBot.nickname,
+    }), { mode: 0o600 });
     await writeFile(join(qqData, 'conversation-settings.json'), JSON.stringify({
       version: 1, peers: {
         [`qqbot:${DUMMY_APP_ID}:c2c:${directId}`]: settings(true),

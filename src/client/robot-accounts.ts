@@ -39,7 +39,7 @@ export function accountName(robot: WorkbenchRobot): string {
 }
 
 function defaultAccountName(robot: WorkbenchRobot): string {
-  return robot.primary ? t("主机器人") : t("机器人 {0}", robot.appId);
+  return robot.platformName || t("机器人 {0}", robot.appId);
 }
 
 function editRobot(robot: WorkbenchRobot): EditRobot {
@@ -440,7 +440,7 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
     },
       h('div', { className: 'imqr-account-controls', role: 'group', 'aria-label': t("账号信息") },
         h('label', { className: 'imqr-account-name' }, t("机器人名称"), h(Input, {
-          value: editor.draft.alias, disabled: busy, placeholder: defaultAccountName(editor.baseline),
+          value: editor.draft.alias, disabled: busy, placeholder: defaultAccountName(current ?? editor.baseline),
           autoComplete: 'off', maxLength: 120, onChange: event => setField('alias', event.currentTarget.value),
         })),
         enableControl),
@@ -456,6 +456,9 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
       rebased && !stale ? h('p', { className: 'imqb-status-sub', role: 'status' }, t("草稿已合并，请核对后保存。")) : null,
   );
   const startBinding = (): void => startEdit({ kind: 'add', id: crypto.randomUUID() });
+  const bound = binding?.state.phase === 'bound' ? binding.state : undefined;
+  const scannerNickname = editor?.kind === 'edit' && bound?.robot.appId === editor.baseline.appId
+    && robotBindingKey(bound.robot) === robotBindingKey(editor.baseline) ? bound.scannerNickname : undefined;
   const credentials = editor?.kind === 'edit' ? h('section', { 'aria-label': t("凭据与访问") },
     h('h3', null, t("凭据与访问")),
     h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
@@ -469,6 +472,7 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
         unbind: () => openRemove(current ?? editor.baseline),
       },
     }),
+    scannerNickname ? h('p', { className: 'imqb-status-sub', role: 'status' }, t("扫码账号 {0}", scannerNickname)) : null,
   ) : null;
   const accountSettings = editor?.kind === 'add'
     ? h<NonNullable<Parameters<typeof BindPanelBody>[0]>>(BindPanelBody, {
@@ -479,7 +483,7 @@ export function RobotAccounts({ selectedAppId, draftStore: accountDrafts, onSele
         ? h(PrimaryAccountSettings, {
             key: robotBindingKey(editor.baseline),
             appId: editor.baseline.appId, revision: current?.revision ?? editor.baseline.revision,
-            enabled, formId, defaultName: defaultAccountName(editor.baseline), controls: enableControl, credentials,
+            enabled, formId, defaultName: defaultAccountName(current ?? editor.baseline), controls: enableControl, credentials,
             onAliasSaved: robot => setRobots(current => replaceRobot(current, robot)),
           })
         : h(Fragment, null, credentials, form,

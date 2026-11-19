@@ -173,6 +173,7 @@ window.__ModuleLoader__.load({
 			"账号信息": "Account info",
 			"启用机器人": "Enable bot",
 			"凭据与访问": "Credentials and access",
+			"扫码账号 {0}": "Scanned by {0}",
 			"机器人账号": "Bot accounts",
 			"机器人": "Bot",
 			"添加机器人": "Add bot",

@@ -194,6 +194,11 @@ export class RobotRuntimes {
     return this.records().map(record => this.view(record));
   }
 
+  cachedScannerNickname(appId: string, openId: string): string | undefined {
+    const name = this.names.peer(appId, 'c2c', openId);
+    return name === openId ? undefined : name;
+  }
+
   defaults(appId: string): WorkbenchDefaults {
     const config = this.configFor(appId);
     return this.conversationSettings.template(appId) ?? { revision: 0, settings: legacyAgentSettings(config) };
@@ -251,7 +256,7 @@ export class RobotRuntimes {
       mentionName: (groupId: string, openId: string) => {
         const botName = this.names.botMention(appId, groupId, openId);
         if (openId === appId || botName) {
-          return record.alias || (botName !== '机器人' && botName) || (record.kind === 'primary' ? '主机器人' : `机器人 ${appId}`);
+          return record.alias || this.names.robot(appId) || (botName !== '机器人' && botName) || `机器人 ${appId}`;
         }
         return this.names.peer(appId, 'c2c', openId);
       },
@@ -318,7 +323,7 @@ export class RobotRuntimes {
     return {
       appId, scope, openId, recording: peer.retention !== 'paused', blockedReason,
       automaticWebReplies: externalTurns === 'all' || (externalTurns === 'c2c' && scope === 'c2c'),
-      robotName: robot.alias || (robot.primary ? '主机器人' : `机器人 ${appId}`),
+      robotName: robot.alias || robot.platformName || `机器人 ${appId}`,
       peerName: peer.alias || account.peerName(scope, openId) || `${scope === 'group' ? '群聊' : '私聊'} ${openId.slice(-8)}`,
     };
   }
@@ -498,6 +503,7 @@ export class RobotRuntimes {
       appId: record.appId,
       primary: record.kind === 'primary',
       alias: record.alias,
+      platformName: this.names.robot(record.appId),
       enabled: record.enabled,
       revision: record.revision,
       bindingRevision: record.bindingRevision ?? record.revision,

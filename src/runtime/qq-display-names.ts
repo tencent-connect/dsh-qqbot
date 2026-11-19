@@ -7,9 +7,12 @@ function displayName(value: unknown): string | undefined {
   return value.trim().replace(/\s+/g, ' ').slice(0, 300) || undefined;
 }
 
+const readyIdentityKey = /^\["([A-Za-z0-9._-]+)","bot-mention","[A-Za-z0-9_-]+",""\]$/;
+
 /** QQ metadata has its own file so it never advances a settings revision. */
 export class QqDisplayNames {
   private readonly names = new Map<string, string>();
+  private readonly robotNames = new Map<string, string>();
   private writable = true;
 
   constructor(private readonly path: string, private readonly logger: Logger) {
@@ -18,13 +21,20 @@ export class QqDisplayNames {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid QQ display names');
       for (const [key, raw] of Object.entries(value)) {
         const name = displayName(raw);
-        if (name) this.names.set(key, name);
+        if (!name) continue;
+        this.names.set(key, name);
+        const appId = readyIdentityKey.exec(key)?.[1];
+        if (appId && name !== '机器人') this.robotNames.set(appId, name);
       }
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
       this.writable = false;
       this.logger.warn('无法读取 QQ 平台名称缓存。');
     }
+  }
+
+  robot(appId: string): string | undefined {
+    return this.robotNames.get(appId) ?? this.names.get(JSON.stringify([appId]));
   }
 
   peer(appId: string, scope: ChatScope, openId: string): string | undefined {
@@ -44,7 +54,9 @@ export class QqDisplayNames {
   saveBotIdentity(appId: string, openId: unknown, value: unknown, groupId?: string): void {
     if (typeof openId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(openId)) return;
     const key = JSON.stringify([appId, 'bot-mention', openId, groupId ?? '']);
-    this.save(key, displayName(value) ?? this.names.get(key) ?? '机器人');
+    const name = displayName(value);
+    if (!groupId && name && name !== '机器人') this.robotNames.set(appId, name);
+    this.save(key, name ?? this.names.get(key) ?? '机器人');
   }
 
   botMention(appId: string, groupId: string, openId: string): string | undefined {

@@ -10,7 +10,8 @@ export const WORKBENCH_GROUP_GUIDE_IMAGES = {
   'proactive.png': '/api/qqbot/workbench/group-permissions/proactive.png',
 } as const;
 
-export type WorkbenchRobotBinding = Exclude<BindStateWire, { phase: 'bound' }> | { phase: 'bound'; robot: WorkbenchRobot };
+export type WorkbenchRobotBinding = Exclude<BindStateWire, { phase: 'bound' }>
+  | { phase: 'bound'; robot: WorkbenchRobot; scannerNickname?: string };
 
 export type WorkbenchRobotState = 'connecting' | 'connected' | 'reconnecting' | 'failed' | 'disabled';
 
@@ -20,6 +21,7 @@ export interface WorkbenchRobot {
   readonly primary: boolean;
   readonly enabled: boolean;
   readonly alias: string;
+  readonly platformName?: string;
   readonly revision: number;
   readonly bindingRevision?: number;
   readonly access: AccessControlConfig;

@@ -5,6 +5,7 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFixtureCommands, DUMMY_APP_ID, DUMMY_SECRET, DUMMY_TOKEN, isFixtureOutboundPath, outboundObservation, parseFixtureMessage } from './command-protocol.mjs';
 import { stickerUrl } from './timeline-media-fixture.mjs';
+import { createQrBindingFixture, scannedBot } from './qr-binding-fixture.mjs';
 
 // The QQ SDK owns this dependency; resolve from its installed location rather than a workstation path.
 const sdkRequire = createRequire(realpathSync(fileURLToPath(import.meta.resolve('@tencent-connect/qqbot-nodejs'))));
@@ -22,6 +23,7 @@ export async function createQQFixture(options = {}) {
     throw new Error('Fixture allowModelRequests must be boolean');
   }
   const commands = createFixtureCommands(options);
+  const qr = options.scanBindings ? createQrBindingFixture() : undefined;
   const state = {
     startedAt: Date.now(), tokenRequests: 0, gatewayRequests: 0, connections: 0,
     readyCount: 0, resumedCount: 0, receivedMessages: 0, blockedOutboundRequests: 0,
@@ -118,12 +120,22 @@ export async function createQQFixture(options = {}) {
         persist();
         return json(res, 200, snapshot());
       }
+      if (qr && req.method === 'POST') {
+        if (path === '/__fixture/qr/lite/create_bind_task') return json(res, 200, qr.create(await readJson(req)));
+        if (path === '/__fixture/qr/lite/poll_bind_result') return json(res, 200, qr.poll((await readJson(req)).task_id));
+        if (path === '/__fixture/scan') {
+          qr.complete((await readJson(req)).taskId);
+          return json(res, 200, { ok: true });
+        }
+      }
       if (req.method === 'POST' && path === '/app/getAppAccessToken') {
         const data = await readJson(req);
         state.tokenRequests += 1;
         persist();
-        if (data.appId !== DUMMY_APP_ID || data.clientSecret !== DUMMY_SECRET) return json(res, 400, { message: 'Fixture accepts only dummy credentials' });
-        return json(res, 200, { access_token: DUMMY_TOKEN, expires_in: 7200 });
+        if (data.clientSecret !== DUMMY_SECRET) return json(res, 400, { message: 'Fixture accepts only dummy credentials' });
+        const token = data.appId === DUMMY_APP_ID ? DUMMY_TOKEN : qr && data.appId === scannedBot.appId ? scannedBot.token : undefined;
+        return token ? json(res, 200, { access_token: token, expires_in: 7200 })
+          : json(res, 400, { message: 'Fixture accepts only dummy credentials' });
       }
       if (req.method === 'GET' && path === '/gateway') {
         state.gatewayRequests += 1;
@@ -190,7 +202,8 @@ export async function createQQFixture(options = {}) {
           state.heartbeatCount += 1;
           ws.send(JSON.stringify({ op: 11 }));
         } else if (packet.op === 2 || packet.op === 6) {
-          if (packet.d?.token !== `QQBot ${DUMMY_TOKEN}`) {
+          const scanned = qr && packet.d?.token === `QQBot ${scannedBot.token}`;
+          if (!scanned && packet.d?.token !== `QQBot ${DUMMY_TOKEN}`) {
             ws.close(4004, 'fixture authentication failed');
             return;
           }
@@ -200,7 +213,10 @@ export async function createQQFixture(options = {}) {
             dispatch(ws, 'RESUMED', {});
           } else {
             state.readyCount += 1;
-            dispatch(ws, 'READY', { session_id: 'local-fixture-session', user: { id: 'local-fixture-bot' } });
+            dispatch(ws, 'READY', {
+              session_id: scanned ? 'local-fixture-scan-session' : 'local-fixture-session',
+              user: scanned ? { id: 'local-fixture-scanned-bot', username: scannedBot.name } : { id: 'local-fixture-bot' },
+            });
           }
         } else {
           throw new Error('Unsupported packet');

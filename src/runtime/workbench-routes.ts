@@ -71,9 +71,9 @@ export class WorkbenchRequestError extends Error {
   }
 }
 
-function publicRobot({ appId, state, primary, enabled, alias, revision, bindingRevision, access }: WorkbenchRobot): WorkbenchRobot {
+function publicRobot({ appId, state, primary, enabled, alias, platformName, revision, bindingRevision, access }: WorkbenchRobot): WorkbenchRobot {
   const { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } = access;
-  return { appId, state, primary, enabled, alias, revision,
+  return { appId, state, primary, enabled, alias, platformName, revision,
     ...(bindingRevision === undefined ? {} : { bindingRevision }),
     access: { c2cMode, groupMode, commandMode, c2cAllow, groupAllow } };
 }
@@ -156,6 +156,7 @@ export function registerWorkbenchRobotBinding(
   ctx: Context,
   saveRobot: (patch: WorkbenchRobotPatch) => Promise<WorkbenchRobot>,
   createBinding: () => BindingService,
+  cachedScannerNickname?: (appId: string, openId: string) => string | undefined,
 ): void {
   let attempt: RobotBindAttempt | undefined;
   const clearAttempt = () => {
@@ -174,10 +175,9 @@ export function registerWorkbenchRobotBinding(
         const appId = robotAppId(credentials.appId);
         const appSecret = robotSecret(credentials.appSecret);
         const userOpenid = credentials.userOpenid;
-        const robot = await saveRobot({ appId, appSecret, revision: null,
-          ...(userOpenid ? { access: robotAccessPatch({ c2cMode: 'allowlist', c2cAllow: [userOpenid] }) } : {}),
-        });
-        return { phase: 'bound', robot: publicRobot(robot) };
+        const robot = await saveRobot({ appId, appSecret, revision: null });
+        const scannerNickname = userOpenid ? cachedScannerNickname?.(appId, userOpenid) : undefined;
+        return { phase: 'bound', robot: publicRobot(robot), scannerNickname };
       } catch (error) {
         return { phase: 'failed', reason: error instanceof WorkbenchRequestError || error instanceof RobotConfigConflictError
           ? error.message : '绑定未保存，请核对凭据后重试。' };
