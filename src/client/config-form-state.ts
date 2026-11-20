@@ -28,7 +28,7 @@ export interface ConfigWire {
 }
 
 const EDITABLE_KEYS = ['access', 'requireMention', 'streaming', 'showToolResults', 'debug',
-  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt', 'messageHandlingMode'] as const;
+  'provider', 'model', 'preset', 'groupPrompt', 'directPrompt', 'messageHandlingMode', 'cwd'] as const;
 const ACCESS_KEYS = ['c2cMode', 'c2cAllow', 'groupMode', 'groupAllow', 'commandMode'] as const;
 
 export const DEFAULT_ACCESS: AccessControlWire = {
@@ -49,7 +49,7 @@ export function normalizeConfig(form: ConfigWire): ConfigWire {
   };
 }
 
-/** Build the writable difference without submitting account or working-directory fields. */
+/** 构建可写差异：凭据等只读字段与未知响应字段不会进入。 */
 export function configPatch(baseline: ConfigWire, form: ConfigWire): Partial<ConfigWire> {
   const changed: Partial<ConfigWire> = {};
   for (const key of EDITABLE_KEYS) {
@@ -103,7 +103,7 @@ export function parseConfigDraft(value: unknown): ConfigDraft | undefined {
   const validConfig = (candidate: unknown): candidate is ConfigWire => {
     if (candidate === null || typeof candidate !== 'object') return false;
     const fields = candidate as Record<string, unknown>;
-    for (const key of ['appId', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt']) {
+    for (const key of ['appId', 'accessRevision', 'provider', 'model', 'preset', 'groupPrompt', 'directPrompt', 'cwd']) {
       if (fields[key] !== undefined && typeof fields[key] !== 'string') return false;
     }
     for (const key of ['requireMention', 'streaming', 'showToolResults', 'debug']) {

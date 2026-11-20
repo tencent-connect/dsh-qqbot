@@ -53,15 +53,15 @@ describe('config form draft reconciliation', () => {
     expect(form.access!.c2cAllow).toEqual([' owner ', '', 'owner', 'second', '  ']);
   });
 
-  it('never submits readonly values or stores unrecognized response fields', () => {
+  it('never submits credential values or stores unrecognized response fields', () => {
     const initial = baseline();
-    const serverResponse = { ...initial, appSecret: 'must-not-store', cwd: '/changed', newSecret: 'unknown' };
+    const serverResponse = { ...initial, appSecret: 'must-not-store', newSecret: 'unknown' };
 
     expect(configPatch(initial, serverResponse)).toEqual({});
     const stored = configDraft(serverResponse, { ...serverResponse, model: 'edited' });
     expect(JSON.stringify(stored)).not.toContain('must-not-store');
     expect(JSON.stringify(stored)).not.toContain('newSecret');
-    expect(stored.form.cwd).toBeUndefined();
+    expect(stored.form.cwd).toBe('/old');
     expect(stored.form.model).toBe('edited');
   });
 
@@ -69,6 +69,41 @@ describe('config form draft reconciliation', () => {
     expect(parseConfigDraft({ baseline: baseline(), form: { model: { invalid: true } } })).toBeUndefined();
     expect(parseConfigDraft({ baseline: baseline(), form: { access: { c2cMode: 'open' } } })).toBeUndefined();
     expect(parseConfigDraft(configDraft(baseline(), { ...baseline(), model: 'draft' }))?.form.model).toBe('draft');
+  });
+});
+
+describe('cwd 可编辑', () => {
+  it('includes a cwd edit in the patch and stays clean when untouched', () => {
+    const initial = baseline();
+    const edited = { ...initial, cwd: '~/work' };
+
+    expect(configPatch(initial, edited)).toEqual({ cwd: '~/work' });
+    expect(isConfigDirty(initial, edited)).toBe(true);
+    expect(configPatch(initial, { ...initial, cwd: '/old' })).toEqual({});
+    expect(isConfigDirty(initial, { ...initial, cwd: '/old' })).toBe(false);
+  });
+
+  it('keeps a local cwd edit across a server-side cwd refresh', () => {
+    const initial = baseline();
+    const form = { ...initial, cwd: '~/work' };
+    const incoming = { ...initial, cwd: '/server-side', model: 'refreshed-model' };
+
+    const refreshed = rebaseConfig(initial, form, incoming);
+
+    expect(refreshed.cwd).toBe('~/work');
+    expect(refreshed.model).toBe('refreshed-model');
+    expect(configPatch(incoming, refreshed)).toEqual({ cwd: '~/work' });
+  });
+
+  it('stores cwd in the draft snapshot and rejects a corrupt stored value', () => {
+    const initial = baseline();
+    const form = { ...initial, cwd: '~/work' };
+    const draft = configDraft(initial, form);
+
+    expect(draft.baseline.cwd).toBe('/old');
+    expect(draft.form.cwd).toBe('~/work');
+    expect(parseConfigDraft(draft)?.form.cwd).toBe('~/work');
+    expect(parseConfigDraft({ baseline: initial, form: { ...form, cwd: 42 } })).toBeUndefined();
   });
 });
 

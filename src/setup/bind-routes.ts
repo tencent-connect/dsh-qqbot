@@ -75,6 +75,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'groupPrompt', 'directPrompt',
   'messageHandlingMode',
   'access',
+  'cwd',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验） */
@@ -90,6 +91,7 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   directPrompt: stringSchema('directPrompt'),
   messageHandlingMode: messageHandlingModeSchema,
   access: (v) => AccessControlSchema(v as never),
+  cwd: (v) => cwdSchema(v),
 };
 
 function messageHandlingModeSchema(value: unknown): MessageHandlingMode {
@@ -110,6 +112,15 @@ function stringSchema(name: string): (value: unknown) => unknown {
     if (value.length > 20000) throw new TypeError(`${name} 过长`);
     return value;
   };
+}
+
+/** cwd 校验：允许空串（用默认目录）；其余必须是绝对路径或 ~ / ~/ 开头（~user 保持字面，运行时按字面解析）。 */
+function cwdSchema(value: unknown): unknown {
+  if (typeof value !== 'string') throw new TypeError('cwd 必须是字符串');
+  if (value.length === 0) return value;
+  if (value.length > 20000) throw new TypeError('cwd 过长');
+  if (value.startsWith('/') || value === '~' || value.startsWith('~/')) return value;
+  throw new TypeError('cwd 必须是绝对路径或以 ~ 开头');
 }
 
 /**
@@ -211,7 +222,7 @@ function handleUnbind(options: BindRpcOptions): RpcResult {
 }
 
 /**
- * 配置回显：当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）。
+ * 配置回显：当前生效配置（appSecret 剔除）。
  */
 function handleConfigGet(options: BindRpcOptions): RpcResult {
   const current = options.currentConfig?.() ?? {};
@@ -237,14 +248,12 @@ function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptio
   )) {
     return rpcFailure('config/invalid', '配置保存必须携带预期账号，请刷新配置后重试。');
   }
-  // 白名单与凭据/只读字段拦截
+  // 白名单与凭据字段拦截
   for (const key of Object.keys(payload)) {
     if (key !== 'accessRevision' && key !== 'expectedAppId' && !EDITABLE_CONFIG_KEYS.has(key)) {
       const reason = key === 'appId' || key === 'appSecret'
         ? '凭据请使用绑定/更换/解绑功能'
-        : key === 'cwd'
-          ? 'cwd 为只读字段'
-          : '不支持的字段';
+        : '不支持的字段';
       return rpcFailure('config/invalid', `${reason}: ${key}`);
     }
   }
