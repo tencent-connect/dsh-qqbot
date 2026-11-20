@@ -204,10 +204,10 @@ class CommandAPITests(unittest.TestCase):
         after = {**before, 'provider': 'provider', 'model': 'first', 'preset': 'preset-one'}
         api.config.side_effect = [before, after]
         api.fixture = Mock(return_value={'readyCount': 1, 'activeConnections': 1})
-        with patch('command_api.json_request', return_value={'ok': True}), \
+        with patch.object(api, 'plugin_config', return_value={'ok': True}), \
                 patch('command_api.time.monotonic', side_effect=[0, 0, 21]), \
                 patch('command_api.time.sleep'):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaisesRegex(RuntimeError, 'readback or observed QQ reconnect did not converge'):
                 api.set_defaults('web-primary')
 
 

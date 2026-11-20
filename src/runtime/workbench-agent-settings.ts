@@ -31,7 +31,7 @@ export function parseAgentSettings(raw: unknown): WorkbenchAgentSettings {
     return value;
   };
   const prompt = (value: unknown, field: string): WorkbenchPrompt => {
-    if (typeof value === 'string') return string(value, field, EXTRA_MAX_CHARS);
+    if (typeof value === 'string') return value;
     const source = robotObject(value, ['kind', 'path']);
     if (source.kind !== 'file') throw new Error(`${field}来源无效。`);
     return { kind: 'file', path: parsePromptFilePath(source.path) };
@@ -72,7 +72,12 @@ export async function validateAgentSettings(ctx: Context, config: ImQQBotConfig,
   for (const field of ['groupPrompt', 'directPrompt'] as const) {
     const source = next[field];
     const previous = current[field];
-    if (typeof source !== 'string' && (typeof previous === 'string' || previous.path !== source.path)) {
+    if (typeof source === 'string') {
+      // The limit applies to edits. Existing 0.5.5 prompts may be longer.
+      if (source !== previous && (source.length > EXTRA_MAX_CHARS || source.includes('\0'))) {
+        throw new Error('补充提示词格式无效，最多 80,000 字符。');
+      }
+    } else if (typeof previous === 'string' || previous.path !== source.path) {
       await readPromptFile(source.path);
     }
   }

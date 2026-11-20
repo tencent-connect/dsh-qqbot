@@ -30,6 +30,7 @@ import { ManualQqSender, ManualSendConflict, type ManualAttachment } from '../tr
 import type { AnswerDestination } from '../shared/workbench-answer-protocol.ts';
 import { importLegacyPreferences } from './legacy-preferences.ts';
 import { legacyPreferencesPath } from './data-directory.ts';
+import type { HostAccessSource } from '../setup/persist.ts';
 
 interface GatewaySlot {
   config: ImQQBotConfig;
@@ -59,7 +60,7 @@ export class RobotRuntimes {
     private readonly dataDir = PLUGIN_HOME,
   ) {
     this.prefs = new PrefsStore(undefined, { path: join(dataDir, SESSION_PREFERENCES_FILE), onError: message => logger.warn(message) });
-    this.conversationSettings = new ConversationSettingsStore(join(dataDir, 'conversation-settings.json'));
+    this.conversationSettings = new ConversationSettingsStore(join(dataDir, 'conversation-settings.json'), logger);
     this.timeline = new QqTimeline(join(dataDir, 'timeline'), logger, (appId, { scope, targetId }) => {
       const days = this.conversationSettings.recordedDays(peerKey(appId, scope, targetId));
       return days === undefined ? undefined : Date.now() - days * RETENTION_DAY_MS;
@@ -147,10 +148,10 @@ export class RobotRuntimes {
     return join(this.dataDir, 'robots', appId, 'media');
   }
 
-  bindPrimary(config: ImQQBotConfig): void {
+  bindPrimary(config: ImQQBotConfig, hostAccess?: HostAccessSource): void {
     if (this.closed || this.primary) return;
     this.store?.activatePrimary(config.appId);
-    const access = new AccountAccessService(config, this.logger, {}, this.dataDir);
+    const access = new AccountAccessService(config, this.logger, { hostAccess }, this.dataDir);
     this.primary = { config, access };
   }
 

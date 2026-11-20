@@ -56,10 +56,11 @@ export class ConversationSettingsStore {
   private cache?: { signature: string; data: SettingsData };
   private seenFile = false;
 
-  constructor(private readonly path: string) {}
+  constructor(private readonly path: string, private readonly logger?: Pick<Logger, 'warn'>) {}
 
   get(key: string): Readonly<PeerSettings> {
-    return this.read().peers.get(key) ?? defaults;
+    const data = this.read();
+    return settingAt(data.peers, data.invalidPeers, key) ?? defaults;
   }
 
   recordedDays(key: string): number | undefined {
@@ -69,7 +70,7 @@ export class ConversationSettingsStore {
 
   remember(key: string): Readonly<PeerSettings> {
     const data = this.read();
-    const existing = data.peers.get(key);
+    const existing = settingAt(data.peers, data.invalidPeers, key);
     if (existing) return existing;
     this.write({ ...data, peers: new Map(data.peers).set(key, defaults) });
     return defaults;
@@ -78,7 +79,7 @@ export class ConversationSettingsStore {
   preserveLegacy(keys: Iterable<string>): void {
     const data = this.read();
     const peers = new Map(data.peers);
-    for (const key of keys) if (!peers.has(key)) peers.set(key, legacyDefaults);
+    for (const key of keys) if (!peers.has(key) && !data.invalidPeers.has(key)) peers.set(key, legacyDefaults);
     if (peers.size !== data.peers.size) this.write({ ...data, peers });
   }
 
@@ -95,11 +96,13 @@ export class ConversationSettingsStore {
   }
 
   keys(appId: string): string[] {
-    return [...this.read().peers.keys()].filter(key => key.startsWith(`qqbot:${appId}:`));
+    const { peers, invalidPeers } = this.read();
+    return [...peers.keys(), ...invalidPeers.keys()].filter(key => key.startsWith(`qqbot:${appId}:`));
   }
 
   template(appId: string): WorkbenchDefaults | undefined {
-    return this.read().templates.get(appId);
+    const data = this.read();
+    return settingAt(data.templates, data.invalidTemplates, appId);
   }
 
   initialize(key: string, settings: WorkbenchAgentSettings, existingSession = false): void {
@@ -110,24 +113,25 @@ export class ConversationSettingsStore {
 
   saveTemplate(appId: string, next: WorkbenchDefaults, established: ReadonlyMap<string, WorkbenchAgentSettings>): WorkbenchDefaults {
     const current = this.read();
-    if (next.revision !== (current.templates.get(appId)?.revision ?? 0)) {
+    if (next.revision !== (settingAt(current.templates, current.invalidTemplates, appId)?.revision ?? 0)) {
       throw new WorkbenchRequestError(409, '机器人默认设置已更新，请重新加载后保存。');
     }
     const peers = new Map(current.peers);
     for (const [key, settings] of established) {
+      if (current.invalidPeers.has(key)) continue;
       const peer = peers.get(key) ?? legacyDefaults;
       if (!peer.agent) peers.set(key, { ...peer, agent: settings, revision: robotRevision(peer.revision + 1) });
     }
     const saved = { revision: robotRevision(next.revision + 1), settings: next.settings };
     const templates = new Map(current.templates).set(appId, saved);
-    this.write({ peers, templates });
+    this.write({ ...current, peers, templates });
     return saved;
   }
 
   save(key: string, patch: Omit<WorkbenchConversationPatch, 'appId' | 'scope' | 'openId'>): Readonly<PeerSettings> {
     const data = this.read();
     const peers = new Map(data.peers);
-    const current = peers.get(key) ?? defaults;
+    const current = settingAt(peers, data.invalidPeers, key) ?? defaults;
     if (patch.revision !== current.revision) throw new WorkbenchRequestError(409, '会话设置已更新，请重新加载后再保存。');
     const retention = patch.retention ?? (patch.recording === false ? 'paused'
       : patch.recording === true && current.retention === 'paused' ? 'forever' : current.retention);
@@ -144,7 +148,11 @@ export class ConversationSettingsStore {
   }
 
   private write(data: SettingsData): void {
-    atomicWrite(this.path, [JSON.stringify({ version: 1, peers: Object.fromEntries(data.peers), templates: Object.fromEntries(data.templates) })]);
+    atomicWrite(this.path, [JSON.stringify({
+      version: 1,
+      peers: Object.fromEntries([...data.peers, ...data.invalidPeers]),
+      templates: Object.fromEntries([...data.templates, ...data.invalidTemplates]),
+    })]);
     this.seenFile = true;
     this.cache = undefined;
   }
@@ -154,7 +162,9 @@ export class ConversationSettingsStore {
     try {
       stats = statSync(this.path);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !this.seenFile) return { peers: new Map(), templates: new Map() };
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !this.seenFile) {
+        return { peers: new Map(), invalidPeers: new Map(), templates: new Map(), invalidTemplates: new Map() };
+      }
       throw error;
     }
     this.seenFile = true;
@@ -162,21 +172,25 @@ export class ConversationSettingsStore {
     if (this.cache?.signature === signature) return this.cache.data;
     const root = robotObject(JSON.parse(readFileSync(this.path, 'utf8')), ['version', 'peers', 'templates']);
     if (root.version !== 1 || !root.peers || typeof root.peers !== 'object' || Array.isArray(root.peers)) throw new Error('QQ 会话设置格式无效。');
-    const peers = new Map(Object.entries(root.peers).map(([key, raw]) => {
+    const { values: peers, invalid: invalidPeers } = readSettingsRows(root.peers, (_key, raw) => {
       const value = robotObject(raw, ['alias', 'receiving', 'recording', 'retention', 'revision', 'agent']);
       const retention = value.retention !== undefined ? retentionValue(value.retention)
         : value.recording !== undefined && !recordingValue(value.recording) ? 'paused' : 'forever';
-      return [key, Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), retention, revision: robotRevision(value.revision),
+      return Object.freeze({ alias: aliasValue(value.alias), receiving: receivingValue(value.receiving), retention, revision: robotRevision(value.revision),
         ...(value.agent === undefined ? {} : { agent: parseAgentSettings(value.agent) }),
-      })];
-    }));
+      });
+    });
     const rawTemplates = root.templates === undefined ? {} : root.templates;
     if (!rawTemplates || typeof rawTemplates !== 'object' || Array.isArray(rawTemplates)) throw new Error('QQ 默认设置格式无效。');
-    const templates = new Map(Object.entries(rawTemplates).map(([appId, raw]) => {
+    const { values: templates, invalid: invalidTemplates } = readSettingsRows(rawTemplates, (appId, raw) => {
+      robotAppId(appId);
       const row = robotObject(raw, ['revision', 'settings']);
-      return [robotAppId(appId), { revision: robotRevision(row.revision), settings: parseAgentSettings(row.settings) }];
-    }));
-    const data = { peers, templates };
+      return { revision: robotRevision(row.revision), settings: parseAgentSettings(row.settings) };
+    });
+    if (invalidPeers.size || invalidTemplates.size) {
+      this.logger?.warn(`QQBot found ${invalidPeers.size} invalid conversation settings and ${invalidTemplates.size} invalid robot defaults. Their saved records were preserved.`);
+    }
+    const data = { peers, invalidPeers, templates, invalidTemplates };
     this.cache = { signature, data };
     return data;
   }
@@ -184,7 +198,24 @@ export class ConversationSettingsStore {
 
 interface SettingsData {
   peers: Map<string, PeerSettings>;
+  invalidPeers: Map<string, unknown>;
   templates: Map<string, WorkbenchDefaults>;
+  invalidTemplates: Map<string, unknown>;
+}
+
+function readSettingsRows<T>(rows: object, parse: (key: string, raw: unknown) => T) {
+  const values = new Map<string, T>();
+  const invalid = new Map<string, unknown>();
+  for (const [key, raw] of Object.entries(rows)) {
+    try { values.set(key, parse(key, raw)); }
+    catch { invalid.set(key, raw); }
+  }
+  return { values, invalid };
+}
+
+function settingAt<T>(values: ReadonlyMap<string, T>, invalid: ReadonlyMap<string, unknown>, key: string): T | undefined {
+  if (invalid.has(key)) throw new WorkbenchRequestError(409, '这条 QQ 设置记录无法读取，请检查配置文件。');
+  return values.get(key);
 }
 function recordingValue(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new Error('QQ 消息保存开关无效。');

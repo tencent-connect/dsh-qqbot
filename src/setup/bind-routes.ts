@@ -19,6 +19,7 @@ import {
   readProfileAccessSnapshot,
   AccessConfigConflict,
   type SetupCredentials,
+  type HostAccessSource,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
@@ -61,6 +62,7 @@ export interface BindRpcOptions {
    * 用于 config.get 回显（appSecret 剔除后返回）。
    */
   currentConfig?: () => Record<string, unknown>;
+  hostAccess?: HostAccessSource;
   /**
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
@@ -202,7 +204,7 @@ function handleConfigGet(options: BindRpcOptions): RpcResult {
   const { appSecret: _s, memory: _retired, ...safe } = current;
   try {
     const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
+    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId, options.hostAccess);
     return rpcOk({ config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
   } catch (error) {
     return rpcFailure('config/unreadable', error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。');
@@ -249,7 +251,7 @@ function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptio
     const profileDir = getProfileDir() ?? undefined;
     const current = options.currentConfig?.() ?? {};
     const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
+    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId, options.hostAccess);
     if (payload.expectedAppId !== (appId.length === 0 ? null : appId)) {
       return rpcFailure(RPC_ERROR_CODES.accountChanged, 'QQ 账号已变化，请刷新配置后重试。');
     }
@@ -258,7 +260,7 @@ function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptio
     }
     persisted = options.onUpdateConfig === undefined
       ? updateProfileConfig(validated, profileDir, undefined,
-        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId })
+        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId, hostAccess: options.hostAccess })
       : options.onUpdateConfig(validated);
   } catch (error) {
     if (error instanceof AccessConfigConflict) {

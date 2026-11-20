@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigSchema } from '../config.ts';
+import { parseDocument } from 'yaml';
+import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import { MemberStore } from './member-store.ts';
 import { AccountAccessService } from './account-service.ts';
 import { PairingService } from './pairing-service.ts';
 import { readPairingState } from './pairing-state.ts';
-import { persistCredentialsToProfile, readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
+import { persistCredentialsToProfile, readHostAccessSource, readProfileAccess, updateProfileConfig } from '../setup/persist.ts';
 import { whitelistEntries } from '../client/whitelist-export.ts';
 import * as files from '../shared/atomic-file.ts';
 
@@ -15,19 +16,91 @@ const profile = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async original => ({ ...await original<object>(), getProfileDir: () => profile.dir }));
 afterEach(() => { vi.restoreAllMocks(); if (profile.dir) rmSync(profile.dir, { recursive: true, force: true }); profile.dir = undefined; });
 
-function fixture() {
+function fixture(config: ImQQBotConfig = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' }), hostAccess?: ReturnType<typeof readHostAccessSource>) {
   profile.dir ??= mkdtempSync(join(tmpdir(), 'qq-membership-'));
-  const config = ConfigSchema({ appId: 'fixture', appSecret: 'fixture' });
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const store = new MemberStore(join(profile.dir, 'data'), config.appId);
   const service = new AccountAccessService(config, logger, {
     store,
     pairing: new PairingService({ stateFile: join(profile.dir, 'pairing.json') }),
+    hostAccess,
   });
   return { service, store };
 }
 
 describe('membership persistence and pairing scope', () => {
+  it.each([
+    [
+      'access expression',
+      '    access: !!js "({ c2cMode: \'allowlist\', c2cAllow: [\'keep\', \'revoke\'], groupMode: \'allowlist\', groupAllow: [\'room\'] })"',
+    ],
+    [
+      'access alias',
+      '    access: *shared-access',
+    ],
+    [
+      'an expression inside access',
+      "    access:\n      c2cMode: !!js \"'allowlist'\"\n      c2cAllow: [keep, revoke]\n      groupMode: allowlist\n      groupAllow: [room]",
+    ],
+    [
+      'an anchored config and access',
+      '    access: &qq-access { c2cMode: allowlist, c2cAllow: [keep, revoke], groupMode: allowlist, groupAllow: [room] }',
+      true,
+    ],
+  ] as const)('uses the Host value for %s and revokes before reloading', (_name, accessSource, anchoredConfig?) => {
+    profile.dir = mkdtempSync(join(tmpdir(), 'qq-membership-'));
+    const evaluated = ConfigSchema({ appId: 'fixture', appSecret: 'fixture',
+      access: { c2cMode: 'allowlist', c2cAllow: ['keep', 'revoke'], groupMode: 'allowlist', groupAllow: ['room'] },
+    });
+    const path = join(profile.dir, 'cordis.patch.yml');
+    const original = [
+      '- id: other',
+      '  config: &shared-access { c2cMode: allowlist, c2cAllow: [keep, revoke], groupMode: allowlist, groupAllow: [room] }',
+      '- id: im-qqbot',
+      anchoredConfig ? '  config: &qq-config' : '  config:',
+      '    appId: fixture',
+      accessSource,
+      ...anchoredConfig ? ['- id: other-config', '  config: *qq-config', '- id: other-access', '  config: *qq-access'] : [],
+    ].join('\n') + '\n';
+    writeFileSync(path, original);
+    const hostAccess = readHostAccessSource(profile.dir);
+    const { service } = fixture(evaluated, hostAccess);
+    const { service: stale } = fixture({ ...evaluated }, hostAccess);
+    expect(service.pairStatus().allowC2c.map(row => row.openid)).toEqual(['keep', 'revoke']);
+    expect(service.allowsConversation('c2c', 'outsider')).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(service.revokePair('revoke', 'allow-c2c').ok).toBe(true);
+    expect(stale.allowsConversation('c2c', 'revoke')).toBe(false);
+    expect(stale.allowsConversation('c2c', 'keep')).toBe(true);
+    expect(stale.allowsConversation('group', 'room')).toBe(true);
+    const after = readFileSync(path, 'utf8');
+    const rows = parseDocument(after).toJS();
+    expect(rows).toContainEqual({ id: 'other', config: expect.objectContaining({ c2cAllow: ['keep', 'revoke'] }) });
+    if (anchoredConfig) {
+      expect(after).toContain('config: *qq-config');
+      expect(after).toContain('config: *qq-access');
+      expect(rows).toContainEqual({ id: 'other-config', config: { appId: 'fixture', access: expect.objectContaining({ c2cAllow: ['keep', 'revoke'] }) } });
+      expect(rows).toContainEqual({ id: 'other-access', config: expect.objectContaining({ c2cAllow: ['keep', 'revoke'] }) });
+    }
+  });
+
+  it('does not reuse the mounted policy after an alias target changes', () => {
+    profile.dir = mkdtempSync(join(tmpdir(), 'qq-membership-'));
+    const path = join(profile.dir, 'cordis.patch.yml');
+    const original = [
+      '- id: other',
+      '  config: &policy { c2cMode: allowlist, c2cAllow: [removed] }',
+      '- id: im-qqbot',
+      '  config: { appId: fixture, access: *policy }',
+    ].join('\n');
+    writeFileSync(path, original);
+    const hostAccess = readHostAccessSource(profile.dir);
+    const { service } = fixture(ConfigSchema({ appId: 'fixture', access: { c2cMode: 'allowlist', c2cAllow: ['removed'] } }), hostAccess);
+    expect(service.allowsConversation('c2c', 'removed')).toBe(true);
+    writeFileSync(path, original.replace('[removed]', '[]'));
+    expect(service.allowsConversation('c2c', 'removed')).toBe(false);
+  });
+
   it.each(['owner', 'allow-c2c', 'allow-group'] as const)('adds two identities with one %s code across a service reload', purpose => {
     const first = fixture().service; const code = first.issuePairCode(purpose).code;
     const scope = purpose === 'allow-group' ? 'group' : 'c2c';

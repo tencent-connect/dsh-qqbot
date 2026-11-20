@@ -19,7 +19,7 @@ import { createBindRpcHandler, type BindRpcOptions } from './bind-routes.ts';
 import { registerPluginRpc } from '../rpc-carrier.ts';
 import { BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
-import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
+import { persistCredentialsToProfile, type HostAccessSource, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 
 export type { SetupCredentials } from './persist.ts';
@@ -36,6 +36,7 @@ export interface EnsureCredentialsOptions {
   source?: string;
   /** 当前生效配置（apply 时 loader 合并值；config 路由 GET 回显用） */
   config: Record<string, unknown>;
+  hostAccess?: HostAccessSource;
   prepareBinding?: (appId: string) => void;
 }
 
@@ -90,6 +91,7 @@ export async function ensureCredentials(
       return persistCredentials(credentials, logger);
     },
     currentConfig: () => options.config,
+    hostAccess: options.hostAccess,
   }));
 
   return service.start();
@@ -103,7 +105,7 @@ export async function ensureCredentials(
  */
 export function registerBoundCredentialRoutes(
   ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>,
-  actions: Pick<BindRpcOptions, 'boundAppId' | 'onUnbind' | 'onManualCredentials'> = {},
+  actions: Pick<BindRpcOptions, 'boundAppId' | 'onUnbind' | 'onManualCredentials' | 'hostAccess'> = {},
 ): void {
   registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(null, logger, {
     boundAppId: () => appId,

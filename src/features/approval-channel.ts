@@ -52,6 +52,7 @@ export interface ApprovalSessionRecordLike {
 }
 
 export interface ApprovalChannelManagerLike {
+  accountAccess?: { currentAccess(): ApprovalChannelConfigLike['access'] };
   findBySessionId(sessionId: string): ApprovalSessionRecordLike | undefined;
   getSessionRecord(scope: ChatScope, peerId: string): ApprovalSessionRecordLike | undefined;
 }
@@ -199,8 +200,14 @@ export class ApprovalChannel {
 
     // 白名单模式下审批只认名单内用户；点击者身份缺失同样拒绝（fail-closed，#94-3）
     const clicker = event.group_member_openid ?? event.user_openid;
-    if (this.config.access.c2cMode === 'allowlist'
-      && (!clicker || !this.config.access.c2cAllow.includes(clicker))) {
+    let access: ApprovalChannelConfigLike['access'];
+    try {
+      access = this.manager.accountAccess?.currentAccess() ?? this.config.access;
+    } catch {
+      this.logger.warn('im-qqbot: approval button rejected because access settings are unavailable');
+      return false;
+    }
+    if (access.c2cMode === 'allowlist' && (!clicker || !access.c2cAllow.includes(clicker))) {
       this.logger.warn(`im-qqbot: approval button rejected (clicker not allowlisted): user=${clicker ?? '(missing)'} key=${record.sessionKey}`);
       return false;
     }

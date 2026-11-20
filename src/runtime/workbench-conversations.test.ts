@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -89,6 +89,45 @@ it('keeps legacy recording states and applies seven days to newly recorded peers
   expect(restored.get(timelineOnly!).retention).toBe('forever');
   expect(restored.get(fresh!).retention).toBe('7d');
   expect(restored.expiringPeers()).toEqual([{ appId: 'A', scope: 'c2c', openId: 'fresh' }]);
+});
+
+it('reads an oversized prompt preserved from 0.5.5 and lets another robot save', () => {
+  const path = join(dir, 'legacy-prompt.json');
+  const first = peerKey('A', 'c2c', 'same');
+  const second = peerKey('B', 'c2c', 'same');
+  const prompt = '开头\n' + '字'.repeat(80_001) + '\n末尾  ';
+  const source = legacyAgentSettings(ConfigSchema({ directPrompt: prompt }));
+  new ConversationSettingsStore(path).initialize(first, source, true);
+
+  const restored = new ConversationSettingsStore(path);
+  expect(restored.get(first).agent?.directPrompt).toBe(prompt);
+  expect(restored.get(second).receiving).toBe(true);
+  restored.save(second, { revision: 0, alias: '另一台机器人' });
+  expect(new ConversationSettingsStore(path).get(first).agent?.directPrompt).toBe(prompt);
+});
+
+it('keeps invalid peer and template records isolated and intact when another robot saves', () => {
+  const path = join(dir, 'invalid-peer.json');
+  const bad = peerKey('A', 'group', 'same');
+  const healthy = peerKey('B', 'group', 'same');
+  const invalidPeer = { alias: '保留原记录', receiving: false, revision: 2, retention: '7d', agent: { tools: {} } };
+  const invalidTemplate = { revision: 1, settings: { groupPrompt: { kind: 'missing' } } };
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    peers: { [bad]: invalidPeer, [healthy]: { alias: '', receiving: true, revision: 0, retention: '7d' } },
+    templates: { A: invalidTemplate },
+  }));
+  const restored = new ConversationSettingsStore(path);
+  expect(restored.get(healthy).receiving).toBe(true);
+  expect(restored.template('B')).toBeUndefined();
+  expect(() => restored.get(bad)).toThrow();
+  expect(() => restored.template('A')).toThrow();
+  expect(restored.expiringPeers()).toEqual([{ appId: 'B', scope: 'group', openId: 'same' }]);
+  restored.save(healthy, { revision: 0, alias: '健康对话' });
+  expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({
+    peers: { [bad]: invalidPeer, [healthy]: { alias: '健康对话' } },
+    templates: { A: invalidTemplate },
+  });
 });
 
 async function fixture(withPersistence = true, hooks?: {

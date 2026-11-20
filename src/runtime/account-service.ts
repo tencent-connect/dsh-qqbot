@@ -8,7 +8,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import type { AccessControlConfig, ImQQBotConfig } from '../config.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import { updateProfileConfig, readProfileAccess, readProfileAccessSnapshot } from '../setup/persist.ts';
+import { updateProfileConfig, readProfileAccessSnapshot, type HostAccessSource } from '../setup/persist.ts';
 
 /** 配对码随机源：均匀分布于 [0, 1)。配对码是白名单授权凭据，必须使用密码学随机数。 */
 const secureRandom = (): number => randomBytes(4).readUInt32BE(0) / 2 ** 32;
@@ -22,6 +22,7 @@ export interface AccountAccessDeps {
   random?: () => number;
   store?: MemberStore;
   pairing?: PairingService;
+  hostAccess?: HostAccessSource;
   access?: {
     read(): AccessControlConfig;
     update(change: (access: AccessControlConfig) => AccessControlConfig): void;
@@ -38,8 +39,10 @@ export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
   private readonly accessBackend?: AccountAccessDeps['access'];
+  private readonly hostAccess?: HostAccessSource;
   constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}, dataDir = PLUGIN_HOME) {
     this.accessBackend = deps.access;
+    this.hostAccess = deps.hostAccess;
     this.pairing = deps.pairing ?? new PairingService({
       stateFile: join(dataDir, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
       random: deps.random ?? secureRandom,
@@ -204,25 +207,14 @@ export class AccountAccessService {
 
     const profileDir = getProfileDir() ?? undefined;
     const { appId, access: fallback } = this.config;
-    const { access, revision } = readProfileAccessSnapshot(fallback, profileDir, appId);
+    const { access, revision } = readProfileAccessSnapshot(fallback, profileDir, appId, this.hostAccess);
     const next = update(access);
-    const persisted = updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision });
-    if (persisted) this.syncConfigAccess(next);
-    return persisted;
-  }
-
-  /**
-   * 把最新 access 写回宿主持有的 config 对象。这是刻意的 HMR 窗口同步：
-   * updateProfileConfig 触发宿主重载之前，旧 fiber 仍在服务 QQ 请求，
-   * 必须立即看到新名单，否则会按旧名单放行/拒绝。
-   */
-  private syncConfigAccess(access: AccessControlConfig): void {
-    this.config.access = access;
+    return updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision, hostAccess: this.hostAccess });
   }
 
   currentAccess(): AccessControlConfig {
     if (this.accessBackend) return this.accessBackend.read();
-    return readProfileAccess(this.config.access, getProfileDir() ?? undefined, this.config.appId);
+    return readProfileAccessSnapshot(this.config.access, getProfileDir() ?? undefined, this.config.appId, this.hostAccess).access;
   }
   allowsConversation(scope: ChatScope, openid: string): boolean {
     return allowsConversation(this.currentAccess(), scope, openid);

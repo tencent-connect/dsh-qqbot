@@ -367,6 +367,24 @@ describe('ApprovalChannel.install', () => {
 });
 
 describe('ApprovalChannel.handleInteraction', () => {
+  it('rechecks membership when a pending group approval is clicked after revocation', async () => {
+    const sent: SentMessage[] = [];
+    const initial = makeConfig('allowlist', ['removed', 'remaining']);
+    let current = initial.access;
+    const channel = new ApprovalChannel({
+      ...createManager({ findBySessionId: () => makeRecord(sessionKey('group', 'team'), 'group') }),
+      accountAccess: { currentAccess: () => current },
+    }, createSender(sent), initial, createLogger());
+    const { handler } = installAndCapture(channel, sent);
+    const outcome = handler(makeRequest(), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    const button = buttonDataOf(sent, 'allow');
+    current = makeConfig('allowlist', ['remaining']).access;
+    expect(channel.handleInteraction(makeEvent(button, { group: 'team', member: 'removed' }))).toBe(false);
+    expect(channel.handleInteraction(makeEvent(button, { group: 'team', member: 'remaining' }))).toBe(true);
+    await expect(outcome).resolves.toBe('allowed-once');
+  });
+
   it('settles deny as rejected and ignores unknown buttons', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(

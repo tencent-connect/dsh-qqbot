@@ -3,10 +3,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { Document } from 'yaml';
 import { assertNodeVersion, availablePort, hostClient, runLogged, spawnLogged, verifyComponents, writePrivateJson } from './host.mjs';
 import { DUMMY_APP_ID, DUMMY_SECRET } from './command-protocol.mjs';
 import { createQQFixture } from './qq-fixture.mjs';
 import { stageHistoryPackage } from './history-registry.mjs';
+import { scannedBot } from './qr-binding-fixture.mjs';
 
 const [cli, oldPackage, corePackage, historyPackage, root, mode = 'workbench'] = process.argv.slice(2);
 assertNodeVersion();
@@ -26,7 +28,8 @@ const directKey = `qqbot:${DUMMY_APP_ID}:c2c:${directId}`;
 const groupKey = `qqbot:${DUMMY_APP_ID}:group:${groupId}`;
 const core = '@tencent-connect/dsh-qqbot';
 const history = '@tencent-connect/dsh-qqbot-workbench-history';
-const qq = await createQQFixture({ primary, secondary, allowModelRequests: true });
+const legacyPrompt = 'Legacy prompt beginning\n' + '字'.repeat(80_001) + '\nLegacy prompt end  \n';
+const qq = await createQQFixture({ primary, secondary, allowModelRequests: true, scanBindings: mode === 'workbench' });
 const registry = await stageHistoryPackage(historyPackage, '0.5.6');
 const requests = [];
 let resultMode = 'answer';
@@ -77,13 +80,25 @@ const patch = [
   { id: 'agent-default-model', config: primary },
   { id: 'llm-pi-ai', config: { providers: { [primary.provider]: { api: 'openai-completions',
     baseURL: 'http://127.0.0.1:' + model.address().port + '/v1', apiKeyEnv: 'QQBOT_MODEL_FIXTURE_KEY',
-    models: [primary, secondary].map(({ model: id }) => ({ id, name: id, contextWindow: 32_000, maxTokens: 1024 })) } } } },
+    models: [primary, secondary].map(({ model: id }) => ({ id, name: id, contextWindow: 256_000, maxTokens: 1024 })) } } } },
 ];
 const patchText = JSON.stringify(patch, null, 2);
+function legacyPatch() {
+  if (mode === 'gateway') return patchText;
+  const doc = new Document(patch);
+  const config = doc.getIn([0, 'config'], true);
+  const access = doc.createNode('(' + JSON.stringify(patch[0].config.access) + ')');
+  access.tag = 'tag:yaml.org,2002:js';
+  config.anchor = 'legacy-qq-config';
+  config.set('access', access);
+  config.set('directPrompt', legacyPrompt);
+  return doc.toString({ lineWidth: 0 });
+}
+const upgradePatch = legacyPatch();
 async function configure(profile, artifact) {
   if (mode === 'workbench') await run(['--profile', profile, '--from-default-profile', 'web', '--dump-config']);
   await install(profile, artifact);
-  await writeFile(patchPath(profile), patchText, { mode: 0o600 });
+  await writeFile(patchPath(profile), profile === 'upgrade' ? upgradePatch : patchText, { mode: 0o600 });
 }
 async function until(read, label, timeout = 20_000) {
   const deadline = Date.now() + timeout;
@@ -139,6 +154,65 @@ async function withHost(profile, phase, work) {
     await until(() => qq.state.activeConnections === 0, 'gateway stop ' + phase);
   }
 }
+async function verifyLegacySettings(client, profile, sessionId) {
+  const conversations = '/api/qqbot/workbench/conversations';
+  const peer = (appId, openId) => client.get(conversations + '?' + new URLSearchParams({ appId, scope: 'c2c', openId }))
+    .then(({ conversations: rows }) => rows[0]);
+  const original = await peer(DUMMY_APP_ID, directId);
+  assert.equal(original.currentSessionId, sessionId);
+  assert(original.agent.directPrompt === legacyPrompt, 'Upgrade must keep the entire stored prompt');
+  const saved = await client.post(conversations, { appId: DUMMY_APP_ID, scope: 'c2c', openId: directId, revision: original.revision,
+    alias: 'Legacy conversation', agent: original.agent });
+  assert(saved.conversation.agent.directPrompt === legacyPrompt, 'Saving other settings must keep the old prompt');
+  await assert.rejects(client.post(conversations, { appId: DUMMY_APP_ID, scope: 'c2c', openId: directId, revision: saved.conversation.revision,
+    agent: { ...saved.conversation.agent, directPrompt: legacyPrompt + 'changed' } }), /HTTP 400/);
+
+  const otherAppId = scannedBot.appId;
+  const otherUser = 'local-fixture-allowed-user';
+  const { robot } = await client.post('/api/qqbot/workbench/robots', {
+    appId: otherAppId, appSecret: DUMMY_SECRET, revision: null,
+    access: { c2cMode: 'allowlist', c2cAllow: [otherUser], groupMode: 'disabled' },
+  });
+  assert.equal(robot.appId, otherAppId);
+  await until(() => qq.state.activeConnections === 2, 'both robots online in one profile');
+  const defaultsPath = '/api/qqbot/workbench/defaults';
+  const defaults = await client.get(defaultsPath + '?appId=' + otherAppId);
+  // The loopback QQ fixture handles complete messages.
+  await client.post(defaultsPath, { appId: otherAppId, revision: defaults.revision,
+    settings: { ...defaults.settings, streaming: false } });
+  await exchange('c2c', 'allowed', 'smoke', /QQ_CMD_OK/);
+  assert.equal(requests.at(-1)?.model, primary.model);
+  assert((await peer(otherAppId, otherUser)).currentSessionId);
+
+  const settingsPath = join(profilePath(profile), 'qqbot-state', 'conversation-settings.json');
+  const readSettings = () => readFile(settingsPath, 'utf8').then(JSON.parse);
+  const settings = await readSettings();
+  const valid = settings.peers[directKey];
+  const invalid = { ...valid, receiving: 'invalid-fixture-value' };
+  settings.peers[directKey] = invalid;
+  await writePrivateJson(settingsPath, settings);
+  await assert.rejects(peer(DUMMY_APP_ID, directId), /HTTP 409/);
+  await exchange('c2c', 'denied', 'smoke', null);
+  await exchange('c2c', 'allowed', 'smoke', /QQ_CMD_OK/);
+  const other = await peer(otherAppId, otherUser);
+  const changed = await client.post(conversations, { appId: otherAppId, scope: 'c2c', openId: otherUser,
+    revision: other.revision, alias: 'Second robot still writable' });
+  assert.equal(changed.conversation.alias, 'Second robot still writable');
+  const afterSave = await readSettings();
+  assert.deepEqual(afterSave.peers[directKey], invalid);
+  afterSave.peers[directKey] = valid;
+  await writePrivateJson(settingsPath, afterSave);
+  assert((await peer(DUMMY_APP_ID, directId)).agent.directPrompt === legacyPrompt);
+
+  const result = await client.pluginRpc('dsh-qqbot/account', 'pair.revoke', {
+    appId: DUMMY_APP_ID, purpose: 'allow-c2c', openid: directId,
+  });
+  assert.deepEqual(result.allowC2c, []);
+  await exchange('c2c', 'denied', 'ping', null);
+  await exchange('group', 'allowed', 'ping', /pong/i);
+  await exchange('c2c', 'allowed', 'smoke', /QQ_CMD_OK/);
+  return { exactLegacyPrompt: true, unchangedPromptCanBeSaved: true, invalidSettingsIsolated: true, revocation: true };
+}
 async function verifyWriters() {
   const shared = { QQBOT_DATA_DIR: join(root, 'shared-state') };
   const owned = [];
@@ -177,7 +251,13 @@ try {
   const profile = 'upgrade';
   await configure(profile, oldPackage);
   assert.equal((await installed(profile, core)).version, '0.5.5');
-  await withHost(profile, 'official-055', async () => {
+  await withHost(profile, 'official-055', async connect => {
+    if (mode === 'workbench') {
+      const { config } = await (await connect()).get('/qqbot/im-qqbot/config');
+      assert(config.directPrompt === legacyPrompt, '0.5.5 must load the entire legacy YAML prompt');
+      assert.deepEqual(config.access.c2cAllow, [directId]);
+      assert.deepEqual(config.access.groupAllow, [groupId]);
+    }
     await exchange('group', 'allowed', 'ping', /pong/i);
     await exchange('group', 'allowed', 'model-secondary', /无权限|不在斜杠命令白名单/);
     await exchange('group', 'allowed', 'preset-minimal', /无权限|不在斜杠命令白名单/);
@@ -198,7 +278,7 @@ try {
   const manifest = JSON.parse(await readFile(join(profilePath(profile), 'package.json'), 'utf8'));
   assert(Object.hasOwn(manifest.dependencies, core));
   assert(!Object.hasOwn(manifest.dependencies, history), 'Install must resolve the companion transitively');
-  assert.equal(await readFile(patchPath(profile), 'utf8'), patchText);
+  assert.equal(await readFile(patchPath(profile), 'utf8'), upgradePatch);
   await withHost(profile, 'upgrade-candidate', async connect => {
     await exchange('group', 'allowed', 'ping', /pong/i);
     await exchange('group', 'allowed', 'model', /模型配置/);
@@ -230,14 +310,27 @@ try {
     assert.equal(data.sessionIds[directKey], sessionId);
     assert.equal(data.presets[directKey], 'minimal');
     assert(!data.overrides[groupKey], 'The model list request changed the shared group model');
+    report.legacySettings = await verifyLegacySettings(client, profile, sessionId);
   });
   assert.equal(await readFile(oldPrefs, 'utf8'), oldBytes);
   report.upgrade = { sessionId, model: secondary.model, unifiedCommandAccess: true, sourcePrefsPreserved: true };
   await install(profile, oldPackage);
   assert.equal((await installed(profile, core)).version, '0.5.5');
-  await withHost(profile, 'rollback', async () => {
+  if (mode === 'workbench') {
+    await withHost(profile, 'rollback-after-revocation', async () => {
+      await exchange('c2c', 'denied', 'ping', null);
+      await exchange('group', 'allowed', 'ping', /pong/i);
+    });
+    report.rollbackKeepsRevocation = true;
+    await writeFile(patchPath(profile), upgradePatch, { mode: 0o600 });
+  }
+  await withHost(profile, 'rollback', async connect => {
     await exchange('c2c', 'denied', 'smoke', /QQ_CMD_OK/);
     assert.equal(requests.at(-1)?.model, secondary.model);
+    if (mode === 'workbench') {
+      const { config } = await (await connect()).get('/qqbot/im-qqbot/config');
+      assert(config.directPrompt === legacyPrompt, '0.5.5 must still load the entire prompt after rollback');
+    }
   });
   assert.equal(JSON.parse(await readFile(oldPrefs, 'utf8')).sessionIds[directKey], sessionId);
   report.rollback = true;
