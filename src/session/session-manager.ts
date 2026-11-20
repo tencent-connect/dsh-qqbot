@@ -43,7 +43,23 @@ import type {
   CompactOutcome,
   UnarchiveOutcome,
 } from './types.ts';
-import { SessionArchivedError, classifySessionError } from './errors.ts';
+import { SessionArchivedError, SessionBusyError, classifySessionError, isSessionOwnedError } from './errors.ts';
+
+/**
+ * resume 撞上活跃写句柄时的重试间隔（ms）。
+ *
+ * 写句柄的释放发生在 `handle.dispose()` 内部（停循环 → 注销 agent → 释放句柄），
+ * 注销与释放之间的窗口里 `agents.get()` 已查不到、resume 却仍会撞
+ * "already owned by an active write handle"。空闲回收与插件热重载都会经过它，
+ * 通常几十毫秒内释放完，短暂重试即可跨过。
+ */
+const RESUME_OWNERSHIP_RETRY_DELAYS_MS = [100, 250, 500] as const;
+
+/** 等待上一代会话释放写句柄的上限；超时照常往下走，交给 resume 重试与提示兜底。 */
+const DISPOSAL_WAIT_MAX_MS = 5_000;
+
+/** 同一会话同一种失败提示的最短间隔：连续失败只提示一次，避免刷屏。 */
+const FAILURE_NOTICE_REPEAT_MS = 15_000;
 
 /** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
@@ -87,6 +103,18 @@ export class SessionManager {
    * 后写入 sessions 的覆盖前者且前者无人 dispose（泄漏）。
    */
   private inflight = new Map<string, Promise<SessionRecord>>();
+  /**
+   * 正在释放的会话句柄：key → 释放完成的 Promise。
+   *
+   * `handle.dispose()` 先注销 agent、后释放写句柄；中间窗口里到达的消息如果直接
+   * resume，会被宿主当成"会话被别人占着"。`getOrCreate` 先等这里的 Promise。
+   *
+   * 只登记「下一条消息仍会落到同一条会话」的释放（空闲回收、fork 降级）；
+   * `/new` 不登记——它已把对话换到新会话，旧句柄释放快慢与新消息无关。
+   */
+  private readonly disposing = new Map<string, Promise<void>>();
+  /** 每个会话最近一次已提示的失败种类与时间（提示去重用）。 */
+  private readonly failureNoticeAt = new Map<string, { kind: string; at: number }>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -121,13 +149,51 @@ export class SessionManager {
         this.sessions.delete(key);
         this.releasePrompt(record.agent);
         record.agent.cancel({ kind: 'user' });
-        void record.handle.dispose().catch(() => {});
+        // 下一次消息仍会落回这条会话，登记释放过程让 getOrCreate 等它结束
+        void this.releaseHandle(key, record.handle);
         // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
         this.questionChannel?.cancelPending(key);
         this.approvalChannel?.cancelPending(key);
       },
     );
 
+  }
+
+  /**
+   * 登记句柄释放：把释放过程挂到 key 上，下一次 `getOrCreate` 会等它结束。
+   *
+   * 只用于「下一条消息仍落回同一条会话」的路径（空闲回收、fork 降级）；
+   * `/new` 换到新会话，不登记。
+   */
+  private releaseHandle(key: string, handle: DshAgentHandle): Promise<void> {
+    const tracked = handle.dispose().catch(() => {}).finally(() => {
+      // 同一 key 可能连续释放两代：只删自己的登记，别误删后一代
+      if (this.disposing.get(key) === tracked) this.disposing.delete(key);
+    });
+    this.disposing.set(key, tracked);
+    return tracked;
+  }
+
+  /**
+   * 等一件可能很久的事，但最多 `ms` 毫秒。
+   *
+   * 无上限等待会把用户消息永久挂起；超时只记一行 warn 就继续，
+   * 真正的占用交给 resume 重试与 `session-busy` 提示兜底。
+   */
+  private async waitAtMost(work: Promise<void>, ms: number, label: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        this.logger.warn(`${label} still running after ${ms}ms, proceeding`);
+        resolve();
+      }, ms);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([work, deadline]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   /** 已装 prompt 的 agent → 句柄。释放时须同步 delete：live 复用的 agent 要能重装，否则 prompt 永久丢失。 */
@@ -296,7 +362,7 @@ export class SessionManager {
       this.sessions.delete(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
-      await record.handle.dispose().catch(() => {});
+      await this.releaseHandle(key, record.handle);
       return;
     }
 
@@ -306,7 +372,7 @@ export class SessionManager {
       this.sessions.delete(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
-      await record.handle.dispose().catch(() => {});
+      await this.releaseHandle(key, record.handle);
       return;
     }
 
@@ -481,6 +547,14 @@ export class SessionManager {
     replyTarget: ReplyTarget,
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
+
+    // 上一代会话还在释放写句柄时先等它结束：`dispose()` 先注销 agent、后释放
+    // 句柄，这中间的窗口里 resume 会撞 "already owned by an active write handle"。
+    const disposing = this.disposing.get(key);
+    if (disposing !== undefined) {
+      await this.waitAtMost(disposing, DISPOSAL_WAIT_MAX_MS, `session release (key=${key})`);
+    }
+
     const existing = this.sessions.get(key);
 
     // 归档会话不会跑任何 model step：宿主的 archived-session-gate 在
@@ -544,7 +618,7 @@ export class SessionManager {
       agentPreset = composed.agentPreset;
       try {
         const resumeRoute = this.modelResolver.getResumeRoute(key);
-        const resumed = await this.agents.resume({
+        const resumed = await this.resumeWithOwnershipRetry({
           resumeSessionId: sessionId,
           ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
           ...(composed.setup ? { setup: composed.setup } : {}),
@@ -555,6 +629,8 @@ export class SessionManager {
         this.persistSessionId(key, sessionId);
         this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
       } catch (err) {
+        // 写句柄被占用 = 会话正在被使用，任何情况下都不能拿同一个 id 重建
+        if (classifySessionError(err) === 'session-busy') throw err;
         if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
         sessionId = this.resolveCreateId(key, sessionId, candidateIsLegacy);
         const created = await this.agents.create({
@@ -597,6 +673,38 @@ export class SessionManager {
     void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir());
 
     return record;
+  }
+
+  /**
+   * 恢复会话；写句柄被瞬时占用时短暂重试。
+   *
+   * 占用窗口来自释放链（先注销 agent、后释放句柄）与插件热重载的双 fiber 窗口，
+   * 通常几十毫秒内自解。重试只跨过这段瞬时占用；确实被其他界面长期持有时，
+   * 转成 {@link SessionBusyError} 让用户收到可操作提示，而不是笼统的"处理异常"。
+   *
+   * 不能在这里"拿到 live agent 就直接复用"：那份 agent 不属于本 manager，
+   * 返回空 dispose 句柄会让回收无法释放写句柄。
+   */
+  private async resumeWithOwnershipRetry(
+    options: Parameters<DshAgentRegistry['resume']>[0],
+  ): Promise<DshAgentHandle> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.agents.resume(options);
+      } catch (err) {
+        if (!isSessionOwnedError(err)) throw err;
+        const delay = RESUME_OWNERSHIP_RETRY_DELAYS_MS[attempt];
+        if (delay === undefined) {
+          this.logger.warn(`resume still blocked by an active write handle after retries: sessionId=${String(options.resumeSessionId)}`);
+          throw new SessionBusyError(String(options.resumeSessionId), { cause: err });
+        }
+        this.logger.warn(
+          `resume blocked by an active write handle, retrying in ${delay}ms `
+          + `(attempt ${attempt + 1}/${RESUME_OWNERSHIP_RETRY_DELAYS_MS.length}): ${errorText(err)}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
   }
 
   /**
@@ -666,6 +774,24 @@ export class SessionManager {
    */
   isSessionArchived(sessionId: string): boolean {
     return this.host.isSessionArchived(sessionId);
+  }
+
+  /**
+   * 本次失败是否应回复用户。
+   *
+   * 归档/占用这类状态在同一会话上往往连续触发（用户连发几条、或一次发多段），
+   * 每条都回一遍只会刷屏。同一会话 + 同一原因在窗口内只提示一次；换了原因、
+   * 或过了窗口仍然失败，会再次提示。
+   *
+   * @returns false 表示本次跳过提示（日志仍会记录）
+   */
+  shouldNotifyFailure(scope: ChatScope, peerId: string, kind: string): boolean {
+    const key = this.sessionKey(scope, peerId);
+    const now = Date.now();
+    const last = this.failureNoticeAt.get(key);
+    if (last !== undefined && last.kind === kind && now - last.at < FAILURE_NOTICE_REPEAT_MS) return false;
+    this.failureNoticeAt.set(key, { kind, at: now });
+    return true;
   }
 
   /**
@@ -742,6 +868,7 @@ export class SessionManager {
     this.sessions.delete(key);
     this.releasePrompt(record.agent);
     record.agent.cancel({ kind: 'user' });
+    // 不登记释放：prefs 已指向新会话，下一条消息不会再碰这条旧句柄
     await record.handle.dispose().catch(() => {});
     this.logger.info(`session removed: key=${key}`);
   }
@@ -775,10 +902,11 @@ export class SessionManager {
       try {
         record = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
       } catch (err) {
-        // 归档会话不能继续跑（压缩同样要过宿主门禁），单独成一种结果而不是抛给命令层
-        if (classifySessionError(err) === 'session-archived') {
-          return { ok: false, reason: 'archived' };
-        }
+        // 归档/被占用都不能继续跑（压缩同样要过宿主门禁与写句柄），
+        // 单独成结果而不是抛给命令层，否则 /compact 会没有任何回应。
+        const kind = classifySessionError(err);
+        if (kind === 'session-archived') return { ok: false, reason: 'archived' };
+        if (kind === 'session-busy') return { ok: false, reason: 'in-use' };
         throw err;
       }
     }
@@ -825,6 +953,8 @@ export class SessionManager {
       record.agent.cancel({ kind: 'user' });
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
+    this.disposing.clear();
+    this.failureNoticeAt.clear();
     this.logger.info(`all sessions disposed (count=${records.length})`);
   }
 

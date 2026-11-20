@@ -10,10 +10,10 @@ function context(): SlashCommandHandlerContext {
 
 describe('/unarchive 命令', () => {
   it.each([
-    ['ok', '已取消归档'],
+    ['ok', '已恢复这条对话'],
     ['not-archived', '没有被归档'],
-    ['no-session', '还没有会话'],
-    ['failed', '手动取消归档'],
+    ['no-session', '还没有开始过对话'],
+    ['failed', '没能恢复这条对话'],
   ] as const)('%s → 对应提示', async (outcome: UnarchiveOutcome, expected: string) => {
     const manager = { unarchive: vi.fn(async () => outcome) } as unknown as CommandDeps['manager'];
     const command = unarchiveCommand({ manager } as CommandDeps);

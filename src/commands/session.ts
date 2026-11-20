@@ -43,13 +43,13 @@ export function unarchiveCommand({ manager }: CommandDeps): CategorizedCommand {
 
       switch (outcome) {
         case 'ok':
-          return '✅ 已取消归档，重发刚才那条消息即可继续。';
+          return '✅ 已恢复这条对话，接着说就行。刚才没处理的那条消息需要重发一次。';
         case 'not-archived':
-          return '当前会话没有被归档，直接发消息即可。';
+          return '这条对话没有被归档，直接发消息就能继续。';
         case 'no-session':
-          return '当前还没有会话，直接发消息即可开始。';
+          return '还没有开始过对话，直接发消息就能聊。';
         default:
-          return '⚠️ 取消归档失败：请在 DSH 中手动取消归档。';
+          return '⚠️ 没能恢复这条对话。请在 DSH 的「已归档」里恢复它，然后再试。';
       }
     },
   };
@@ -81,7 +81,9 @@ export function compactCommand({ manager }: CommandDeps): CategorizedCommand {
         case 'busy':
           return '正在生成中，无法压缩';
         case 'archived':
-          return '当前会话已归档，无法压缩。请在 DSH 中取消归档，或发送 /new 创建新会话。';
+          return '这条对话已归档，暂时不能压缩。先恢复它（/unarchive），或直接开一段新对话（/new）。';
+        case 'in-use':
+          return '这条对话正被另一个窗口使用，暂时不能压缩。等那边关掉后再试。';
         case 'unavailable':
           return '压缩能力不可用（当前会话的 agent preset 未加载 compaction 服务）';
         default:

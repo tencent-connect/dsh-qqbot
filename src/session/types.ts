@@ -66,7 +66,7 @@ export type UnarchiveOutcome =
 /** compact 操作结果 */
 export interface CompactOutcome {
   ok: boolean;
-  reason?: 'no-session' | 'busy' | 'unavailable' | 'archived' | 'failed';
+  reason?: 'no-session' | 'busy' | 'unavailable' | 'archived' | 'in-use' | 'failed';
   shadowed?: number;
   tokens?: number;
   message?: string;

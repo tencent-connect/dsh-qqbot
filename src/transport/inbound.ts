@@ -22,7 +22,7 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
-import { ARCHIVED_SESSION_NOTICE } from '../shared/session-notice.ts';
+import { ARCHIVED_SESSION_NOTICE, SESSION_BUSY_NOTICE } from '../shared/session-notice.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -88,13 +88,19 @@ interface ProcessedAttachment {
 /**
  * 入站失败时的用户可见提示。
  *
- * 归档需要一条可操作路径：宿主的归档门禁在 `agent/pre-step` 就拒绝该会话的
- * 回合，本轮消息被丢弃（不进会话、模型没跑），所以重试没意义，必须先取消
- * 归档或换一个会话。
+ * 归档与占用都要说清"消息没有处理"并给出下一步；其余失败原因未知，
+ * 只说没成功、请重发，不把内部错误文本抛给用户。
  */
 export function sessionFailureReply(err: unknown): string {
-  if (classifySessionError(err) === 'session-archived') return ARCHIVED_SESSION_NOTICE;
-  return '⚠️ 处理消息时出现异常，请稍后重试。';
+  switch (classifySessionError(err)) {
+    case 'session-archived':
+      return ARCHIVED_SESSION_NOTICE;
+    case 'session-busy':
+      return SESSION_BUSY_NOTICE;
+    default:
+      return '⚠️ 这条消息没有处理成功，请稍后再发一次。\n'
+        + '如果一直这样，可以在 DSH 里看看服务是否正常。';
+  }
 }
 
 /**
@@ -133,6 +139,13 @@ export async function handleInbound(
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
+    // 同一会话同一种原因连续失败时只提示一次：用户刚收到过同样的说明，
+    // 再刷几条只会淹没有效信息（日志仍然逐条记录）。
+    const kind = classifySessionError(err);
+    if (!manager.shouldNotifyFailure(scope, peerId, kind)) {
+      logger.info(`failure notice suppressed (repeated ${kind}): key=${scope}:${peerId}`);
+      return;
+    }
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
       await bot.sendMarkdown(replyTarget, sessionFailureReply(err));
