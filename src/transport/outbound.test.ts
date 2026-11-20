@@ -573,3 +573,103 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
     expect(tracker.activeTurns).toBe(0);
   });
 });
+
+describe('OutboundRouter: tool/result', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  const sid = { header: { id: 'sess-qq' } };
+  const toolCall = (callId: string, name = 'bash') => ({
+    type: 'tool/call',
+    data: { turn: 1, step: 1, callId, name, arguments: '{"command":"ls -l"}' },
+  });
+  const toolResult = (callId: string, text: string, isError = false) => ({
+    type: 'tool/result',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { source: { kind: 'tool', callId }, content: [{ type: 'text', text }], isError },
+    },
+  });
+
+  it('开关打开时把工具结果发到当前会话', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'total 0'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '🔧 `bash` 完成\ntotal 0');
+  });
+
+  it('开关关闭时不发成功结果', async () => {
+    const { outbound, bot } = setup();
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'total 0'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('工具错误留在 DSH，即使打开工具结果开关', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
+
+    outbound.routeSessionEvent(sid, toolCall('call-1'));
+    outbound.routeSessionEvent(sid, toolResult('call-1', 'exit code 1', true));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('未登记过的 callId 不投递（避免重放/迟到结果刷屏）', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
+
+    outbound.routeSessionEvent(sid, toolResult('call-x', 'orphan'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+  });
+});
+
+describe('OutboundRouter: turn/end blocked（归档门禁）', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  function setupWithArchive(archived: boolean) {
+    const session = createSession();
+    const bot = createBot(session);
+    const record = createRecord(c2cTarget);
+    const manager = {
+      findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+      isSessionArchived: vi.fn(() => archived),
+    } as unknown as SessionManager;
+    const outbound = createOutboundHandler(manager, bot, createConfig(), createLogger());
+    return { outbound, bot };
+  }
+
+  const blockedTurnEnd = { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } };
+  const sid = { header: { id: 'sess-qq' } };
+
+  it('归档会话的 blocked 回合回复可操作提示', async () => {
+    // 归档门禁拒绝的回合没有 user/message，用户侧原本什么都收不到
+    const { outbound, bot } = setupWithArchive(true);
+
+    outbound.routeSessionEvent(sid, blockedTurnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('当前会话已归档'));
+  });
+
+  it('非归档的 blocked 只给通用提示（不误报归档）', async () => {
+    const { outbound, bot } = setupWithArchive(false);
+
+    outbound.routeSessionEvent(sid, blockedTurnEnd);
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('本轮处理被阻止'));
+    expect(bot.sendMarkdown).not.toHaveBeenCalledWith(c2cTarget, expect.stringContaining('已归档'));
+  });
+});

@@ -154,6 +154,27 @@ async function withHost(profile, phase, work) {
     await until(() => qq.state.activeConnections === 0, 'gateway stop ' + phase);
   }
 }
+async function verifyArchiveRoundTrip(client, sessionId) {
+  const archived = await client.rpc('workspace/archiveSession', { request: { sessionId } });
+  assert(archived.archivedSessionIds.includes(sessionId));
+  const requestsBefore = requests.length;
+  const blocked = (await exchange('c2c', 'denied', 'smoke', /当前会话已归档/))
+    .filter(row => row.messageType !== 6); // The SDK also submits a C2C typing notification.
+  assert.equal(blocked.length, 1);
+  assert.match(blocked[0].content, /<qqbot-cmd-input text="\/unarchive"/);
+  assert.match(blocked[0].content, /<qqbot-cmd-input text="\/new"/);
+  await exchange('c2c', 'denied', 'compact', /已归档/);
+  assert.equal(requests.length, requestsBefore, 'The archived Session must not call the model');
+
+  await exchange('c2c', 'denied', 'unarchive', /已取消归档/);
+  await exchange('c2c', 'denied', 'restore', /没有被归档/);
+  await exchange('c2c', 'denied', 'smoke', /QQ_CMD_OK/);
+  assert.equal(requests.at(-1)?.model, secondary.model);
+  const { conversations } = await client.get('/api/qqbot/workbench/conversations?appId=' + DUMMY_APP_ID);
+  assert.equal(conversations.find(row => row.openId === directId)?.currentSessionId, sessionId);
+  return { blockedWithoutModelCall: true, unarchiveAndAlias: true, sameSession: true };
+}
+
 async function verifyLegacySettings(client, profile, sessionId) {
   const conversations = '/api/qqbot/workbench/conversations';
   const peer = (appId, openId) => client.get(conversations + '?' + new URLSearchParams({ appId, scope: 'c2c', openId }))
@@ -297,6 +318,7 @@ try {
     assert.equal(robots[0]?.access.commandMode, 'open');
     const conversations = await client.get('/api/qqbot/workbench/conversations?appId=' + DUMMY_APP_ID);
     assert.equal(conversations.conversations.find(row => row.openId === directId)?.currentSessionId, sessionId);
+    report.archive = await verifyArchiveRoundTrip(client, sessionId);
     resultMode = 'tool-then-answer';
     const answer = await exchange('group', 'allowed', 'smoke', /QQ_CMD_OK/);
     assert.deepEqual(answer.map(row => row.content), ['QQ_CMD_OK']);

@@ -49,6 +49,7 @@ export function createFixtureCommands(config = {}) {
     'preset-reset': '/preset reset', 'preset-default': '/preset default',
     'preset-invalid': '/preset fixture-unavailable',
     new: '/new', reset: '/reset', clear: '/clear', stop: '/stop', compact: '/compact',
+    unarchive: '/unarchive', restore: '/restore',
     ping: '/bot-ping', version: '/bot-version',
     smoke: '只回复 QQ_CMD_OK，不调用工具。',
     ...backgroundMessages,

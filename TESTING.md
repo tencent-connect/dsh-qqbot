@@ -79,7 +79,7 @@ node tests/e2e/upgrade-055.mjs /absolute/dsh/lib/bin.js \
   /absolute/workbench-history.tgz /absolute/new-run-dir
 ```
 
-使用 RC3 时运行默认模式。它验证带锚点和 `!!js` 的旧白名单、停留在同一 Session 时完整读回超长提示词、同 profile 的另一台机器人在单条设置异常后仍可收发和保存，以及降级后已撤销的成员依旧被拦。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
+使用 RC3 时运行默认模式。它验证带锚点和 `!!js` 的旧白名单、停留在同一 Session 时完整读回超长提示词、同 profile 的另一台机器人在单条设置异常后仍可收发和保存，以及降级后已撤销的成员依旧被拦。还会归档接回的旧 Session，验证提示、`/unarchive` 和 `/restore`，并确认恢复后继续使用原 Session。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
 
 ## 隔离 Host 回放斜杠授权、队列与网页补答
 

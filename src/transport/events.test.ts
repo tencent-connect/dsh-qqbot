@@ -80,3 +80,52 @@ describe('parseEvent: deliverables/presented', () => {
     expect(parseEvent(presented(data))).toBeUndefined();
   });
 });
+
+describe('parseEvent: tool/result', () => {
+  const result = (data: unknown): RawSessionEvent => ({ type: 'tool/result', data: data as Record<string, unknown> });
+
+  it('解析 callId 与 message.isError', () => {
+    const raw = result({
+      turn: 1,
+      step: 1,
+      message: { source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'text', text: 'ok' }], isError: true },
+    });
+
+    expect(parseEvent(raw)).toEqual({
+      type: 'tool/result',
+      callId: 'call-1',
+      failed: true,
+      raw: raw.data,
+    });
+  });
+
+  it('isError 缺省为 false', () => {
+    const event = parseEvent(result({ message: { source: { callId: 'c' }, content: [] } }));
+
+    expect(event?.type === 'tool/result' && event.failed).toBe(false);
+  });
+
+  it('缺 callId 返回 undefined', () => {
+    expect(parseEvent(result({ message: { content: [] } }))).toBeUndefined();
+  });
+});
+
+describe('parseEvent: turn/end', () => {
+  const end = (reason: unknown) => parseEvent({ type: 'turn/end', data: { reason } });
+
+  it('标记宿主拒绝的回合', () => {
+    expect(end({ kind: 'blocked' })).toEqual({ type: 'turn/end', completed: false, failure: 'blocked' });
+  });
+
+  it('通用错误和模型错误只保留各自的失败分类', () => {
+    expect(end({ kind: 'error', error: { code: 'E_BROKEN', message: 'private' } }))
+      .toEqual({ type: 'turn/end', completed: false, failure: 'other' });
+    expect(end({ kind: 'error', error: { code: 'UNKNOWN_MODEL', message: 'private' } }))
+      .toEqual({ type: 'turn/end', completed: false, failure: 'model-unavailable' });
+  });
+
+  it('正常结束和中断保持各自状态', () => {
+    expect(end({ kind: 'completed' })).toEqual({ type: 'turn/end', completed: true });
+    expect(end({ kind: 'interrupted' })).toEqual({ type: 'turn/end', completed: false });
+  });
+});

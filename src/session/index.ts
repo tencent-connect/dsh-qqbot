@@ -5,6 +5,7 @@
  */
 export { SessionManager } from './session-manager.ts';
 export { IdleEvictor } from './idle-evictor.ts';
+export { SessionArchivedError, classifySessionError } from './errors.ts';
 export type {
   AgentSetup,
   SessionEventLike,

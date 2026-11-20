@@ -1061,14 +1061,14 @@ describe('web workbench session switching', () => {
     new PrefsStore().setSessionId(KEY, old.agent.id);
     const manager = createManagerWithCtx(registry, ctx);
 
-    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toMatchObject({ code: 'session-archived' });
     expect(registry.resume).not.toHaveBeenCalled();
     expect(registry.create).not.toHaveBeenCalled();
     workspace.archivedSessionIds = [];
     const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
     expect(original.sessionId).toBe(old.agent.id);
     workspace.archivedSessionIds = [old.agent.id];
-    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('已归档');
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toMatchObject({ code: 'session-archived' });
     const next = await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
     expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(next);
     expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
@@ -1084,5 +1084,131 @@ describe('web workbench session switching', () => {
     await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
     expect(registry.create).not.toHaveBeenCalled();
     expect(persistedId()).toBe(old.agent.id);
+  });
+});
+
+describe('getOrCreate — 归档会话', () => {
+  /** 带归档集合的 ctx；archived 用可变数组，模拟宿主 UI 随时归档/取消归档 */
+  function archivedCtx(archived: string[]): Context {
+    return {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') return { stat: async () => ({ header: {} }) };
+        if (name === 'workspaceRegistry') return { create: async () => ({}), archivedSessionIds: archived };
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+  }
+
+  it('已归档：不 resume、不 create，抛 session-archived 交给入站层提示', async () => {
+    // 归档门禁在 agent/pre-step 就拒绝，followup 不会跑出任何回合；
+    // 与其让用户等一个永远不来的回复，不如在投递前就失败。
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+    const manager = createManagerWithCtx(registry, archivedCtx([sessionId]));
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .rejects.toMatchObject({ code: 'session-archived' });
+    await expect(manager.compact('c2c', PEER, { senderId: PEER, replyTarget: REPLY }))
+      .resolves.toEqual({ ok: false, reason: 'archived' });
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('已开着的会话被归档后再发消息：同样拦在投递前', async () => {
+    const archived: string[] = [];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archivedCtx(archived));
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    archived.push(record.sessionId);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .rejects.toMatchObject({ code: 'session-archived' });
+    await expect(manager.compact('c2c', PEER)).resolves.toEqual({ ok: false, reason: 'archived' });
+  });
+
+  it('未归档时照常恢复（存档的是别的会话不影响）', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archivedCtx(['session-other']));
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .resolves.toMatchObject({ sessionId: 'session-live' });
+  });
+});
+
+describe('unarchive — QQ 侧取消归档', () => {
+  /** 带可写归档集合的 ctx；unarchiveSession 由用例决定是否提供 */
+  function archiveCtx(
+    archived: string[],
+    unarchiveSession?: (id: string) => Promise<void>,
+  ): Context {
+    return {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') return { stat: async () => ({ header: {} }) };
+        if (name === 'workspaceRegistry') return { create: async () => ({}), archivedSessionIds: archived, unarchiveSession };
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+  }
+
+  it('恢复成功后原会话可以继续用（不换 sessionId）', async () => {
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const archived = [sessionId];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx(archived, async (id) => {
+      const at = archived.indexOf(id);
+      if (at >= 0) archived.splice(at, 1);
+    }));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('ok');
+    expect(archived).toEqual([]);
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .resolves.toMatchObject({ sessionId });
+  });
+
+  it('本来没归档 → not-archived，不调用宿主', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const unarchiveSession = vi.fn();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([], unarchiveSession));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('not-archived');
+    expect(unarchiveSession).not.toHaveBeenCalled();
+  });
+
+  it('还没有会话 → no-session', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([], vi.fn()));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('no-session');
+  });
+
+  it('宿主恢复失败 → failed，归档状态原样保留', async () => {
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const archived = [sessionId];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx(archived, async () => { throw new Error('EIO'); }));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('failed');
+    expect(archived).toContain(sessionId);
+  });
+
+  it('keeps the archive when the Session is also bound to another QQ peer', async () => {
+    const sessionId = 'session-ambiguous';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, sessionId);
+    prefs.setSessionId(`qqbot:${APP_ID}:c2c:another-peer`, sessionId);
+    const restore = vi.fn();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([sessionId], restore));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('failed');
+    expect(restore).not.toHaveBeenCalled();
   });
 });

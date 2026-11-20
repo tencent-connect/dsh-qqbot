@@ -10,9 +10,10 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { classifySessionError } from '../session/errors.ts';
 import type { QqInputRegistry } from './qq-input-origin.ts';
 import { deliveryKey } from './delivery-ledger.ts';
-import { SessionArchivedError, type SessionManager } from '../session/session-manager.ts';
+import type { SessionManager } from '../session/session-manager.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
 import {
@@ -23,6 +24,7 @@ import {
 } from './attachment.ts';
 import { getHistoryStore } from '../features/history-store.ts';
 import type { HistoryEntry, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { ARCHIVED_SESSION_NOTICE } from '../shared/session-notice.ts';
 import type { TimelineInboundOutcome } from '../shared/workbench-timeline-protocol.ts';
 
 // ── 类型定义 ──
@@ -78,6 +80,18 @@ interface ProcessedAttachment {
 // ── 主处理函数 ──
 
 /**
+ * 入站失败时的用户可见提示。
+ *
+ * 归档需要一条可操作路径：宿主的归档门禁在 `agent/pre-step` 就拒绝该会话的
+ * 回合，本轮消息被丢弃（不进会话、模型没跑），所以重试没意义，必须先取消
+ * 归档或换一个会话。
+ */
+export function sessionFailureReply(err: unknown): string {
+  if (classifySessionError(err) === 'session-archived') return ARCHIVED_SESSION_NOTICE;
+  return '⚠️ 处理消息时出现异常，请稍后重试。';
+}
+
+/**
  * 处理 QQ 入站消息（已经过 SDK 中间件链）
  */
 export async function handleInbound(
@@ -127,11 +141,11 @@ export async function handleInbound(
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     if (!canSubmit()) return;
-    const archived = err instanceof SessionArchivedError;
+    const archived = classifySessionError(err) === 'session-archived';
     report?.(replyTarget, archived ? 'session-archived' : 'submit-failed');
     // 兜底回复：会话创建失败时告知用户，避免静默无响应
     try {
-      await bot.sendMarkdown(replyTarget, archived ? err.message : '⚠️ 处理消息时出现异常，请稍后重试。');
+      await bot.sendMarkdown(replyTarget, sessionFailureReply(err));
     } catch (sendErr) {
       logger.error(`fallback reply failed: ${sendErr instanceof Error ? sendErr.message : String(sendErr)}`);
     }

@@ -7,6 +7,7 @@
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
+import { ARCHIVED_SESSION_NOTICE } from '../shared/session-notice.ts';
 import { OutboundBuffer, sendText, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
@@ -53,12 +54,6 @@ export interface SessionLike {
 interface ToolCallRecord {
   name: string;
   args: string;
-}
-
-function failureNotice(failure: NonNullable<TurnEndEvent['failure']>): string {
-  return failure === 'model-unavailable'
-    ? '⚠️ 当前模型不可用，请切换模型后重试。'
-    : '⚠️ 本轮处理失败，请稍后重试。';
 }
 
 /**
@@ -151,8 +146,8 @@ class OutboundRouter {
     const event = parseEvent(raw);
     if (event === undefined) return;
 
-    const plan = this.tracker.planFor(sessionId) ?? (event.type === 'turn/end' && event.failure === 'model-unavailable'
-      ? this.tracker.planForModelSetupFailure(sessionId) : undefined);
+    const preStepFailure = event.type === 'turn/end' && (event.failure === 'model-unavailable' || event.failure === 'blocked');
+    const plan = this.tracker.planFor(sessionId) ?? (preStepFailure ? this.tracker.planForPreStepFailure(sessionId) : undefined);
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
       if (plan?.target.scope === 'group') void this.finishGroup(session, event, plan);
@@ -361,7 +356,7 @@ class OutboundRouter {
       if (this.closed) return;
       if (deliveryTrace(target) !== undefined) assertDeliveryAllowed(target);
       if (end.failure) {
-        await sendText(this.bot, target, failureNotice(end.failure), this.config.textChunkLimit);
+        await sendText(this.bot, target, this.failureNotice(id, end.failure), this.config.textChunkLimit);
         return;
       }
       const text = end.truncated ? [answer, '⚠️ 已达到输出上限，回复可能不完整。'].filter(Boolean).join('\n\n') : answer;
@@ -374,7 +369,7 @@ class OutboundRouter {
 
   /**
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
-   * 其他失败沿用宿主已完成的文件声明。模型不可用时只发切换提示。
+   * 已阻止或模型不可用的回合只投递提示。其他失败沿用宿主已完成的文件声明。
    */
   private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined, sessionCwd?: string): void {
     const buffer = this.buffers.get(sessionId);
@@ -389,7 +384,8 @@ class OutboundRouter {
       this.buffers.delete(sessionId);
     }
     this.streamAttempts.delete(sessionId);
-    const files = event.failure === 'model-unavailable' ? [] : this.presentedFiles.get(sessionId) ?? [];
+    const files = event.failure === 'model-unavailable' || event.failure === 'blocked'
+      ? [] : this.presentedFiles.get(sessionId) ?? [];
     this.presentedFiles.delete(sessionId);
     this.presentedCalls.delete(sessionId);
     // assistant/message 已在轮内先行发送的文本可能仍在途：与 turn/end 自身的 flush 一起等待
@@ -399,13 +395,26 @@ class OutboundRouter {
     void (async () => {
       await Promise.all([flushTask, pending]);
       if (plan !== undefined && event.failure) {
-        await this.send(plan.target, failureNotice(event.failure), 'sendTurnEndError');
+        await this.send(plan.target, this.failureNotice(sessionId, event.failure), 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
         await this.deliverer.deliver(plan.target, files, sessionCwd);
       }
       this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
     })();
+  }
+
+  private failureNotice(sessionId: string, failure: NonNullable<TurnEndEvent['failure']>): string {
+    switch (failure) {
+      case 'blocked':
+        return this.manager.isSessionArchived?.(sessionId)
+          ? ARCHIVED_SESSION_NOTICE
+          : '⚠️ 本轮处理被阻止，未能完成。请在 DSH 中查看会话状态。';
+      case 'model-unavailable':
+        return '⚠️ 当前模型不可用，请切换模型后重试。';
+      case 'other':
+        return '⚠️ 本轮处理失败，请稍后重试。';
+    }
   }
 
   /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */

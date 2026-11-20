@@ -49,7 +49,7 @@ export interface TurnEndEvent {
   type: 'turn/end';
   completed: boolean;
   truncated?: true;
-  failure?: 'model-unavailable' | 'other';
+  failure?: 'blocked' | 'model-unavailable' | 'other';
 }
 
 const UNAVAILABLE_MODEL_CODES = new Set(['AUTH', 'ACCOUNT_TOKEN_INVALID', 'UNKNOWN_MODEL', 'MODEL_UNSUPPORTED', 'NO_ADAPTER']);
@@ -117,6 +117,7 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
         return { type: 'turn/end', completed: false };
       }
       if (reason.kind === 'max-tokens') return { type: 'turn/end', completed: false, truncated: true };
+      if (reason.kind === 'blocked') return { type: 'turn/end', completed: false, failure: 'blocked' };
       if (reason.kind !== 'error') return { type: 'turn/end', completed: reason.kind === 'completed' };
       const error = 'error' in reason ? reason.error : undefined;
       const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;

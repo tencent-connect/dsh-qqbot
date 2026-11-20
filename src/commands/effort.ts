@@ -1,6 +1,7 @@
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
-import { ReasoningEffortError, SessionArchivedError, SessionSwitchConflict } from '../session/session-manager.ts';
+import { ARCHIVED_SESSION_NOTICE, getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { classifySessionError } from '../session/errors.ts';
+import { ReasoningEffortError, SessionSwitchConflict } from '../session/session-manager.ts';
 
 export function reasoningLabel(explicit?: string, defaultEffort?: string): string {
   return explicit ?? (defaultEffort ? `默认（${defaultEffort}）` : '模型默认');
@@ -59,8 +60,8 @@ export function effortCommand({ manager, config, logger, canReceive }: CommandDe
         await sendMarkdownChunked(ctx, lines.join('\n'), config.textChunkLimit);
         return { kind: 'noop' };
       } catch (error) {
-        if (error instanceof ReasoningEffortError || error instanceof SessionSwitchConflict
-          || error instanceof SessionArchivedError) return error.message;
+        if (classifySessionError(error) === 'session-archived') return ARCHIVED_SESSION_NOTICE;
+        if (error instanceof ReasoningEffortError || error instanceof SessionSwitchConflict) return error.message;
         logger?.warn(`QQ /effort failed: ${error instanceof Error ? error.message : String(error)}`);
         return '暂时无法读取或设置推理强度，请稍后重试。';
       }

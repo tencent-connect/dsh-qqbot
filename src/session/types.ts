@@ -63,10 +63,21 @@ export interface CompactionServiceLike {
   ): Promise<CompactionResultLike | null>;
 }
 
+/** 取消归档结果 */
+export type UnarchiveOutcome =
+  /** 确实从归档里恢复了 */
+  | 'ok'
+  /** 本来就没归档（无需处理） */
+  | 'not-archived'
+  /** 还没有任何会话（直接发消息即可） */
+  | 'no-session'
+  /** 宿主未提供该能力，或恢复调用失败 */
+  | 'failed';
+
 /** compact 操作结果 */
 export interface CompactOutcome {
   ok: boolean;
-  reason?: 'no-session' | 'busy' | 'unavailable' | 'failed';
+  reason?: 'no-session' | 'busy' | 'unavailable' | 'archived' | 'failed';
   shadowed?: number;
   tokens?: number;
   message?: string;

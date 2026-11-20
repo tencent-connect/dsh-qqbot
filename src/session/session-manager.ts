@@ -43,10 +43,11 @@ import type {
   TokenUsageStats,
   CompactionServiceLike,
   CompactOutcome,
+  UnarchiveOutcome,
 } from './types.ts';
+import { SessionArchivedError, classifySessionError } from './errors.ts';
 
 export class SessionSwitchConflict extends Error {}
-export class SessionArchivedError extends Error {}
 export class ReasoningEffortError extends Error {}
 
 export interface PeerAgentSettings {
@@ -702,11 +703,7 @@ export class SessionManager {
   }
 
   private assertNotArchived(sessionId: string): void {
-    const workspace = this.host.globalService('workspaceRegistry') as { archivedSessionIds?: readonly string[] } | undefined;
-    const archived = workspace?.archivedSessionIds;
-    if (Array.isArray(archived) && archived.includes(sessionId)) {
-      throw new SessionArchivedError('当前 DSH Session 已归档，请在 QQ 工作台恢复原会话或新建 Session。');
-    }
+    if (this.isSessionArchived(sessionId)) throw new SessionArchivedError(sessionId);
   }
 
   private assertBindingOwner(key: string, sessionId: string, allowUnbound = false): void {
@@ -980,6 +977,37 @@ export class SessionManager {
   }
 
   /**
+   * 会话是否处于宿主的归档集合。
+   *
+   * 同步只读：直接问 workspaceRegistry 的 archivedSessionIds，没有 registry
+   *（headless profile）时按未归档处理 —— 那种部署也没有归档 UI。
+   */
+  isSessionArchived(sessionId: string): boolean {
+    return this.host.isSessionArchived(sessionId);
+  }
+
+  /**
+   * 取消当前会话的归档（QQ 里唯一的自助入口，对应 `/unarchive`）。
+   *
+   * 只把 id 从宿主的归档集合里摘掉，不动会话内容，也不换 sessionId ——
+   * 恢复成功后原绑定照旧，用户重发一条消息即可继续。
+   */
+  async unarchive(scope: ChatScope, peerId: string): Promise<UnarchiveOutcome> {
+    const key = this.sessionKey(scope, peerId);
+    if (!this.active || this.switching.has(key)) return 'failed';
+    const sessionId = this.modelResolver.getSessionId(key);
+    if (sessionId === undefined) return 'no-session';
+    if (this.modelResolver.hasForeignCurrentBinding(key, sessionId)) return 'failed';
+    if (!this.isSessionArchived(sessionId)) return 'not-archived';
+    if (!await this.host.unarchiveSession(sessionId)) {
+      this.logger.warn(`unarchive failed (host capability missing or call failed): sessionId=${sessionId}`);
+      return 'failed';
+    }
+    this.logger.info(`session unarchived from QQ: sessionId=${sessionId}`);
+    return 'ok';
+  }
+
+  /**
    * 这条 session 对应的 QQ 地址。只读：不把宿主里的 agent 收进会话表，也不拥有它的生命周期。
    * 内存里有记录时沿用它的 replyTarget（含 msgId）；否则按 prefs 的 sessionId 反查对端。
    */
@@ -1070,8 +1098,17 @@ export class SessionManager {
     if (!record) {
       // 无活跃会话（重启/闲置回收）时从磁盘拉起，历史在磁盘上仍可压缩
       if (!revive) return { ok: false, reason: 'no-session' };
-      record = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
+      try {
+        record = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
+      } catch (err) {
+        // 归档会话不能继续跑（压缩同样要过宿主门禁），单独成一种结果而不是抛给命令层
+        if (classifySessionError(err) === 'session-archived') {
+          return { ok: false, reason: 'archived' };
+        }
+        throw err;
+      }
     }
+    if (this.isSessionArchived(record.sessionId)) return { ok: false, reason: 'archived' };
     if (record.agent.status !== 'idle') return { ok: false, reason: 'busy' };
 
     const compaction = (await this.host.serviceFor(record.agent, 'compaction')

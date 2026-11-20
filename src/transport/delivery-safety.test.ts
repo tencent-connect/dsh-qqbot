@@ -15,6 +15,7 @@ import { handleInbound } from './inbound.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { Context } from '@deepseek-ai/cordis';
 import { registerSendFileTool, type SendFileRuntime } from '../media/send-file-tool.ts';
+import { ARCHIVED_SESSION_NOTICE } from '../shared/session-notice.ts';
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -23,14 +24,18 @@ const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const target: ReplyTarget = { scope: 'c2c', targetId: 'synthetic-user', msgId: 'platform-1' };
 const content = [{ type: 'text', text: 'synthetic request' }];
 
-function setup(options: { file?: string; group?: boolean; flushSession?: () => Promise<boolean>; externalTurns?: ImQQBotConfig['proactiveDelivery']['externalTurns']; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
+function setup(options: { file?: string; group?: boolean; archived?: boolean; flushSession?: () => Promise<boolean>; externalTurns?: ImQQBotConfig['proactiveDelivery']['externalTurns']; streaming?: boolean; showToolResults?: boolean; replyOptions?: SessionManager['replyOptions'] } = {}) {
   const ledger = new DeliveryLedger(options.file);
   const inputs = new QqInputRegistry({ ledger });
   const stream = { update: vi.fn().mockResolvedValue(undefined), complete: vi.fn().mockResolvedValue(undefined) };
   const bot: QQBotSender = { sendMarkdown: vi.fn().mockResolvedValue(undefined), openStream: vi.fn(() => stream) };
   const initial = options.group ? { ...target, scope: 'group' as const, targetId: 'synthetic-group' } : target;
   const record = { sessionId: 'session-1', replyTarget: { ...initial }, agent: {} } as SessionRecord;
-  const manager = { findBySessionId: (id: string) => id === record.sessionId ? record : undefined, replyOptions: options.replyOptions } as SessionManager;
+  const manager = {
+    findBySessionId: (id: string) => id === record.sessionId ? record : undefined,
+    isSessionArchived: () => options.archived === true,
+    replyOptions: options.replyOptions,
+  } as SessionManager;
   const config = { streaming: options.streaming ?? true, showToolResults: options.showToolResults ?? true,
     textChunkLimit: 4500, proactiveDelivery: { externalTurns: options.externalTurns ?? 'c2c' },
     sendFile: { maxFiles: 4, restrictPaths: false, extraRoots: [], sendPresentedFiles: true } } as ImQQBotConfig;
@@ -572,31 +577,39 @@ describe('verified native output, retaining upstream delivery features', () => {
     expect(f.bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { group: true, end: 'sole', expected: true },
-    { group: false, end: 'sole', expected: true },
-    { group: true, end: 'web', expected: false },
-    { group: false, end: 'edited', expected: false },
-    { group: true, end: 'discarded', expected: false },
-    { group: true, end: 'revoked', expected: false },
-  ])('notifies a confirmed QQ input on pre-append failure ($group, $end)', async ({ group, end, expected }) => {
-    vi.useFakeTimers();
-    const f = setup({ group, externalTurns: 'off' });
-    const message = f.queue();
-    const { sessionId } = f.record;
-    f.emit('turn/start', { turn: 1 });
-    f.tracker.noteClaim(sessionId, 1, end === 'edited' ? { ...message, content: [] } : message);
-    if (end === 'web') f.tracker.noteClaim(sessionId, 1, { id: 'web', source: { kind: 'user' }, content });
-    if (end === 'discarded') f.outbound.discardInput(sessionId, message.id);
-    if (end === 'revoked') f.revoke();
-    expect(f.tracker.targetFor(sessionId)).toBeUndefined();
-    const failure = { turn: 1, reason: { kind: 'error', error: { code: 'UNKNOWN_MODEL', message: 'private details' } } };
-    f.emit('turn/end', failure);
-    f.emit('turn/end', failure);
-    await vi.runAllTimersAsync();
-    expect(f.bot.sendMarkdown.mock.calls.map(([, text]) => text)).toEqual(
-      expected ? ['⚠️ 当前模型不可用，请切换模型后重试。'] : [],
-    );
+  describe.each([
+    {
+      name: 'model setup failure', archived: false,
+      reason: { kind: 'error', error: { code: 'UNKNOWN_MODEL', message: 'private details' } },
+      notice: '⚠️ 当前模型不可用，请切换模型后重试。',
+    },
+    { name: 'archive gate', archived: true, reason: { kind: 'blocked' }, notice: ARCHIVED_SESSION_NOTICE },
+  ])('$name before appending the user message', ({ archived, reason, notice }) => {
+    it.each([
+      { group: true, end: 'sole', expected: true },
+      { group: false, end: 'sole', expected: true },
+      { group: true, end: 'web', expected: false },
+      { group: false, end: 'edited', expected: false },
+      { group: true, end: 'discarded', expected: false },
+      { group: true, end: 'revoked', expected: false },
+    ])('checks the claimed QQ input ($group, $end)', async ({ group, end, expected }) => {
+      vi.useFakeTimers();
+      const f = setup({ group, archived, externalTurns: 'off' });
+      const message = f.queue('input-1', 'platform-confirmed');
+      const { sessionId } = f.record;
+      f.emit('turn/start', { turn: 1 });
+      f.tracker.noteClaim(sessionId, 1, end === 'edited' ? { ...message, content: [] } : message);
+      if (end === 'web') f.tracker.noteClaim(sessionId, 1, { id: 'web', source: { kind: 'user' }, content });
+      if (end === 'discarded') f.outbound.discardInput(sessionId, message.id);
+      if (end === 'revoked') f.revoke();
+      expect(f.tracker.targetFor(sessionId)).toBeUndefined();
+      f.emit('turn/end', { turn: 1, reason });
+      f.emit('turn/end', { turn: 1, reason });
+      await vi.runAllTimersAsync();
+      expect(f.bot.sendMarkdown.mock.calls).toEqual(
+        expected ? [[expect.objectContaining({ msgId: 'platform-confirmed' }), notice]] : [],
+      );
+    });
   });
 
   it('does not treat a canceled turn as a failure', async () => {

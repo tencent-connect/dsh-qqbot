@@ -123,7 +123,7 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 
   /** The Host can fail preparation after claiming the inbox and before appending user/message. */
-  public planForModelSetupFailure(sessionId: string): DeliveryPlan | undefined {
+  public planForPreStepFailure(sessionId: string): DeliveryPlan | undefined {
     const tracked = this.turns.get(sessionId);
     const candidate = tracked?.preparationInput;
     if (!tracked || !candidate || tracked.invalid || tracked.state.origin !== null || tracked.state.sawInternal) return undefined;
