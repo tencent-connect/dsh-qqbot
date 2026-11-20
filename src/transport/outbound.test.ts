@@ -654,7 +654,7 @@ describe('OutboundRouter: turn/end blocked（归档门禁）', () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('当前会话已归档'));
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('这条对话已经归档'));
   });
 
   it('非归档的 blocked 只给通用提示（不误报归档）', async () => {
@@ -664,7 +664,7 @@ describe('OutboundRouter: turn/end blocked（归档门禁）', () => {
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
 
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('本轮处理被阻止'));
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('这一轮没有处理成功'));
     expect(bot.sendMarkdown).not.toHaveBeenCalledWith(c2cTarget, expect.stringContaining('已归档'));
   });
 });
