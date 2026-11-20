@@ -23,18 +23,16 @@ function fixture() {
   const config = ConfigSchema({ appId: 'test-app', appSecret: 'not-a-real-secret' });
   // Keep disk state isolated while using the production authorization and command wrappers.
   const service = Object.assign(Object.create(AccountAccessService.prototype) as AccountAccessService, { config, store });
-  const deps = { manager: { accountAccess: service }, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
+  const manager = { accountAccess: service, setModelOverride: vi.fn(), setPresetOverride: vi.fn().mockResolvedValue({ ok: true }) };
+  const deps = { manager, config, logger: { warn: vi.fn() } } as unknown as CommandDeps;
   const context = (senderId?: string) => ({ message: { senderId, kind: 'c2c' } }) as SlashCommandHandlerContext;
-  return { store, service, config, deps, context, root };
+  return { store, service, config, deps, context, root, manager };
 }
 
 describe('QQ slash-command access modes', () => {
-  it('defaults to open and rejects missing identities and unknown modes', () => {
-    expect(commandAccessError(undefined, 'member', true)).toBeUndefined();
-    expect(commandAccessError(undefined, 'outsider', false)).toBeUndefined();
-    expect(commandAccessError(undefined, undefined, false)).toContain('身份');
+  it('checks sender identity in the open mode', () => {
+    expect(commandAccessError('open', 'outsider', false)).toBeUndefined();
     expect(commandAccessError('open', undefined, true)).toContain('身份');
-    expect(commandAccessError('unexpected', 'member', true)).toBeDefined();
   });
 
   it('allows a non-listed sender through the default registered command handler and catalog', async () => {
@@ -44,11 +42,31 @@ describe('QQ slash-command access modes', () => {
     expect(describeCommands(deps).every(command => command.scope === 'all')).toBe(true);
   });
 
+  it('uses one default policy for all commands even with a private-chat allowlist', async () => {
+    const { config, deps, context, manager } = fixture();
+    config.access.c2cMode = 'allowlist';
+    config.access.c2cAllow = ['original-listed-user'];
+    const list = buildCommandList(deps);
+    const member = context('group-sender');
+    member.message.kind = 'group';
+    for (const name of ['model', 'preset']) {
+      const raw = name === 'model' ? 'provider/model' : 'standard';
+      expect(await list.find(command => command.name === name)!.handler({ ...member, command: { raw } } as SlashCommandHandlerContext)).toContain('已切换');
+    }
+    expect(describeCommands(deps).every(command => command.scope === 'all')).toBe(true);
+    expect(manager.setModelOverride).toHaveBeenCalledTimes(1);
+    expect(manager.setPresetOverride).toHaveBeenCalledTimes(1);
+    expect(await list.find(command => command.name === 'bot-ping')!.handler(member)).toContain('pong');
+  });
+
   it.each(['c2c', 'group'] as const)('checks %s query/help/mutation handlers before execution', async kind => {
     const { deps, config, context } = fixture();
+    config.access.c2cMode = 'allowlist';
+    config.access.c2cAllow = ['outsider'];
     const list = buildCommandList(deps);
     for (const mode of ['allowlist', 'disabled'] as const) {
       config.access.commandMode = mode;
+      expect(describeCommands(deps).every(command => command.scope === (mode === 'disabled' ? 'disabled' : 'owner'))).toBe(true);
       for (const command of list) {
         const ctx = context('outsider');
         ctx.message.kind = kind;

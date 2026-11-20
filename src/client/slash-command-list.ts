@@ -6,23 +6,22 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 export function SlashCommandList({ commands }: { commands: readonly SlashCommandDescriptor[] }): ReactNode {
   const [open, setOpen] = useState(false);
   const toggle = useCallback(() => setOpen(value => !value), []);
-  const visible = commands.filter((command) => command.hidden !== true);
-  return h(DisclosureRow, { className: 'imqb-cmd-cmdList',
+  return h(DisclosureRow, { className: 'imqc-cmdList',
     icon: h(IconChevronDownOutlineRegular),
-    title: `支持的斜杠命令（${visible.length} 个）`,
+    title: `支持的斜杠命令（${commands.length} 个）`,
     open, expandable: true, expandOnRowClick: true, previewChevron: false, onToggle: toggle,
-  }, h('div', { className: 'imqb-cmd-cmdContent' },
-    visible.length === 0 ? h('p', { className: 'imqb-cmd-hint' }, '暂无可用命令。') : null,
+  }, h('div', { className: 'imqc-cmdContent' },
+    commands.length === 0 ? h('p', { className: 'imqc-hint' }, '暂无可用命令。') : null,
     ...(['agent', 'qqbot'] as const).map((category) => {
-      const items = visible.filter((command) => command.category === category);
+      const items = commands.filter((command) => command.category === category);
       if (items.length === 0) return null;
-      return h('div', { className: 'imqb-cmd-cmdGroup', key: category },
+      return h('div', { className: 'imqc-cmdGroup', key: category },
         h('strong', null, category === 'agent' ? '通用能力' : 'QQ 内置'),
-        ...items.map((command) => h('div', { className: 'imqb-cmd-cmdRow', key: command.name },
+        ...items.map((command) => h('div', { className: 'imqc-cmdRow', key: command.name },
           h('code', null, `/${command.name}`),
-          command.aliases.length ? h('span', { className: 'imqb-cmd-hint' }, `（别名 /${command.aliases.join('、/')}）`) : null,
-          command.scope === 'owner' ? h('span', { className: 'imqb-cmd-hint' }, '仅命令白名单') : null,
-          command.scope === 'disabled' ? h('span', { className: 'imqb-cmd-hint' }, '已关闭') : null,
-          h('span', { className: 'imqb-cmd-hint' }, command.description))));
+          command.aliases.length ? h('span', { className: 'imqc-hint' }, `（别名 /${command.aliases.join('、/')}）`) : null,
+          command.scope === 'owner' ? h('span', { className: 'imqc-hint' }, '仅命令白名单') : null,
+          command.scope === 'disabled' ? h('span', { className: 'imqc-hint' }, '已关闭') : null,
+          h('span', { className: 'imqc-hint' }, command.description))));
     })));
 }

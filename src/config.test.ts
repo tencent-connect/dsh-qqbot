@@ -24,6 +24,7 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
   it('显式配置不受默认影响', () => {
     const cfg = ConfigSchema({ access: { c2cMode: 'allowlist' } });
     expect(cfg.access.c2cMode).toBe('allowlist');
+    expect(cfg.access.commandMode).toBe('open');
   });
 
 
@@ -37,9 +38,9 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
   });
 
   it.each([
-    [{}, 'c2c'],
-    [{ proactiveDelivery: {} }, 'c2c'],
-    [{ proactiveDelivery: null }, 'c2c'],
+    [{}, 'all'],
+    [{ proactiveDelivery: {} }, 'all'],
+    [{ proactiveDelivery: null }, 'all'],
     [{ proactiveDelivery: { externalTurns: 'off' } }, 'off'],
     [{ proactiveDelivery: { externalTurns: 'all' } }, 'all'],
   ])('proactiveDelivery.externalTurns：%j → %s', (input, expected) => {

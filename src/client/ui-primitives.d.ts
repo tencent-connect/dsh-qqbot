@@ -33,9 +33,17 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export type InputProps = {
     icon?: ReactNode;
     className?: string;
+    'data-modal-autofocus'?: boolean;
   } & InputHTMLAttributes<HTMLInputElement>;
 
   export const Input: ForwardRefExoticComponent<InputProps & RefAttributes<HTMLInputElement>>;
+
+  export const MarkdownText: NamedExoticComponent<{
+    text: string;
+    labels: { code: { copyLabel: string; copiedLabel: string }; footnotes: string };
+    variant?: 'body' | 'compact';
+    omitHtml?: boolean;
+  }>;
 
   export interface ModalBaseProps {
     open: boolean;
@@ -89,6 +97,28 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
 
   export function SegmentedControl<Value extends string>(props: SegmentedControlProps<Value>): ReactElement;
 
+  export type MenuEntry =
+    | { id: string; label: ReactNode; disabled?: boolean }
+    | { id: string; type: 'separator' }
+    | { id: string; type: 'label'; text: string };
+
+  export function Menu(props: {
+    open: boolean;
+    anchor: ReactNode;
+    onClose: () => void;
+    onSelect: (id: string) => void;
+    items: readonly MenuEntry[];
+    footer?: readonly MenuEntry[];
+    selectedId?: string;
+    align?: 'start' | 'end';
+    compact?: boolean;
+    portal?: boolean;
+    autoFocus?: boolean;
+    minWidthFromAnchor?: boolean;
+    className?: string;
+    listClassName?: string;
+  }): ReactElement;
+
   export interface DisclosureRowProps {
     icon: ReactNode;
     title: string;
@@ -121,7 +151,13 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   type Icon = (props: IconProps) => ReactElement;
   export const IconCheckOutlineRegular: Icon;
   export const IconChevronDownOutlineRegular: Icon;
+  export const IconChevronLeftOutlineRegular: Icon;
   export const IconCopyOutlineRegular: Icon;
   export const IconDownloadOutlineRegular: Icon;
+  export const IconEllipsisOutlineRegular: Icon;
+  export const IconPaperclipOutlineRegular: Icon;
   export const IconPlusOutlineRegular: Icon;
+  export const IconRefreshOutlineRegular: Icon;
+  export const IconSettingsOutlineRegular: Icon;
+  export const IconTrashOutlineRegular: Icon;
 }

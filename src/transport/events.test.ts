@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractTurnError, parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
+import { parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
 
 /** 构造 agent/assistant-stream 的 payload（帧字段按宿主 AssistantStreamFrame 形态） */
 function payload(frame: unknown, agentId = 'sess-qq'): unknown {
@@ -9,14 +9,14 @@ function payload(frame: unknown, agentId = 'sess-qq'): unknown {
 describe('parseStreamFrame', () => {
   it('start 帧归一化为 attempt-start', () => {
     expect(parseStreamFrame(payload({ type: 'start', attemptId: 'a1', revision: 1, turn: 1, step: 1 })))
-      .toEqual({ agentId: 'sess-qq', delta: { kind: 'attempt-start', attemptId: 'a1' } });
+      .toEqual({ agentId: 'sess-qq', delta: { kind: 'attempt-start', attemptId: 'a1', revision: 1, turn: 1, step: 1 } });
   });
 
   it('text-delta chunk 归一化为 text-delta', () => {
     expect(parseStreamFrame(payload({
       type: 'chunk', attemptId: 'a1', revision: 1, index: 0, time: 1,
       chunk: { type: 'text-delta', index: 0, text: 'hi' },
-    }))).toEqual({ agentId: 'sess-qq', delta: { kind: 'text-delta', attemptId: 'a1', text: 'hi' } });
+    }))).toEqual({ agentId: 'sess-qq', delta: { kind: 'text-delta', attemptId: 'a1', text: 'hi', revision: 1, index: 0 } });
   });
 
   it.each([
@@ -94,8 +94,7 @@ describe('parseEvent: tool/result', () => {
     expect(parseEvent(raw)).toEqual({
       type: 'tool/result',
       callId: 'call-1',
-      isError: true,
-      error: undefined,
+      failed: true,
       raw: raw.data,
     });
   });
@@ -103,7 +102,7 @@ describe('parseEvent: tool/result', () => {
   it('isError 缺省为 false', () => {
     const event = parseEvent(result({ message: { source: { callId: 'c' }, content: [] } }));
 
-    expect(event?.type === 'tool/result' && event.isError).toBe(false);
+    expect(event?.type === 'tool/result' && event.failed).toBe(false);
   });
 
   it('缺 callId 返回 undefined', () => {
@@ -111,18 +110,22 @@ describe('parseEvent: tool/result', () => {
   });
 });
 
-describe('extractTurnError', () => {
-  it('error：提取 code / message', () => {
-    expect(extractTurnError({ kind: 'error', error: { code: 'E_BROKEN', message: 'boom' } }))
-      .toEqual({ code: 'E_BROKEN', message: 'boom' });
+describe('parseEvent: turn/end', () => {
+  const end = (reason: unknown) => parseEvent({ type: 'turn/end', data: { reason } });
+
+  it('标记宿主拒绝的回合', () => {
+    expect(end({ kind: 'blocked' })).toEqual({ type: 'turn/end', completed: false, failure: 'blocked' });
   });
 
-  it('blocked：归为 TURN_BLOCKED（归档门禁以此收尾，本轮没有 user/message）', () => {
-    expect(extractTurnError({ kind: 'blocked' })?.code).toBe('TURN_BLOCKED');
+  it('通用错误和模型错误只保留各自的失败分类', () => {
+    expect(end({ kind: 'error', error: { code: 'E_BROKEN', message: 'private' } }))
+      .toEqual({ type: 'turn/end', completed: false, failure: 'other' });
+    expect(end({ kind: 'error', error: { code: 'UNKNOWN_MODEL', message: 'private' } }))
+      .toEqual({ type: 'turn/end', completed: false, failure: 'model-unavailable' });
   });
 
-  it('正常结束不算失败', () => {
-    expect(extractTurnError({ kind: 'completed' })).toBeUndefined();
-    expect(extractTurnError({ kind: 'interrupted' })).toBeUndefined();
+  it('正常结束和中断保持各自状态', () => {
+    expect(end({ kind: 'completed' })).toEqual({ type: 'turn/end', completed: true });
+    expect(end({ kind: 'interrupted' })).toEqual({ type: 'turn/end', completed: false });
   });
 });

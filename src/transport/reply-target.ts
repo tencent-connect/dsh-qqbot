@@ -6,11 +6,8 @@
  *   2. 超频/过期后，用缓存里「最近一条未超频未过期」的 target；
  *   3. 全部候选都超频/过期，才降级为主动推送（proactive）。
  */
-import { QQBot, MsgType } from '@tencent-connect/qqbot-nodejs';
-import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import type { ReplyTarget } from '../types.ts';
-import { getCachedReplyIds } from './msgid-cache.ts';
-import type { CachedReplyId } from './msgid-cache.ts';
+import type { CachedReplyId, ReplyIdCache } from './msgid-cache.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 
 /**
@@ -25,6 +22,7 @@ import type { ReplyLimiter } from './reply-limiter.ts';
  */
 export function resolveReplyTarget(
   target: ReplyTarget,
+  replyIds: ReplyIdCache,
   limiter: ReplyLimiter,
   allowEvent: boolean,
 ): ReplyTarget {
@@ -32,7 +30,7 @@ export function resolveReplyTarget(
   if (target.forceProactive) {
     return { scope: target.scope, targetId: target.targetId };
   }
-  const cached = getCachedReplyIds(target.scope, target.targetId);
+  const cached = replyIds.getCachedReplyIds(target.scope, target.targetId);
   const explicitMsgId = target.msgId;
   const candidates: CachedReplyId[] = [];
   // 显式 id 在 cache TTL 内（未超平台被动窗口）才置顶优先，否则跳过
@@ -56,27 +54,4 @@ export function resolveReplyTarget(
   }
 
   return { ...target, msgId: undefined, eventId: undefined };
-}
-
-/**
- * 发送 markdown：区分 msg_id 与 event_id。
- * 带 eventId 时通过 bot.send 的 extra 填 event_id（SDK sendMarkdown 不支持）；
- * 否则走 sendMarkdown 填 msg_id。
- */
-export function sendResolvedMarkdown(
-  bot: QQBot,
-  target: ReplyTarget,
-  content: string,
-  opts?: { keyboard?: InlineKeyboard },
-): Promise<unknown> {
-  if (target.eventId) {
-    return bot.send({
-      target: { scope: target.scope, targetId: target.targetId, msgId: undefined },
-      msgType: MsgType.MARKDOWN,
-      markdown: { content },
-      keyboard: opts?.keyboard,
-      extra: { event_id: target.eventId },
-    });
-  }
-  return bot.sendMarkdown(target, content, opts);
 }

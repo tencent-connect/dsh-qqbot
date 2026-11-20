@@ -5,12 +5,13 @@ import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
  * 每个命令拆分为独立文件，此处仅编排。工厂函数注入依赖，统一导出命令列表。
  *
  * 命令按 category 分两类：
- *   - agent：底层 dsh agent 通用能力（new/compact/model/stop）
+ *   - agent：底层 dsh agent 通用能力
  *   - qqbot：插件自身特有（ping/version/status/help）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { newCommand, compactCommand, unarchiveCommand } from './session.ts';
 import { modelCommand } from './model.ts';
+import { effortCommand } from './effort.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
@@ -26,6 +27,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     unarchiveCommand(deps),
     compactCommand(deps),
     modelCommand(deps),
+    effortCommand(deps),
     presetCommand(deps),
     stopCommand(deps),
     // QQBot 特有
@@ -49,7 +51,8 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
   return commands;
 }
 export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
-  const mode = deps.manager.accountAccess?.currentAccess().commandMode ?? deps.config.access.commandMode ?? 'open';
+  const { commandMode } = deps.manager.accountAccess?.currentAccess() ?? deps.config.access;
+  const scope = commandMode === 'open' ? 'all' : commandMode === 'disabled' ? 'disabled' : 'owner';
   return buildCommandList(deps).map((command): SlashCommandDescriptor => {
     const names = Array.isArray(command.name) ? command.name : [command.name];
     return {
@@ -57,7 +60,7 @@ export function describeCommands(deps: CommandDeps): SlashCommandDescriptor[] {
       aliases: names.slice(1),
       description: command.description ?? '',
       category: command.category,
-      scope: mode === 'open' ? 'all' : mode === 'disabled' ? 'disabled' : 'owner',
+      scope,
       ...(command.hidden === true ? { hidden: true } : {}),
     };
   }).filter((descriptor) => descriptor.name !== '');

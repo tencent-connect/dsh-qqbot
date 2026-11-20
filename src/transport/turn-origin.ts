@@ -3,23 +3,20 @@
  *
  * - qq：本插件入站的 user 消息。回复沿用被动窗口。
  * - external：读者在别的界面输入。kind 仍是 user，但消息 id 不是本插件登记的。
- * - internal：宿主自己发起的一条消息，例如 schedule、已回答的提问、notice，
- *   或每轮注入的上下文。它不锁定回合。整轮都没有读者输入时，才按服务回合主动推到 QQ。
+ * - internal：宿主自己发起的一条消息，如 schedule。整轮都没有读者输入时，按服务回合主动推送。
+ * - context：notice 和宿主附加的上下文，不能单独授权投递。
  *
  * 已知边界：一个 external 回合中途插入 QQ 入站时会改判为被动，但本回合已创建的
  * 出站缓冲仍按创建时的主动目标发送（目标在缓冲创建时拍下，回合内不改）。
  */
 
-export type MessageOrigin = 'qq' | 'external' | 'internal';
+export type MessageOrigin = 'qq' | 'external' | 'internal' | 'context';
 export type DeliveryMode = 'passive' | 'proactive';
 
 export interface TurnInputSource {
   kind?: string;
   form?: string;
 }
-
-/** 宿主自己发起的回合，不是读者在某个界面打的字。 */
-const INTERNAL_KINDS = new Set(['schedule', 'user-question-reply']);
 
 export interface TurnDeliveryState {
   turn: number;
@@ -37,10 +34,10 @@ export function createTurnState(turn: number): TurnDeliveryState {
  * `qqOwned` 只在这条消息的 id 是本插件入站登记过的时候为真。
  */
 export function classifyTurnInput(source: TurnInputSource | undefined, qqOwned: boolean): MessageOrigin {
-  if (source?.form === 'notice') return 'internal';
-  if (source?.kind !== undefined && INTERNAL_KINDS.has(source.kind)) return 'internal';
-  if (source?.kind !== 'user') return 'internal';
-  return qqOwned ? 'qq' : 'external';
+  if (source?.form === 'notice') return 'context';
+  if (source?.kind === 'schedule') return 'internal';
+  if (source?.kind === 'user' || source?.kind === 'user-question-reply') return qqOwned ? 'qq' : 'external';
+  return 'context';
 }
 
 /** 把一条消息记进当前回合。internal 不抢归属；qq 可以改判已经记成 external 的回合。 */
@@ -53,7 +50,7 @@ export function noteTurnInput(state: TurnDeliveryState, origin: MessageOrigin): 
     if (state.origin !== 'qq') state.origin = 'external';
     return;
   }
-  state.sawInternal = true;
+  if (origin === 'internal') state.sawInternal = true;
 }
 
 /**

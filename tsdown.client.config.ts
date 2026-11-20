@@ -1,16 +1,25 @@
 /**
- * 浏览器客户端 bundle 构建配置。
+ * 浏览器客户端 bundle 构建配置
  *
- * 产出 lib/client.js：CJS 闭包工厂 `window.__ModuleLoader__.load({ id, factory })`，
- * externals 经注入 require 解析，单文件入口。
+ * 产出 lib/client.js，遵循 dsh 客户端模块系统的加载契约：
+ * - CJS 闭包工厂：`window.__ModuleLoader__.load({ id, factory: (require) => {...} })`
+ * - externals 经注入 require 解析（客户端平台种子表）
+ * - 单文件入口（无动态 chunk），sourcemap 供浏览器诊断
  *
- * 契约对齐 deepseek-harness 的 packages/client/tsdown.client.ts（0.2.2-rc.3），
- * 并叠加跨版本不变量：单一产物横跨 dshReleases 声明的全部宿主版本。
+ * 与 deepseek-harness 仓库 packages/client/tsdown.client.ts 的契约保持一致，
+ * 仅保留外部插件所需的最小集。
  */
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { transform } from 'lightningcss';
 import { defineConfig } from 'tsdown';
 
-/** 浏览器模块 id：与包名一致（宿主按包名注册 boot 图行），改名发布时须同步。 */
+/** 浏览器模块 id：从 package.json 的 name 动态读取。
+ *
+ * 宿主 client-modules 按包名（最近归属的 package manifest）注册 boot 图行，
+ * bundle 的 __ModuleLoader__.load({ id }) 必须与其一致——改名发布
+ * （fork/scope 迁移）时硬编码会导致「loaded without registering」。
+ */
 const ID = (JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { name: string }).name;
 
 /**
@@ -58,55 +67,84 @@ const INLINE_SAFE = /^(?:@deepseek-ai\/dsh-(?:file-reference|fs-patch|session|ll
 
 const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/;
 
-export default defineConfig({
-  name: `${ID}/client`,
-  entry: { client: 'src/client/index.ts' },
-  outDir: 'lib',
-  format: 'cjs',
-  platform: 'browser',
-  target: 'es2022',
-  dts: false,
-  clean: false,
-  sourcemap: true,
-  deps: {
-    // 种子表保持外部引用，其余整体内联
-    neverBundle: isSeedModule,
-    alwaysBundle: (specifier: string) => !isSeedModule(specifier),
+const bundlePurity = {
+  // purity gate：宿主运行时「require 未命中模块表即抛」的构建期镜像。
+  // 只允许种子表 / vendored / inline-safe / 生成 remote；跨插件协作走 cordis 服务。
+  // type-only import 编译期已擦除，不会到达此门。
+  name: 'dsh-client-bundle-purity',
+  resolveId(source: string) {
+    if (isSeedModule(source)) return null;
+    // 现代层先于第三方分支检查（zod 等不带 @deepseek-ai 前缀）
+    const modernMinimum = modernSeedMinimumOf(source);
+    if (modernMinimum !== undefined) {
+      throw new Error(
+        `client bundle purity: "${source}" 自宿主 ${modernMinimum} 起才进入平台表——`
+        + `本插件产物横跨 dshReleases 声明的全部版本（含更老宿主），引用会在其上运行时抛`
+        + '「missed the module table」。放弃该导入，或抬升声明下限并在全部版本重新验收后，'
+        + '把条目升入 tsdown.client.config.ts 的 SEED_TABLE',
+      );
+    }
+    if (!source.startsWith('@deepseek-ai/')) return null;
+    if (VENDORED_LIBRARY.test(source)) return null;
+    if (INLINE_SAFE.test(source) || GENERATED_REMOTE.test(source)) return null;
+    throw new Error(
+      `client bundle purity: "${source}" 不在平台种子表（PLATFORM_MODULES 交集）也不在 inline-safe 白名单——`
+      + '跨插件值导入被禁止：改走 cordis 服务协作，或确认该层属 inline-safe 后同步白名单；'
+      + '依赖其他插件的客户端模块时在 package.json 的 dsh.client.external 声明请求',
+    );
   },
-  plugins: [
-    {
-      // purity gate：宿主运行时「require 未命中模块表即抛」的构建期镜像。
-      // 只允许种子表 / vendored / inline-safe / 生成 remote；跨插件协作走 cordis 服务。
-      // type-only import 编译期已擦除，不会到达此门。
-      name: 'dsh-client-bundle-purity',
-      resolveId(source: string) {
-        if (isSeedModule(source)) return null;
-        // 现代层先于第三方分支检查（zod 等不带 @deepseek-ai 前缀）
-        const modernMinimum = modernSeedMinimumOf(source);
-        if (modernMinimum !== undefined) {
-          throw new Error(
-            `client bundle purity: "${source}" 自宿主 ${modernMinimum} 起才进入平台表——`
-            + `本插件产物横跨 dshReleases 声明的全部版本（含更老宿主），引用会在其上运行时抛`
-            + '「missed the module table」。放弃该导入，或抬升声明下限并在全部版本重新验收后，'
-            + '把条目升入 tsdown.client.config.ts 的 SEED_TABLE',
-          );
-        }
-        if (!source.startsWith('@deepseek-ai/')) return null;
-        if (VENDORED_LIBRARY.test(source)) return null;
-        if (INLINE_SAFE.test(source) || GENERATED_REMOTE.test(source)) return null;
-        throw new Error(
-          `client bundle purity: "${source}" 不在平台种子表（PLATFORM_MODULES 交集）也不在 inline-safe 白名单——`
-          + '跨插件值导入被禁止：改走 cordis 服务协作，或确认该层属 inline-safe 后同步白名单；'
-          + '依赖其他插件的客户端模块时在 package.json 的 dsh.client.external 声明请求',
-        );
-      },
+};
+
+const cssModulePrefix = '\\0qqbot-css:';
+
+const cssModules = {
+  name: 'qqbot-css-modules',
+  resolveId: {
+    order: 'pre' as const,
+    handler(source: string, importer?: string) {
+      if (importer && source.endsWith('.module.css')) return cssModulePrefix + resolve(dirname(importer), source) + '.js';
     },
-  ],
-  outputOptions: {
-    entryFileNames: 'client.js',
-    banner: (chunk) =>
-      `window.__ModuleLoader__.load({ id: ${JSON.stringify(ID)},${chunk.isEntry ? '' : ` chunk: ${JSON.stringify(chunk.fileName)},`} factory: (require) => {`,
-    intro: 'var module = { exports: {} }; var exports = module.exports;',
-    footer: 'return module.exports; } });',
   },
-});
+  load(id: string) {
+    if (!id.startsWith(cssModulePrefix)) return undefined;
+    const path = id.slice(cssModulePrefix.length, -3);
+    const result = transform({ filename: path, code: readFileSync(path), cssModules: true, minify: true });
+    const classes = Object.fromEntries(Object.entries(result.exports ?? {}).map(([key, value]) => [key, value.name]));
+    return 'export const sheet = ' + JSON.stringify(result.code.toString()) + '; export default ' + JSON.stringify(classes);
+  },
+};
+
+function clientConfig(id: string, entry: string, outDir: string) {
+  return defineConfig({
+    name: `${id}/client`,
+    entry: { client: entry },
+    outDir,
+    format: 'cjs',
+    platform: 'browser',
+    target: 'es2022',
+    dts: false,
+    clean: false,
+    sourcemap: true,
+    plugins: [cssModules, bundlePurity],
+    deps: {
+      // 平台种子表内的说明符保持外部引用（经注入 require 解析）
+      neverBundle: isSeedModule,
+      // 其他依赖内联，浏览器加载器只需提供上面的宿主模块。
+      alwaysBundle: (specifier: string) => !isSeedModule(specifier),
+    },
+    outputOptions: {
+      entryFileNames: 'client.js',
+      banner: (chunk) =>
+        `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)},${chunk.isEntry ? '' : ` chunk: ${JSON.stringify(chunk.fileName)},`} factory: (require) => {`,
+      intro: 'var module = { exports: {} }; var exports = module.exports;',
+      footer: 'return module.exports; } });',
+    },
+  });
+}
+
+const historyId = (JSON.parse(readFileSync(new URL('./plugins/workbench-history/package.json', import.meta.url), 'utf8')) as { name: string }).name;
+
+export default [
+  clientConfig(ID, 'src/client/index.ts', 'lib'),
+  clientConfig(historyId, 'src/client/history-extension.ts', 'plugins/workbench-history/lib'),
+];

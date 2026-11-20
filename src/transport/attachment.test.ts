@@ -64,6 +64,43 @@ describe('downloadMediaAttachments', () => {
     expect(readdirSync(MEDIA_ROOT)).toEqual([basename(result.localPath)]);
     expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining(`→ ${result.localPath}`));
   });
+
+  it('previews protocol-relative QQ media and retries protected image URLs with bot authentication', async () => {
+    const getAccessToken = vi.fn(async () => 'fixture-token');
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array(gif)));
+    vi.stubGlobal('fetch', fetch);
+    const files = await downloadMediaAttachments(
+      [{ filename: 'sticker.png', content_type: 'image/png', size: 0, url: '//multimedia.nt.qq.com.cn/download?rkey=fixture' }],
+      { enabled: true, maxMB: 1, ttlHours: 24 }, logger, MEDIA_ROOT, { imagesOnly: true, getAccessToken },
+    );
+    expect(getAccessToken).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]?.[0].href).toMatch(/^https:\/\/multimedia\.nt\.qq\.com\.cn\//);
+    expect(fetch.mock.calls[1]?.[1]).toMatchObject({ redirect: 'error', headers: { Authorization: 'QQBot fixture-token' } });
+    expect(files).toHaveLength(1);
+    expect(extname(files[0]!.localPath)).toBe('.gif');
+    expect(readFileSync(files[0]!.localPath)).toEqual(gif);
+  });
+
+  it('skips non-QQ preview URLs and stops reading images that exceed the configured limit', async () => {
+    const cancel = vi.fn();
+    const bytes = new ReadableStream<Uint8Array>({
+      pull(controller) { controller.enqueue(new Uint8Array(64)); },
+      cancel,
+    });
+    const fetch = vi.fn().mockResolvedValue(new Response(bytes));
+    vi.stubGlobal('fetch', fetch);
+    const media = { enabled: true, maxMB: 100 / (1024 * 1024), ttlHours: 24 };
+    const files = await downloadMediaAttachments([
+      { filename: 'other.png', content_type: 'image/png', size: 0, url: 'https://example.com/image.png' },
+      { filename: 'photo.png', content_type: 'image/png', size: 0, url: 'https://multimedia.nt.qq.com.cn/download' },
+    ], media, logger, MEDIA_ROOT, { imagesOnly: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(files).toEqual([]);
+    expect(readdirSync(MEDIA_ROOT)).toEqual([]);
+  });
 });
 
 describe('imageExtension（纯函数：magic bytes 识别）', () => {

@@ -23,18 +23,18 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
  * @param ttlHours 保留时长（小时），<=0 表示永不过期（跳过清理）
  * @returns 删除的文件数
  */
-export async function cleanupExpiredMedia(ttlHours: number, logger?: Logger): Promise<number> {
+export async function cleanupExpiredMedia(ttlHours: number, logger?: Logger, mediaRoot = MEDIA_ROOT): Promise<number> {
   if (ttlHours <= 0) return 0;
-  if (!existsSync(MEDIA_ROOT)) return 0;
+  if (!existsSync(mediaRoot)) return 0;
 
   const now = Date.now();
   const ttlMs = ttlHours * 60 * 60 * 1000;
 
-  const entries = await readdir(MEDIA_ROOT, { withFileTypes: true });
+  const entries = await readdir(mediaRoot, { withFileTypes: true });
   const files = entries.filter(entry => entry.isFile()).map(entry => entry.name);
 
   const results = await Promise.all(files.map(async (name) => {
-    const filePath = join(MEDIA_ROOT, name);
+    const filePath = join(mediaRoot, name);
     try {
       const info = await stat(filePath);
       if (now - info.mtimeMs <= ttlMs) return false;
@@ -56,13 +56,13 @@ export async function cleanupExpiredMedia(ttlHours: number, logger?: Logger): Pr
  * 用 ctx.effect 挂载定时器，插件卸载时自动 clearInterval。
  * ttlHours <= 0 时不启动（永不过期）。
  */
-export function startMediaCleanup(ctx: Context, ttlHours: number, logger: Logger): void {
+export function startMediaCleanup(ctx: Context, ttlHours: number, logger: Logger, mediaRoot = MEDIA_ROOT): void {
   if (ttlHours <= 0) return;
 
-  logger.info(`im-qqbot: media cleanup started (ttl=${ttlHours}h, interval=1h, root=${MEDIA_ROOT})`);
+  logger.info(`im-qqbot: media cleanup started (ttl=${ttlHours}h, interval=1h, root=${mediaRoot})`);
 
   // 启动时立即清理一次（异步，不阻塞启动流程）
-  void cleanupExpiredMedia(ttlHours, logger)
+  void cleanupExpiredMedia(ttlHours, logger, mediaRoot)
     .then((cleaned) => {
       if (cleaned > 0) logger.info(`im-qqbot: cleaned ${cleaned} expired media files`);
     })
@@ -73,7 +73,7 @@ export function startMediaCleanup(ctx: Context, ttlHours: number, logger: Logger
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })
     .effect(() => {
       const timer = setInterval(() => {
-        void cleanupExpiredMedia(ttlHours, logger)
+        void cleanupExpiredMedia(ttlHours, logger, mediaRoot)
           .then((n) => {
             if (n > 0) logger.info(`im-qqbot: cleaned ${n} expired media files`);
           })

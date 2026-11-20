@@ -2,7 +2,7 @@
  * 工具调用结果 → Markdown 格式化
  *
  * 适配 QQ 消息通道：优先用工具自定义的 presentResult 视图，
- * fallback 到结果文本。错误始终展示，成功结果按 config 开关。
+ * fallback 到结果文本。调用方只允许投递成功结果。
  *
  * 数据形态对齐 dsh 的 tool/result 事件（SessionEventMap['tool/result']）：
  * message 是 ToolResultMessage，content 直接是 ContentBlock[]（如 { type: 'text', text }），
@@ -20,6 +20,8 @@ export interface ToolsRegistryLike {
 export interface ToolContentBlock {
   type: string;
   text?: string;
+  content?: ToolContentBlock[];
+  isError?: boolean;
 }
 
 /** presentResult 的入参（dsh-tools ToolResult 的结构化子集） */
@@ -35,7 +37,7 @@ export interface ToolResultData {
     content?: ToolContentBlock[];
     isError?: boolean;
   };
-  error?: { name: string; code: string; reason?: string };
+  error?: unknown;
   meta?: unknown;
 }
 
@@ -67,27 +69,15 @@ export function formatToolResult(
   toolsRegistry: ToolsRegistryLike | undefined,
   agent: unknown,
 ): string | null {
+  if (isFailedToolResult(data)) return null;
   const content = contentBlocks(data);
-  const isError = data.message?.isError === true || data.error !== undefined;
 
-  // 1. 错误优先：始终展示
-  if (isError) {
-    const detail = data.error === undefined
-      ? truncate(textOf(content)).trim()
-      : errorLine(data.error);
-    return detail
-      ? `❌ 工具 \`${name}\` 执行失败\n${detail}`
-      : `❌ 工具 \`${name}\` 执行失败`;
-  }
-
-  // 2. 尝试工具自定义视图（presentResult）
   const view = presentResultView(name, rawArgs, content, data.meta, toolsRegistry, agent);
   if (view !== undefined) {
     const rendered = renderView(name, view);
     if (rendered !== null) return rendered;
   }
 
-  // 3. fallback 结果文本
   const result = textOf(content);
   if (!result.trim()) return null;
 
@@ -97,13 +87,15 @@ export function formatToolResult(
 /** 读取结果内容块（缺字段时按空处理，不让展示影响主流程） */
 function contentBlocks(data: ToolResultData): ToolContentBlock[] {
   const content = data.message?.content;
-  return Array.isArray(content) ? content : [];
+  if (!Array.isArray(content)) return [];
+  const first = content[0];
+  return first?.type === 'tool-result' && Array.isArray(first.content) ? first.content : content;
 }
 
-/** 错误标识行：`name: code` + 面向用户的原因 */
-function errorLine(error: { name: string; code: string; reason?: string }): string {
-  const head = `\`${error.name}: ${error.code}\``;
-  return error.reason ? `${head}\n${error.reason}` : head;
+export function isFailedToolResult(data: ToolResultData): boolean {
+  const first = data.message?.content?.[0];
+  return data.error !== undefined || data.message?.isError === true
+    || (first?.type === 'tool-result' && first.isError === true);
 }
 
 /** 调用工具自定义 presentResult，失败/不可用时返回 undefined */

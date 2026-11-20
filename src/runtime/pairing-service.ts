@@ -64,6 +64,13 @@ export class PairingService {
     this.pending.delete(code); this.save();
   }
 
+  endAll(): void {
+    this.refresh();
+    if (this.pending.size === 0) return;
+    this.pending.clear();
+    this.save();
+  }
+
   claimResult(rawCode: string, openid: string): PairClaimResult | undefined {
     this.refresh();
     return this.pending.get(normalizePairCode(rawCode))?.claims.find(member => member.openid === openid);

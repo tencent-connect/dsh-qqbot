@@ -75,25 +75,12 @@ describe('formatToolResult', () => {
     expect(formatToolResult('bash', '{}', resultData([]), undefined, undefined)).toBeNull();
   });
 
-  it('data.error 存在时展示错误标识与原因', () => {
-    const text = formatToolResult(
-      'bash',
-      '{}',
-      resultData([{ type: 'text', text: 'boom' }], {
-        error: { name: 'ToolError', code: 'EXEC_FAILED', reason: 'command not found' },
-      }),
-      undefined,
-      undefined,
-    );
-
-    expect(text).toBe('❌ 工具 `bash` 执行失败\n`ToolError: EXEC_FAILED`\ncommand not found');
-  });
-
-  it('仅 message.isError 时也展示错误结果文本', () => {
-    const data: ToolResultData = { message: { content: [{ type: 'text', text: 'exit code 1' }], isError: true } };
-
-    expect(formatToolResult('bash', '{}', data, undefined, undefined))
-      .toBe('❌ 工具 `bash` 执行失败\nexit code 1');
+  it.each([
+    { message: { content: [{ type: "text", text: "detail" }] }, error: { code: "EXEC_FAILED" } },
+    { message: { content: [{ type: "text", text: "detail" }], isError: true } },
+    { message: { content: [{ type: "tool-result", isError: true, content: [{ type: "text", text: "detail" }] }] } },
+  ])("keeps failed tool details out of QQ", data => {
+    expect(formatToolResult("bash", "{}", data, undefined, undefined)).toBeNull();
   });
 
   it('presentResult 抛错时降级为结果文本', () => {

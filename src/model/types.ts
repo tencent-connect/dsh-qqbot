@@ -8,6 +8,10 @@ export interface ModelRoute {
   model: string;
 }
 
+export interface ModelSelection extends ModelRoute {
+  reasoningEffort?: string;
+}
+
 /** 模型信息条目 */
 export interface ModelEntry {
   provider: string;

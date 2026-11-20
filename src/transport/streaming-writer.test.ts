@@ -97,7 +97,7 @@ describe('StreamingWriter', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it('首次 update 失败 → shouldFallback = true', async () => {
+  it('首次 update 结果未知：不重试 update，也不静态重发全文', async () => {
     const session: StreamSessionLike = {
       update: vi.fn().mockRejectedValueOnce(new Error('update failed')),
       complete: vi.fn().mockResolvedValue(undefined),
@@ -108,7 +108,10 @@ describe('StreamingWriter', () => {
     writer.append('hello');
     await vi.advanceTimersByTimeAsync(200);
 
-    expect(writer.shouldFallback).toBe(true);
+    await writer.finish();
+    expect(writer.shouldFallback).toBe(false);
+    expect(session.update).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
   it('后续 update 失败 → shouldFallback = false（已发送过分片，不降级避免重复）', async () => {

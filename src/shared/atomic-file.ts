@@ -1,11 +1,12 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, fchmodSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 /** Replaces the file atomically. A directory sync failure after replacement emits a warning. */
-export function atomicWrite(path: string, chunks: Iterable<string>): void {
+export function atomicWrite(path: string, chunks: Iterable<string | Uint8Array>,
+  replacement?: { mode: number; verify(): void }): void {
   const parent = dirname(path);
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  if (!replacement) mkdirSync(parent, { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, 'wx', 0o600);
   try {
@@ -15,10 +16,12 @@ export function atomicWrite(path: string, chunks: Iterable<string>): void {
         let offset = 0;
         while (offset < buffer.length) offset += writeSync(fd, buffer, offset, buffer.length - offset);
       }
+      if (replacement) fchmodSync(fd, replacement.mode);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
+    replacement?.verify();
     renameSync(temporary, path);
   } catch (error) {
     rmSync(temporary, { force: true });

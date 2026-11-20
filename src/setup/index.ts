@@ -15,11 +15,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 import { BindingService } from './binding-service.ts';
-import { createBindRpcHandler } from './bind-routes.ts';
+import { createBindRpcHandler, type BindRpcOptions } from './bind-routes.ts';
 import { registerPluginRpc } from '../rpc-carrier.ts';
 import { BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
-import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
+import { persistCredentialsToProfile, type HostAccessSource, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 
 export type { SetupCredentials } from './persist.ts';
@@ -36,6 +36,8 @@ export interface EnsureCredentialsOptions {
   source?: string;
   /** 当前生效配置（apply 时 loader 合并值；config 路由 GET 回显用） */
   config: Record<string, unknown>;
+  hostAccess?: HostAccessSource;
+  prepareBinding?: (appId: string) => void;
 }
 
 /**
@@ -81,16 +83,15 @@ export async function ensureCredentials(
     service.attach(createBrowserPresenter(logger));
   }
 
-  // 端内绑定 RPC：经宿主 Connection 共享通道注册（来源围栏与认证由宿主
-  // 施加）。connection 服务缺席时静默跳过（CLI profile 照常加载），
-  // 就绪/替换时子 fiber 生命周期自动重挂。
   registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(service, logger, {
-    // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
     onManualCredentials: (credentials) => {
+      try { options.prepareBinding?.(credentials.appId); }
+      catch (error) { return { persisted: false, error: error instanceof Error ? error.message : '清除记录尚未完成。' }; }
       service.dispose();
       return persistCredentials(credentials, logger);
     },
     currentConfig: () => options.config,
+    hostAccess: options.hostAccess,
   }));
 
   return service.start();
@@ -102,11 +103,15 @@ export async function ensureCredentials(
  * 在 apply 的 bootstrapGateway 之前调用；写入经同一 persist 路径，
  * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
  */
-export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
+export function registerBoundCredentialRoutes(
+  ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>,
+  actions: Pick<BindRpcOptions, 'boundAppId' | 'onUnbind' | 'onManualCredentials' | 'hostAccess'> = {},
+): void {
   registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(null, logger, {
     boundAppId: () => appId,
     onManualCredentials: (credentials) => persistCredentials(credentials, logger),
     currentConfig: () => config,
+    ...actions,
   }));
 }
 

@@ -6,8 +6,8 @@
  *
  * 1. 文档保真：用 eemeli/yaml 的 Document API 原地编辑，注释、锚点、
  *    `!!js` 表达式、insert 行等所有本插件不拥有的内容一律原样保留；
- * 2. fail-closed：非法 YAML / 顶层非数组 / config 非映射 / 配置被锚点
- *    共享时拒绝写入、保留原文件；
+ * 2. fail-closed：非法 YAML、非数组文档或非映射配置拒绝写入。共享锚点
+ *    允许追加独立的 QQBot 设置覆盖，凭据操作仍拒绝原地改动共享配置；
  * 3. 原子写：同目录临时文件 + rename，崩溃不会留下截断的半份文件；
  * 4. 乐观校验：写入前重读比对（外部并发改动则重试合并），写入后读回
  *    验证本插件条目正确、其他条目集合不变，失败则回滚原内容。
@@ -15,7 +15,9 @@
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { parseDocument, isMap, isSeq, isScalar, YAMLMap, type Document, type YAMLSeq } from 'yaml';
+import { isDeepStrictEqual } from 'node:util';
+import yaml from 'js-yaml';
+import { parseDocument, isAlias, isMap, isNode, isSeq, isScalar, visit, Alias, YAMLMap, type Document, type YAMLSeq } from 'yaml';
 import type { Logger } from '../types.ts';
 import { AccessControlSchema, type AccessControlConfig } from '../config.ts';
 
@@ -25,21 +27,62 @@ export class AccessConfigConflict extends Error {
 
 export function accessRevision(access: AccessControlConfig, appId = ''): string {
   return createHash('sha256').update(JSON.stringify([
-    appId, access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode ?? 'open',
+    appId, access.c2cMode, access.c2cAllow, access.groupMode, access.groupAllow, access.commandMode,
   ])).digest('hex');
 }
 
-function savedAccess(config: YAMLMap | undefined, fallback: unknown): AccessControlConfig {
-  const base = AccessControlSchema((fallback ?? {}) as never);
-  const node = config?.get('access', true);
-  if (node === undefined) return base;
-  if (!isMap(node)) throw new PatchFormatError('access 必须是映射');
-  return AccessControlSchema({ ...base, ...node.toJSON() });
+export interface HostAccessSource {
+  readonly appId?: unknown;
+  readonly access?: unknown;
 }
 
-function readProfileConfig(profileDir?: string): YAMLMap | undefined {
+export function readHostAccessSource(profileDir?: string): HostAccessSource {
   const path = profileDir && resolve(profileDir, 'cordis.patch.yml');
-  return path && existsSync(path) ? findEntryConfig(parseProfilePatch(readFileSync(path, 'utf8'))) : undefined;
+  return path && existsSync(path) ? readAccessSource(readFileSync(path, 'utf8')) : {};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function matchesEntry(id: unknown, name: unknown, hasInsert: boolean): boolean {
+  return id === ENTRY_ID && !hasInsert && (name === undefined || name === PACKAGE_NAME);
+}
+
+function readAccessSource(text: string): HostAccessSource {
+  // Use the same scalar and alias rules as the Host Include YAML loader.
+  const rows: unknown = yaml.load(text, { schema: PROFILE_SCHEMA });
+  if (rows === undefined) return {};
+  if (!Array.isArray(rows)) throw new PatchFormatError('顶层必须是 YAML 数组（条目 / patch 行列表）');
+  let config: unknown;
+  for (const row of rows) {
+    if (isRecord(row) && matchesEntry(row.id, row.name, Object.hasOwn(row, 'insert')) && Object.hasOwn(row, 'config')) {
+      config = row.config;
+    }
+  }
+  if (config === undefined || config === null) return {};
+  if (!isRecord(config)) throw new PatchFormatError('im-qqbot 条目的 config 不是映射');
+  return Object.hasOwn(config, '__jsExpr') ? { appId: config, access: config } : { appId: config.appId, access: config.access };
+}
+
+function needsHostAccess(value: unknown, visited = new Set<object>()): boolean {
+  if (!value || typeof value !== 'object' || visited.has(value)) return false;
+  visited.add(value);
+  return Object.hasOwn(value, '__jsExpr') || Object.values(value).some(child => needsHostAccess(child, visited));
+}
+
+function savedAccess(source: HostAccessSource, fallback: unknown, hostAccess?: HostAccessSource): AccessControlConfig {
+  const base = AccessControlSchema((fallback ?? {}) as never);
+  if (hostAccess && isDeepStrictEqual(source.access, hostAccess.access)) return base;
+  // A changed expression needs the Host to publish its next evaluation. Literal
+  // changes are visible here immediately, including while an old send is queued.
+  if (needsHostAccess(source.access)) throw new AccessConfigConflict();
+  if (source.access === undefined) {
+    if (hostAccess) throw new AccessConfigConflict();
+    return base;
+  }
+  if (!isRecord(source.access)) throw new PatchFormatError('access 必须是映射');
+  return AccessControlSchema({ ...base, ...source.access });
 }
 
 function explicitAppId(value: unknown): string | undefined {
@@ -56,31 +99,43 @@ function checkedAppId(config: YAMLMap | undefined, expectedAppId?: string): stri
   return saved ?? expected ?? '';
 }
 
-/** Read persisted membership even while the old plugin fiber is still serving requests. */
-export function readProfileAccess(fallback: unknown, profileDir?: string, expectedAppId?: string): AccessControlConfig {
-  const config = readProfileConfig(profileDir);
-  checkedAppId(config, expectedAppId);
-  return savedAccess(config, fallback);
+function accessSnapshot(source: HostAccessSource, fallback: unknown, expectedAppId?: string, hostAccess?: HostAccessSource) {
+  const expected = explicitAppId(expectedAppId);
+  const saved = explicitAppId(source.appId);
+  const sameAccountSource = hostAccess && isDeepStrictEqual(source.appId, hostAccess.appId);
+  if ((saved && expected && saved !== expected) || (hostAccess && !sameAccountSource && !saved)) {
+    throw new AccessConfigConflict();
+  }
+  const appId = saved ?? expected ?? '';
+  const access = savedAccess(source, fallback, hostAccess);
+  return { access, appId, revision: accessRevision(access, appId) };
 }
 
-export function readProfileAccessSnapshot(fallback: unknown, profileDir?: string, expectedAppId?: string) {
-  const config = readProfileConfig(profileDir);
-  const appId = checkedAppId(config, expectedAppId);
-  const access = savedAccess(config, fallback);
-  return { access, appId, revision: accessRevision(access, appId) };
+/** Read persisted membership even while the old plugin fiber is still serving requests. */
+export function readProfileAccess(fallback: unknown, profileDir?: string, expectedAppId?: string): AccessControlConfig {
+  return readProfileAccessSnapshot(fallback, profileDir, expectedAppId).access;
+}
+
+export function readProfileAccessSnapshot(fallback: unknown, profileDir?: string, expectedAppId?: string, hostAccess?: HostAccessSource) {
+  return accessSnapshot(readHostAccessSource(profileDir), fallback, expectedAppId, hostAccess);
 }
 
 /** 凭据结果 */
 export interface SetupCredentials {
   appId: string;
   appSecret: string;
-  /** 扫码用户 openid（存在时自动加入私聊白名单） */
+  /** 扫码用户 OpenID，用于查找已缓存的昵称。 */
   userOpenid?: string;
 }
 
 /** 宿主 Include 方言：保留 !!js 等自定义标签为字面量字符串 */
+const JS_TAG = 'tag:yaml.org,2002:js';
+const PROFILE_SCHEMA = yaml.JSON_SCHEMA.extend(new yaml.Type(JS_TAG, {
+  kind: 'scalar',
+  construct: (expression: string) => ({ __jsExpr: expression }),
+}));
 const PARSE_OPTIONS: { customTags: Array<{ tag: string; resolve: (value: string) => string }> } = {
-  customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+  customTags: [{ tag: JS_TAG, resolve: (value: string) => value }],
 };
 
 /** 剖析错误：fail-closed 语义（调用方拒绝写入、保留原文件） */
@@ -88,6 +143,7 @@ class PatchFormatError extends Error {}
 
 /** 插件在 patch 文件中的条目 id */
 const ENTRY_ID = 'im-qqbot';
+const PACKAGE_NAME = '@tencent-connect/dsh-qqbot';
 
 /** 乐观并发重试次数（外部进程在读写窗口内改动的兜底；同进程写者被同步执行天然串行） */
 const WRITE_ATTEMPTS = 3;
@@ -98,6 +154,7 @@ type PersistLogger = Pick<Logger, 'info' | 'warn'>;
 interface EditContext {
   config: YAMLMap;
   attached: boolean;
+  original: string;
   /** 把（编辑后的）config 作为新的 im-qqbot 条目追加进文档 */
   appendEntry(): void;
 }
@@ -131,7 +188,7 @@ function writePrivateFile(path: string, content: string): void {
 function editProfilePatch(
   dir: string,
   edit: (ctx: EditContext) => EditResult,
-  options: { force?: boolean },
+  options: { force?: boolean; updatedKeys?: readonly string[] },
   verify: (config: YAMLMap | undefined) => boolean,
   log: PersistLogger,
 ): boolean {
@@ -145,7 +202,7 @@ function editProfilePatch(
     const otherIdsBefore = collectEntryIds(doc);
 
     // 2. 原地编辑
-    const changed = applyEdit(doc, edit);
+    const changed = applyEdit(doc, before, edit, options.updatedKeys);
     if (!changed && !options.force) {
       chmodSync(patchPath, 0o600);
       return true;
@@ -199,6 +256,7 @@ function editProfilePatch(
 /** 解析并校验顶层结构：空/仅注释 → 空列表文档；非数组 → fail-closed */
 function parseProfilePatch(content: string): Document.Parsed {
   const doc = parseDocument(content, PARSE_OPTIONS);
+  if (doc.errors[0]) throw new PatchFormatError(doc.errors[0].message);
   if (doc.contents === null) {
     // 空/仅注释：等价空列表，允许安全重建
     return parseDocument('[]', PARSE_OPTIONS);
@@ -228,32 +286,58 @@ function collectEntryIds(doc: Document.Parsed): string[] {
   return ids;
 }
 
-/** 定位 im-qqbot 条目的 config（不存在返回 undefined）；config 非映射/被锚点共享 → fail-closed */
-function findEntryConfig(doc: Document.Parsed): YAMLMap | undefined {
+function findEntryConfigNode(doc: Document.Parsed): unknown {
   const seq = doc.contents;
   if (!isSeq(seq)) return undefined;
-  for (const item of seq.items) {
-    if (!isMap(item)) continue;
-    const idNode = item.get('id', true);
-    if (!isScalar(idNode) || String(idNode.value) !== ENTRY_ID) continue;
-    const configNode = item.get('config', true);
-    if (configNode === undefined) return undefined;
-    if (!isMap(configNode)) {
-      throw new PatchFormatError('im-qqbot 条目的 config 不是映射');
+  for (let index = seq.items.length - 1; index >= 0; index--) {
+    const row = seq.items[index];
+    if (isMap(row) && row.has('config') && matchesEntry(row.get('id'), row.get('name'), row.has('insert'))) {
+      return row.get('config', true);
     }
-    if (configNode.anchor) {
-      throw new PatchFormatError('im-qqbot 的 config 被锚点共享（其他条目引用同一份），原地修改会影响引用方');
-    }
-    return configNode;
   }
   return undefined;
 }
 
+function findEntryConfig(doc: Document.Parsed, allowShared = false): YAMLMap | undefined {
+  const raw = findEntryConfigNode(doc);
+  if (raw === undefined) return undefined;
+  const config = isAlias(raw) && allowShared ? raw.resolve(doc) : raw;
+  if (!allowShared && (isAlias(raw) || (isMap(config) && config.anchor))) {
+    throw new PatchFormatError('im-qqbot 的 config 被锚点共享（其他条目引用同一份），原地修改会影响引用方');
+  }
+  if (!isMap(config) || config.has('__jsExpr')) throw new PatchFormatError('im-qqbot 条目的 config 必须是可编辑的映射');
+  return config;
+}
+
+function definesAnchor(value: unknown): boolean {
+  if (!isNode(value)) return false;
+  let shared = false;
+  visit(value, {
+    Node(_key, node) {
+      if ('anchor' in node && node.anchor) { shared = true; return visit.BREAK; }
+    },
+  });
+  return shared;
+}
+
+function detachedConfig(original: YAMLMap): YAMLMap {
+  const config = original.clone() as YAMLMap;
+  delete config.anchor;
+  // Leave shared definitions in the original row. The later QQBot row owns
+  // only its edited values and still refers to the original anchors.
+  visit(config, {
+    Node(_key, node) { if ('anchor' in node && typeof node.anchor === 'string') return new Alias(node.anchor); },
+  });
+  return config;
+}
+
 /** 执行编辑并检测文档变更；fail-closed 错误向上抛给调用方拒绝写入 */
-function applyEdit(doc: Document.Parsed, edit: (ctx: EditContext) => EditResult): boolean {
-  const existing = findEntryConfig(doc);
-  const config = existing ?? (doc.createNode({}) as unknown as YAMLMap);
-  const attached = existing !== undefined;
+function applyEdit(doc: Document.Parsed, original: string, edit: (ctx: EditContext) => EditResult, updatedKeys?: readonly string[]): boolean {
+  const existing = findEntryConfig(doc, updatedKeys !== undefined);
+  const shared = existing && (existing.anchor || isAlias(findEntryConfigNode(doc))
+    || updatedKeys?.some(key => definesAnchor(existing.get(key, true))));
+  const config = existing ? shared ? detachedConfig(existing) : existing : new YAMLMap();
+  const attached = existing !== undefined && !shared;
   const appendEntry = (): void => {
     const seq = doc.contents as YAMLSeq;
     // 空文件重建的文档是流式 `[]`，追加时重置为块式输出（与手写 patch 形态一致）
@@ -264,37 +348,13 @@ function applyEdit(doc: Document.Parsed, edit: (ctx: EditContext) => EditResult)
     seq.add(entry);
   };
   const before = doc.toString({ lineWidth: 0 });
-  edit({ config, attached, appendEntry });
+  edit({ config, attached, appendEntry, original });
   return doc.toString({ lineWidth: 0 }) !== before;
 }
 
 /** 写入字面量字符串（覆盖已有的 !!js 表达式等节点） */
 function setPlainValue(config: YAMLMap, key: string, value: string): void {
   config.set(key, value);
-}
-
-/** 用扫码者 openid 覆盖 c2cAllow 并切到白名单模式（重绑即换人）；群配置不动 */
-function overwriteC2cAllowlist(config: YAMLMap, openid: string): void {
-  const access = config.get('access', true);
-  if (!isMap(access)) {
-    config.set('access', { c2cMode: 'allowlist', c2cAllow: [openid] });
-    return;
-  }
-  const accessMap = access as YAMLMap;
-  accessMap.set('c2cMode', 'allowlist');
-  accessMap.set('c2cAllow', [openid]);
-}
-
-/** 校验 c2cMode 为白名单且 c2cAllow 恰为 openid（读回验证用） */
-function c2cAllowlistContains(config: YAMLMap, openid: string): boolean {
-  const access = config.get('access', true);
-  if (!isMap(access)) return false;
-  const accessMap = access as YAMLMap;
-  if (accessMap.get('c2cMode') !== 'allowlist') return false;
-  const allow = accessMap.get('c2cAllow', true);
-  if (!isSeq(allow)) return false;
-  const items = allow.items.filter((item) => isScalar(item));
-  return items.length === 1 && String((items[0] as { value: unknown }).value) === openid;
 }
 
 /**
@@ -321,24 +381,17 @@ export function persistCredentialsToProfile(
       ({ config, attached, appendEntry }) => {
         setPlainValue(config, 'appId', credentials.appId);
         setPlainValue(config, 'appSecret', credentials.appSecret);
-        if (credentials.userOpenid) {
-          overwriteC2cAllowlist(config, credentials.userOpenid);
-        }
         if (!attached) appendEntry();
         return true;
       },
       {},
       (config) => config !== undefined
         && config.get('appId') === credentials.appId
-        && config.get('appSecret') === credentials.appSecret
-        && (!credentials.userOpenid || c2cAllowlistContains(config, credentials.userOpenid)),
+        && config.get('appSecret') === credentials.appSecret,
       log,
     );
     if (ok) {
       log.info(`✔ 凭据已写入: ${resolve(profileDir, 'cordis.patch.yml')}`);
-      if (credentials.userOpenid) {
-        log.info(`  扫码用户已加入私聊白名单: ${credentials.userOpenid}`);
-      }
       log.info(`  下次启动将自动使用保存的凭据`);
     }
     return ok;
@@ -363,6 +416,7 @@ export function persistCredentialsToProfile(
 export function removeCredentialsFromProfile(
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
+  expectedAppId?: string,
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) return false;
@@ -371,6 +425,7 @@ export function removeCredentialsFromProfile(
     const ok = editProfilePatch(
       profileDir,
       ({ config }) => {
+        checkedAppId(config, expectedAppId);
         if (config.has('appId')) config.delete('appId');
         if (config.has('appSecret')) config.delete('appSecret');
         return true;
@@ -395,6 +450,17 @@ export function removeCredentialsFromProfile(
   }
 }
 
+export function unbindProfileCredentials(
+  profileDir?: string,
+  logger?: Logger,
+  expectedAppId?: string,
+): boolean {
+  if (!removeCredentialsFromProfile(profileDir, logger, expectedAppId)) return false;
+  delete process.env.QQBOT_APPID;
+  delete process.env.QQBOT_SECRET;
+  return true;
+}
+
 /**
  * 将配置更新合并进 dsh profile 的 cordis.patch.yml（im-qqbot 条目）。
  *
@@ -408,7 +474,7 @@ export function updateProfileConfig(
   configPatch: Record<string, unknown>,
   profileDir?: string,
   logger?: { info(msg: string, ...args: unknown[]): void; warn(msg: string, ...args: unknown[]): void },
-  accessCondition?: { revision: string; fallback: unknown; appId?: string },
+  accessCondition?: { revision: string; fallback: unknown; appId?: string; hostAccess?: HostAccessSource },
 ): boolean {
   const log = logger ?? console;
   if (!profileDir) {
@@ -420,10 +486,10 @@ export function updateProfileConfig(
   try {
     const ok = editProfilePatch(
       profileDir,
-      ({ config, attached, appendEntry }) => {
+      ({ config, attached, appendEntry, original }) => {
         if (accessCondition) {
-          const appId = checkedAppId(config, accessCondition.appId);
-          if (accessRevision(savedAccess(config, accessCondition.fallback), appId) !== accessCondition.revision) {
+          const current = accessSnapshot(readAccessSource(original), accessCondition.fallback, accessCondition.appId, accessCondition.hostAccess);
+          if (current.revision !== accessCondition.revision) {
             throw new AccessConfigConflict();
           }
         }
@@ -434,7 +500,7 @@ export function updateProfileConfig(
         if (!attached) appendEntry();
         return true;
       },
-      {},
+      { updatedKeys: Object.keys(configPatch) },
       (config) => config !== undefined,
       log,
     );

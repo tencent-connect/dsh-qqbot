@@ -11,10 +11,9 @@
  * 自动清理（宿主注册表按 fiber 记账），disposer 仅作提前卸载用。
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { ConnectionRpcResult } from '@deepseek-ai/dsh-client-connection';
-
-/** 方法处理器的返回形态，直接复用宿主契约。 */
-export type RpcResult = ConnectionRpcResult<unknown>;
+/** 宿主 Connection RPC 结果的局部投影。 */
+export type RpcResult = { ok: true; value: unknown }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } };
 
 /** 一个端点内的方法处理器：按 method 分发，payload 为调用参数 */
 export type RpcMethodHandler = (
@@ -43,6 +42,10 @@ function failure(code: string, message: string): RpcResult {
   return { ok: false, error: { code, message, details: {} } };
 }
 
+function rpcResponse(rpcId: string, result: RpcResult): Response {
+  return Response.json({ type: 'server-response', rpcId, result }, { headers: { 'cache-control': 'no-store' } });
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -69,7 +72,7 @@ function parseEnvelope(message: unknown, endpoint: string): { rpcId: string; met
  */
 export function registerPluginRpc(ctx: Context, endpoint: string, handler: RpcMethodHandler): { dispose(): Promise<void> } {
   return ctx.inject(['connection'], (scoped: Context) => {
-    const registry = (scoped as unknown as { connection?: { fetch?: { register?: unknown } } }).connection?.fetch;
+    const registry = (scoped.get('connection') as { fetch?: { register?: unknown } } | undefined)?.fetch;
     if (typeof registry?.register !== 'function') return;
     const connection = registry as ConnectionFetchLike['fetch'];
     let disposed = false;
@@ -85,20 +88,22 @@ export function registerPluginRpc(ctx: Context, endpoint: string, handler: RpcMe
         }
         let message: unknown;
         try {
-          message = await request.json();
+          const body = await request.text();
+          if (Buffer.byteLength(body) > 512 * 1024) return new Response('body is too large', { status: 413 });
+          message = JSON.parse(body);
         } catch {
           return new Response('body is not JSON', { status: 400 });
         }
         const call = parseEnvelope(message, endpoint);
         if (call === undefined) {
-          return Response.json({
-            type: 'server-response',
-            rpcId: typeof (message as { rpcId?: unknown })?.rpcId === 'string' ? (message as { rpcId: string }).rpcId : 'invalid-request',
-            result: failure('qqbot/bad-request', '无效的请求信封'),
-          });
+          const rpcId = isRecord(message) && typeof message.rpcId === 'string' ? message.rpcId : 'invalid-request';
+          return rpcResponse(rpcId, failure('qqbot/bad-request', '无效的请求信封'));
         }
         if (disposed) {
-          return Response.json({ type: 'server-response', rpcId: call.rpcId, result: failure('plugin/reloading', 'QQ 插件已重载，请刷新后重试。') });
+          return rpcResponse(call.rpcId, failure('plugin/reloading', 'QQ 插件已重载，请刷新后重试。'));
+        }
+        if (request.signal.aborted) {
+          return rpcResponse(call.rpcId, failure('qqbot/cancelled', '请求已取消'));
         }
         let result: RpcResult;
         try {
@@ -106,13 +111,13 @@ export function registerPluginRpc(ctx: Context, endpoint: string, handler: RpcMe
         } catch (error) {
           result = failure('qqbot/internal', error instanceof Error ? error.message : String(error));
         }
-        return Response.json({ type: 'server-response', rpcId: call.rpcId, result });
+        return rpcResponse(call.rpcId, result);
       },
     });
     // 宿主注册表按 fiber 记账自动清理；disposer 兜底（幂等）
     scoped.effect(() => () => {
       disposed = true;
-      void Promise.resolve(stop).then((dispose) => { void dispose(); }).catch(() => undefined);
+      void Promise.resolve().then(stop).catch(() => undefined);
     }, `im-qqbot.rpc.${endpoint}`);
   });
 }

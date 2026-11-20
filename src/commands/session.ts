@@ -7,6 +7,7 @@
  *
  * 三者都对应底层 dsh agent 能力，分类为 agent（通用能力）。
  */
+import { SessionSwitchConflict } from '../session/session-manager.ts';
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer } from '../shared/index.ts';
 
@@ -17,9 +18,13 @@ export function newCommand({ manager }: CommandDeps): CategorizedCommand {
     category: 'agent',
     scope: 'all',
     description: '开始新会话（清空上下文）',
-    handler: (cmdCtx) => {
+    handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
-      void manager.remove(scope, peerId);
+      try { await manager.remove(scope, peerId); }
+      catch (error) {
+        if (error instanceof SessionSwitchConflict) return error.message;
+        throw error;
+      }
       return '已开启新会话 ✓';
     },
   };
@@ -81,7 +86,7 @@ export function compactCommand({ manager }: CommandDeps): CategorizedCommand {
         case 'busy':
           return '正在生成中，无法压缩';
         case 'archived':
-          return '当前会话已归档，无法压缩。请在 DSH 中取消归档，或发送 /new 创建新会话。';
+          return '当前会话已归档，无法压缩。请发送 /unarchive 取消归档，或发送 /new 创建新会话。';
         case 'unavailable':
           return '压缩能力不可用（当前会话的 agent preset 未加载 compaction 服务）';
         default:

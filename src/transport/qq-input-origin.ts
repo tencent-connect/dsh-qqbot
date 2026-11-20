@@ -10,6 +10,9 @@
  * - TTL 与条数上限只是兜底，防止丢失 turn/end 时无界增长。
  */
 
+import { deliveryKey, type DeliveryLedger, type InputReceipt } from './delivery-ledger.ts';
+import type { ReplyTarget } from '../types.ts';
+
 /** 兜底 TTL 下限：至少覆盖一次默认处理超时 */
 const MIN_TTL_MS = 30 * 60 * 1000;
 /** TTL 相对处理超时的倍数：排队 + 处理都要覆盖到 */
@@ -17,6 +20,7 @@ const TTL_PROCESSING_FACTOR = 2;
 const DEFAULT_MAX_ENTRIES = 4096;
 
 export interface QqInputRegistryOptions {
+  ledger?: DeliveryLedger;
   /** 登记存活时长(ms)；缺省 {@link MIN_TTL_MS} */
   ttlMs?: number;
   /** 最多保留的登记条数，超出按登记先后淘汰 */
@@ -32,12 +36,15 @@ export function inputOriginTtlMs(processingTimeoutMs: number): number {
 }
 
 export class QqInputRegistry {
+  public readonly ledger: DeliveryLedger | undefined;
   private readonly entries = new Map<string, number>();
+  private readonly backgrounds = new Map<string, { sessionId: string; contentHash: string; consume: () => void }>();
   private readonly ttlMs: number;
   private readonly maxEntries: number;
   private readonly now: () => number;
 
   public constructor(options: QqInputRegistryOptions = {}) {
+    this.ledger = options.ledger;
     this.ttlMs = options.ttlMs ?? MIN_TTL_MS;
     this.maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_MAX_ENTRIES);
     this.now = options.now ?? Date.now;
@@ -49,6 +56,25 @@ export class QqInputRegistry {
     this.entries.delete(messageId);
     this.entries.set(messageId, this.now() + this.ttlMs);
     this.evictOverflow();
+  }
+
+  public trackBackground(messageId: string, sessionId: string, contentHash: string, consume: () => void): () => void {
+    this.backgrounds.set(messageId, { sessionId, contentHash, consume });
+    return () => { this.backgrounds.delete(messageId); };
+  }
+
+  public admitBackground(sessionId: string, messageId: string, content: unknown): void {
+    // Steering discards the receipt, and the original content can still reach the model.
+    const pending = this.backgrounds.get(messageId);
+    if (pending?.sessionId !== sessionId || pending.contentHash !== deliveryKey(content)) return;
+    this.backgrounds.delete(messageId);
+    pending.consume();
+  }
+
+  public claim(messageId: string, sessionId: string, content: unknown, turn: number, peer: ReplyTarget): InputReceipt | undefined {
+    // A restored queue item could have been edited while the gateway was down.
+    // Require this gateway to have observed its QQ ingress and any live discards.
+    return this.has(messageId) ? this.ledger?.claimInput(messageId, sessionId, content, turn, peer) : undefined;
   }
 
   /** 是否为本插件登记过且未过期的消息。不删除登记。 */

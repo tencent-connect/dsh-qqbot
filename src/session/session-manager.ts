@@ -14,16 +14,18 @@ import { installQQPrompt, type QQPromptHandle } from '../prompt/install.ts';
  * 支持 agent-presets 系统：通过 setup hook 在 create/resume 时
  * 挂载 preset（工具集、prompt sections 等），实现场景化配置。
  */
-import { legacyDerivedSessionId, mintSessionId } from './session-id.ts';
+import { mintSessionId } from './session-id.ts';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import type { PrefsStore } from '../model/prefs-store.ts';
 import { createHostAdapter, type HostAdapter } from '../host/adapter.ts';
-import { mkdirSync } from 'node:fs';
-import { resolveAgentCwd } from '../shared/dirs.ts';
+import { mkdirSync, statSync } from 'node:fs';
+import { resolveAgentCwd, resolveRobotWorkspace } from '../shared/dirs.ts';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
-import type { ModelRoute, ModelEntry } from '../model/types.ts';
+import type { ModelRoute, ModelEntry, ModelSelection } from '../model/types.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
@@ -44,6 +46,16 @@ import type {
   UnarchiveOutcome,
 } from './types.ts';
 import { SessionArchivedError, classifySessionError } from './errors.ts';
+
+export class SessionSwitchConflict extends Error {}
+export class ReasoningEffortError extends Error {}
+
+export interface PeerAgentSettings {
+  read(key: string): WorkbenchAgentSettings | undefined;
+  update(key: string, patch: Partial<WorkbenchAgentSettings>): boolean;
+  defaults(): WorkbenchAgentSettings;
+  constrain?(agent: DshAgent, key: string): Promise<void>;
+}
 
 /** ManualCompactionError 各 code 的友好提示 */
 const COMPACTION_ERROR_HINTS: Record<string, string> = {
@@ -87,6 +99,9 @@ export class SessionManager {
    * 后写入 sessions 的覆盖前者且前者无人 dispose（泄漏）。
    */
   private inflight = new Map<string, Promise<SessionRecord>>();
+  private readonly switching = new Map<string, Promise<string>>();
+  private readonly rebuilding = new Set<string>();
+  private active = true;
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -104,14 +119,22 @@ export class SessionManager {
     agents: DshAgentRegistry,
     config: ImQQBotConfig,
     logger: Logger,
+    prefs?: PrefsStore,
+    private readonly peerSettings?: PeerAgentSettings,
   ) {
     this.ctx = ctx;
     this.agents = agents;
     this.config = config;
     this.logger = logger;
-    this.host = createHostAdapter(ctx, logger);
+    const robotWorkspace = resolveRobotWorkspace(config.appId);
+    const legacyWorkspace = resolveAgentCwd(undefined);
+    this.host = createHostAdapter(ctx, logger, cwd => {
+      if (cwd === robotWorkspace) return `QQBot · ${config.appId}`;
+      if (cwd === legacyWorkspace) return `QQBot · ${config.appId}（旧默认）`;
+      return undefined;
+    });
     this.logger.info(`host adapter capabilities: ${this.host.capabilities.join(', ')}`);
-    this.modelResolver = new ModelResolver(ctx, config, logger);
+    this.modelResolver = new ModelResolver(ctx, config, logger, prefs);
 
     this.evictor = new IdleEvictor(
       this.sessions,
@@ -119,12 +142,10 @@ export class SessionManager {
       (key, record) => {
         this.logger.info(`evicting idle session: key=${key}`);
         this.sessions.delete(key);
+        this.cancelPendingInteractions(key);
         this.releasePrompt(record.agent);
         record.agent.cancel({ kind: 'user' });
         void record.handle.dispose().catch(() => {});
-        // 回收会话时统一清理其待答问题/待批审批，避免 pending 悬挂泄漏
-        this.questionChannel?.cancelPending(key);
-        this.approvalChannel?.cancelPending(key);
       },
     );
 
@@ -137,14 +158,18 @@ export class SessionManager {
    * 在 agent.ctx 上安装 QQ prompt（幂等、fail-soft）：失败仅 warn，不打断会话建立。
    * TODO(split-2): personaCard / turnContext 由 inbound 接线，当前恒空。
    */
-  private attachPrompt(agent: DshAgent, scope: ChatScope): void {
+  private attachPrompt(agent: DshAgent, scope: ChatScope, key: string): void {
     if (this.promptHandles.has(agent)) return;
     if (!agent.ctx.get?.('systemPrompt')) return;
     try {
       this.promptHandles.set(agent, installQQPrompt(agent.ctx, {
         scope,
         personaCard: () => '',
-        extraPrompts: () => ({ group: this.config.groupPrompt, direct: this.config.directPrompt }),
+        extraPrompts: () => {
+          const settings = this.peerSettings?.read(key);
+          return settings ? { group: settings.groupPrompt, direct: settings.directPrompt }
+            : { group: this.config.groupPrompt, direct: this.config.directPrompt };
+        },
       }));
     } catch (err) {
       this.logger.warn(`qq prompt install failed (session keeps working without it): ${errorText(err)}`);
@@ -174,18 +199,106 @@ export class SessionManager {
     }
   }
 
-  /**
-   * 从 session 持久化 header 读 session 当初的 preset（started 锁定语义）。
-   * 读不到（服务缺失 / session 不存在 / 未记录 agentPreset）返回 undefined。
-   */
-  private async resolvePersistedPreset(sessionId: string): Promise<string | undefined> {
-    return (await this.host.sessionHeader(sessionId))?.agentPreset;
-  }
-
   // ── 模型相关（委托给 ModelResolver） ──
 
   getEffectiveModel(scope: ChatScope, peerId: string): ModelRoute | undefined {
-    return this.modelResolver.getEffectiveRoute(this.sessionKey(scope, peerId));
+    const key = this.sessionKey(scope, peerId);
+    return this.sessions.get(key)?.agent.model?.current?.() ?? this.configuredRoute(key);
+  }
+
+  private configuredRoute(key: string, settings = this.peerSettings?.read(key)): ModelSelection | undefined {
+    if (!settings) return this.modelResolver.getEffectiveRoute(key);
+    const route = settings.model ?? this.modelResolver.resolveDefault(false);
+    return { ...route, ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}) };
+  }
+
+  async reasoningSelection(scope: ChatScope, peerId: string): Promise<{
+    target: 'current' | 'next'; selection?: ModelSelection;
+  }> {
+    const key = this.sessionKey(scope, peerId);
+    const id = this.currentSessionId(key);
+    if (!id) return { target: 'next', selection: this.configuredRoute(key) };
+    this.assertBindingOwner(key, id, true);
+    const agent = this.boundAgent(key, id);
+    if (agent) return { target: 'current', selection: agent.model?.current?.() };
+    const exists = await this.host.sessionExists(id);
+    if (this.currentSessionId(key) !== id) throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    const live = this.boundAgent(key, id);
+    if (live) return { target: 'current', selection: live.model?.current?.() };
+    if (exists === false) {
+      return { target: 'next', selection: this.configuredRoute(key) };
+    }
+    const selection = await this.host.storedModelSelection(id);
+    if (this.currentSessionId(key) !== id) throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    return { target: 'current', selection };
+  }
+
+  resolveReasoning(route: ModelRoute) {
+    return this.modelResolver.resolveReasoning(route);
+  }
+
+  async setReasoningEffort(options: {
+    target: ReplyTarget;
+    senderId: string;
+    effort: string;
+    assertAllowed: () => void;
+  }): Promise<string> {
+    const { target, senderId, effort, assertAllowed } = options;
+    const { scope, targetId: peerId } = target;
+    const key = this.sessionKey(scope, peerId);
+    const id = this.currentSessionId(key);
+    const assertCurrent = () => {
+      this.assertActive();
+      assertAllowed();
+      if (this.sessionChangePending(scope, peerId) || this.currentSessionId(key) !== id) {
+        throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+      }
+    };
+    const missing = () => new ReasoningEffortError('当前还没有 Session，请先发一条普通消息再设置推理强度。');
+    assertCurrent();
+    if (!id) throw missing();
+    this.assertBindingOwner(key, id, true);
+    this.assertNotArchived(id);
+    let agent = this.boundAgent(key, id);
+    if (!agent) {
+      const exists = await this.host.sessionExists(id);
+      assertCurrent();
+      if (exists === false) throw missing();
+      agent = (await this.getOrCreate(scope, peerId, senderId, target, id)).agent;
+    }
+    const model = agent.model;
+    const selection = model?.current?.();
+    if (!model || !selection) throw new ReasoningEffortError('当前宿主无法在原 Session 中调整推理强度。');
+    const assertIdle = () => {
+      if (agent.status !== 'idle') throw new ReasoningEffortError('当前正在生成，请等本轮结束后再调整推理强度。');
+    };
+    assertIdle();
+    const { provider, model: modelId } = selection;
+    const reasoning = await this.resolveReasoning(selection);
+    assertCurrent();
+    this.assertBindingOwner(key, id, true);
+    this.assertNotArchived(id);
+    assertIdle();
+    const current = model.current?.();
+    if (agent !== this.boundAgent(key, id) || current?.provider !== provider || current.model !== modelId
+      || current.reasoningEffort !== selection.reasoningEffort) {
+      throw new SessionSwitchConflict('当前模型选择已变化，请重试。');
+    }
+    const supported = reasoning?.efforts.map(item => item.id) ?? [];
+    if (effort !== 'default' && !supported.some(id => id === effort)) {
+      const message = supported.length > 0 ? `可用档位：${supported.join('、')}。也可以使用 /effort default。`
+        : '当前模型没有可选推理档位。';
+      throw new ReasoningEffortError(message);
+    }
+    if (effort !== 'default' || current.reasoningEffort !== undefined) {
+      model.select({ provider, model: modelId, ...(effort === 'default' ? {} : { reasoningEffort: effort }) });
+    }
+    return effort === 'default' ? `默认${reasoning?.defaultEffort ? `（${reasoning.defaultEffort}）` : ''}` : effort;
+  }
+
+  replyOptions(sessionId: string): Pick<WorkbenchAgentSettings, 'streaming' | 'showToolResults'> {
+    const target = this.deliveryAddress(sessionId);
+    return (target && this.peerSettings?.read(this.sessionKey(target.scope, target.targetId))) ?? this.config;
   }
 
   /**
@@ -197,6 +310,8 @@ export class SessionManager {
 
   /** 按 sessionKey 解析生效 preset */
   private getEffectivePresetByKey(key: string): string | undefined {
+    const settings = this.peerSettings?.read(key);
+    if (settings) return settings.preset || undefined;
     return this.modelResolver.getPreset(key) ?? this.config.preset;
   }
 
@@ -218,19 +333,38 @@ export class SessionManager {
   /**
    * 切换模型（fork + 重建会话，保留历史）
    */
-  async setModelOverride(scope: ChatScope, peerId: string, route: ModelRoute): Promise<void> {
+  async setModelOverride(
+    scope: ChatScope,
+    peerId: string,
+    route: ModelRoute,
+    revive?: { senderId: string; replyTarget: ReplyTarget },
+  ): Promise<void> {
+    this.assertActive();
     const key = this.sessionKey(scope, peerId);
 
-    this.modelResolver.setOverride(key, route);
-
-    const record = this.sessions.get(key);
-    if (!record) {
-      this.logger.info(`model pref saved (no active session): key=${key} → ${route.provider}/${route.model}`);
-      return;
+    if (this.sessionChangePending(scope, peerId)) {
+      throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
     }
 
-    await this.rebuildSession(record, { route });
-    this.logger.info(`model switched via fork: key=${key} → ${route.provider}/${route.model}`);
+    const record = this.sessions.get(key);
+    this.rebuilding.add(key);
+    try {
+      let restored: SessionRecord | undefined;
+      if (!record && revive) {
+        const id = this.currentSessionId(key);
+        if (id && (this.agents.get(SessionId(id)) || await this.host.sessionExists(id))) {
+          restored = await this.getOrCreate(scope, peerId, revive.senderId, revive.replyTarget);
+          if (restored.sessionId !== id) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+          restored.agent.model?.select(route);
+        }
+      }
+      const saved = this.peerSettings?.update(key, { model: route, reasoningEffort: '' });
+      if (!saved || (restored && !restored.agent.model)) this.modelResolver.setOverride(key, route);
+      if (record) await this.rebuildSession(record, { route });
+      else if (restored && !restored.agent.model) await this.rebuildSession(restored, { route });
+    } finally {
+      this.rebuilding.delete(key);
+    }
   }
 
   /**
@@ -256,7 +390,7 @@ export class SessionManager {
     }
 
     // 2. 持久化 per-peer 覆盖（新会话生效）
-    this.modelResolver.setPreset(key, presetId);
+    if (!this.peerSettings?.update(key, { preset: presetId })) this.modelResolver.setPreset(key, presetId);
 
     const hasActive = this.sessions.has(key);
     this.logger.info(
@@ -270,7 +404,7 @@ export class SessionManager {
    */
   async clearPresetOverride(scope: ChatScope, peerId: string): Promise<PresetSwitchOutcome> {
     const key = this.sessionKey(scope, peerId);
-    this.modelResolver.clearPreset(key);
+    if (!this.peerSettings?.update(key, { preset: this.peerSettings.defaults().preset })) this.modelResolver.clearPreset(key);
     this.logger.info(`preset pref cleared: key=${key} (next session applies)`);
     return { ok: true };
   }
@@ -294,6 +428,7 @@ export class SessionManager {
     if (boundary === undefined) {
       this.logger.warn(`fork unavailable (no completed turn), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.cancelPendingInteractions(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
@@ -301,9 +436,12 @@ export class SessionManager {
     }
 
     const seed = await this.host.buildForkSeed(events, boundary);
+    this.assertActive();
+    if (this.sessions.get(key) !== record) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
     if (seed === undefined) {
       this.logger.warn(`fork seed unavailable (old host), fallback to dispose: key=${key}`);
       this.sessions.delete(key);
+      this.cancelPendingInteractions(key);
       this.releasePrompt(record.agent);
       record.agent.cancel({ kind: 'user' });
       await record.handle.dispose().catch(() => {});
@@ -311,29 +449,43 @@ export class SessionManager {
     }
 
     const childId = SessionId(mintSessionId());
-    const effectiveRoute = options.route ?? this.modelResolver.getEffectiveRoute(key);
-    const composed = await this.composePreset(this.getEffectivePresetByKey(key));
+    const effectiveRoute = options.route ?? this.configuredRoute(key);
+    const header = await this.host.sessionHeader(record.sessionId);
+    const cwd = header?.cwd ?? this.workspaceDir();
+    const composed = await this.composePreset(header?.agentPreset ?? record.agentPreset ?? this.getEffectivePresetByKey(key));
     const created = await this.agents.create({
       sessionId: childId,
       seed,
       inheritedEventCount: boundary + 1,
       meta: {
-        cwd: this.workspaceDir(),
+        cwd,
         isSeeded: true,
         // 旧版宿主的 delivery 豁免要求 parentSession，新版忽略——都传
         parentSession: record.sessionId,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
       },
       ...(effectiveRoute ? { agentOptions: effectiveRoute } : {}),
-      ...(composed.setup ? { setup: composed.setup } : {}),
+      setup: async (ctx, agent) => {
+        await composed.setup?.(ctx, agent);
+        if (effectiveRoute) agent?.model?.select(effectiveRoute);
+        if (agent) await this.peerSettings?.constrain?.(agent, key);
+      },
     });
 
-    this.modelResolver.setSessionId(key, childId);
+    try {
+      this.assertActive();
+      if (this.sessions.get(key) !== record) throw new SessionSwitchConflict('当前 Session 已变化，请重试。');
+      this.modelResolver.setSessionId(key, childId, { durable: true });
+    } catch (error) {
+      await created.dispose().catch(() => {});
+      throw error;
+    }
 
     const oldHandle = record.handle;
     const oldAgent = record.agent;
+    this.cancelPendingInteractions(key);
     record.sessionId = childId;
-    this.attachPrompt(created.agent, record.scope);
+    this.attachPrompt(created.agent, record.scope, key);
     record.agent = created.agent;
     record.handle = created;
     record.agentPreset = composed.agentPreset;
@@ -341,12 +493,16 @@ export class SessionManager {
 
     this.releasePrompt(oldAgent);
     void oldHandle.dispose().catch(() => {});
+    void this.host.attachSessionToWorkspace(childId, cwd);
     this.logger.info(`session rebuilt via fork: key=${key} preset=${composed.agentPreset ?? 'none'} sessionId=${childId}`);
   }
 
   clearModelOverride(scope: ChatScope, peerId: string): void {
     const key = this.sessionKey(scope, peerId);
-    this.modelResolver.clearOverride(key);
+    if (this.peerSettings) {
+      const { model, reasoningEffort } = this.peerSettings.defaults();
+      if (!this.peerSettings.update(key, { model, reasoningEffort })) this.modelResolver.clearOverride(key);
+    } else this.modelResolver.clearOverride(key);
     this.modelResolver.clearSessionId(key);
   }
 
@@ -364,18 +520,25 @@ export class SessionManager {
     return this.sessions.get(this.sessionKey(scope, peerId));
   }
 
-  getStatus(scope: ChatScope, peerId: string): SessionStatus {
-    const record = this.getSessionRecord(scope, peerId);
-    const route = this.getEffectiveModel(scope, peerId);
+  getStatus(scope: ChatScope, peerId: string): SessionStatus | undefined {
+    const key = this.sessionKey(scope, peerId);
+    const record = this.sessions.get(key);
+    const sessionId = this.currentSessionId(key);
+    if (!sessionId) return undefined;
+    this.assertBindingOwner(key, sessionId, true);
+    const agent = this.boundAgent(key, sessionId);
+    if (!agent) return undefined;
+    const inbox = agent.inbox;
 
     return {
-      active: !!record,
-      sessionId: record?.sessionId,
-      provider: route?.provider,
-      model: route?.model,
-      preset: record?.agentPreset,
+      sessionId,
+      selection: agent.model?.current?.() ?? this.configuredRoute(key),
+      running: agent.status === 'running',
+      queued: inbox && inbox.nextTurn.length + inbox.nextStep.filter(message => message.source?.kind === 'user').length,
+      contextOccupancy: this.host.contextOccupancy(agent.session),
+      preset: record?.agentPreset ?? agent.session.header?.agentPreset,
       lastActivity: record?.lastActivity,
-      messageCount: this.countMessages(record),
+      messageCount: this.countMessages(agent),
     };
   }
 
@@ -420,9 +583,8 @@ export class SessionManager {
     return lines.join('\n');
   }
 
-  private countMessages(record: SessionRecord | undefined): number {
-    if (!record) return 0;
-    const events = this.host.sessionEvents(record.agent.session) as readonly SessionEventLike[];
+  private countMessages(agent: DshAgent): number {
+    const events = this.host.sessionEvents(agent.session) as readonly SessionEventLike[];
     if (!events) return 0;
 
     let count = 0;
@@ -441,23 +603,32 @@ export class SessionManager {
   }
 
   /** prefs 命中沿用；miss 返回 0.5.x 派生候选，由 getOrCreate 按 resume 结果迁移或铸造 */
-  private currentSessionId(sessionKey: string): string {
-    return this.modelResolver.getSessionId(sessionKey) ?? legacyDerivedSessionId(sessionKey);
+  private currentSessionId(sessionKey: string): string | undefined {
+    return this.modelResolver.getSessionId(sessionKey) ?? this.modelResolver.legacySessionId(sessionKey);
+  }
+
+  private boundAgent(key: string, sessionId: string): DshAgent | undefined {
+    const record = this.sessions.get(key);
+    return this.agents.get(SessionId(sessionId)) ?? (record?.sessionId === sessionId ? record.agent : undefined);
   }
 
   /** 候选命中后落盘，后续永远走 prefs */
   private persistSessionId(sessionKey: string, sessionId: string): void {
     if (this.modelResolver.getSessionId(sessionKey) !== sessionId) {
-      this.modelResolver.setSessionId(sessionKey, sessionId);
+      this.modelResolver.setSessionId(sessionKey, sessionId, { durable: true });
     }
   }
 
-  private async composePreset(presetId?: string): Promise<PresetComposition> {
+  private async composePreset(presetId?: string, required = false): Promise<PresetComposition> {
     const presets = this.getPresetsService();
-    if (!presets) return {};
+    if (!presets) {
+      if (required) throw new Error('所选 Agent 预设不可用。');
+      return {};
+    }
 
     try {
       const resolved = await presets.resolve(presetId);
+      if (required && resolved.broken !== undefined) throw new Error('所选 Agent 预设不可用。');
       const resolvedId = resolved.id;
       return {
         agentPreset: resolvedId,
@@ -466,10 +637,80 @@ export class SessionManager {
         },
       };
     } catch (err) {
+      if (required) throw err;
       this.logger.warn(
         `im-qqbot: preset ${presetId ?? '(default)'} unavailable: ${err instanceof Error ? err.message : String(err)} — using host composition`,
       );
       return {};
+    }
+  }
+
+  async createAndBindSession(
+    scope: ChatScope,
+    peerId: string,
+    expected: string | null,
+    settings: WorkbenchAgentSettings,
+    assertCurrent: () => void,
+  ): Promise<string> {
+    this.assertActive();
+    const key = this.sessionKey(scope, peerId);
+    const busy = () => new SessionSwitchConflict('此 QQ 会话正在处理任务，请在空闲后新建。');
+    if (this.inflight.has(key) || this.switching.has(key) || this.rebuilding.has(key)) throw busy();
+
+    const previous = this.currentSessionId(key);
+    const previousAgent = () => this.sessions.get(key)?.agent ?? (previous === undefined ? undefined : this.agents.get(previous));
+    if (previousAgent()?.status === 'running') throw busy();
+    const conflict = () => new SessionSwitchConflict('当前 Session 已变化，请刷新后重试。');
+
+    const task = (async () => {
+      const exists = previous === undefined ? false : await this.host.sessionExists(previous);
+      if (exists === undefined) throw new Error('当前宿主无法确认 Session 已保存。');
+      if ((exists ? previous : null) !== expected) throw conflict();
+      this.assertActive();
+      assertCurrent();
+      const id = SessionId(mintSessionId());
+      const { handle, cwd, agentPreset } = await this.createFresh(key, id, settings);
+      try {
+        if (!await this.host.sessionExists(id)) throw new Error('新 Session 未保存，请检查宿主持久化。');
+        if (this.currentSessionId(key) !== previous) throw conflict();
+        if (previousAgent()?.status === 'running') throw busy();
+        this.assertActive();
+        assertCurrent();
+        this.modelResolver.setSessionId(key, id, { durable: true, previous: expected ?? undefined });
+      } catch (error) {
+        await handle.dispose().catch(() => {});
+        throw error;
+      }
+
+      const old = this.sessions.get(key);
+      this.sessions.set(key, {
+        sessionKey: key, sessionId: id, agent: handle.agent, handle,
+        replyTarget: { scope, targetId: peerId }, scope, peerId,
+        lastActivity: Date.now(), agentPreset,
+      });
+      this.cancelPendingInteractions(key);
+      this.attachPrompt(handle.agent, scope, key);
+      if (old) {
+        this.releasePrompt(old.agent);
+        void old.agent.whenIdle().then(() => old.handle.dispose()).catch(() => {});
+      }
+      void this.host.attachSessionToWorkspace(id, cwd);
+      return id;
+    })();
+    this.switching.set(key, task);
+    try { return await task; }
+    finally { this.switching.delete(key); }
+  }
+
+  private assertNotArchived(sessionId: string): void {
+    if (this.isSessionArchived(sessionId)) throw new SessionArchivedError(sessionId);
+  }
+
+  private assertBindingOwner(key: string, sessionId: string, allowUnbound = false): void {
+    const current = this.modelResolver.getSessionId(key);
+    if ((current !== sessionId && !(allowUnbound && current === undefined))
+      || this.modelResolver.hasForeignCurrentBinding(key, sessionId)) {
+      throw new SessionSwitchConflict('QQ 会话绑定存在冲突，请为该对话新建 Session。');
     }
   }
 
@@ -479,18 +720,24 @@ export class SessionManager {
     peerId: string,
     senderId: string,
     replyTarget: ReplyTarget,
+    resumeOnly?: string,
   ): Promise<SessionRecord> {
     const key = this.sessionKey(scope, peerId);
+    while (this.switching.has(key)) {
+      await this.switching.get(key)?.catch(() => {});
+    }
+    this.assertActive();
     const existing = this.sessions.get(key);
-
-    // 归档会话不会跑任何 model step：宿主的 archived-session-gate 在
-    // `agent/pre-step` 直接拒绝，turn 以 `blocked` 收场，且本轮消息被丢弃。
-    // 结果就是用户侧"发了没回应"（本轮没有 assistant/message，也没有 user/message
-    // 可归属）。投递前先判一次，让入站层能给出可操作提示。
-    this.assertSessionNotArchived(existing?.sessionId ?? this.currentSessionId(key));
+    const candidate = existing?.sessionId ?? this.currentSessionId(key);
+    if (resumeOnly !== undefined && candidate !== resumeOnly) {
+      throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+    }
+    if (candidate !== undefined) this.assertNotArchived(candidate);
 
     if (existing) {
+      this.assertBindingOwner(key, existing.sessionId);
       existing.replyTarget = replyTarget;
+      existing.senderId ??= senderId;
       existing.lastActivity = Date.now();
       return existing;
     }
@@ -499,80 +746,136 @@ export class SessionManager {
     const pending = this.inflight.get(key);
     if (pending) {
       const shared = await pending;
+      this.assertActive();
+      this.assertBindingOwner(key, shared.sessionId);
+      this.assertNotArchived(shared.sessionId);
+      if (resumeOnly !== undefined && shared.sessionId !== resumeOnly) {
+        throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+      }
       shared.replyTarget = replyTarget;
       shared.lastActivity = Date.now();
       return shared;
     }
 
-    const task = this.openSession(key, scope, peerId, senderId, replyTarget);
+    const task = this.openSession(key, scope, peerId, senderId, replyTarget, resumeOnly);
     this.inflight.set(key, task);
     try {
-      return await task;
+      const record = await task;
+      this.assertActive();
+      this.assertBindingOwner(key, record.sessionId);
+      this.assertNotArchived(record.sessionId);
+      return record;
     } finally {
       this.inflight.delete(key);
     }
   }
 
-  /** getOrCreate 的实际打开流程（已通过 singleflight 保证同 key 串行） */
+  // A QQ /new can advance the binding while the host is opening a session.
   private async openSession(
     key: string,
     scope: ChatScope,
     peerId: string,
     senderId: string,
     replyTarget: ReplyTarget,
+    resumeOnly?: string,
   ): Promise<SessionRecord> {
-    const route = this.modelResolver.getEffectiveRoute(key);
+    for (;;) {
+      this.assertActive();
+      const binding = this.modelResolver.getSessionId(key);
+      if (resumeOnly !== undefined && this.currentSessionId(key) !== resumeOnly) {
+        throw new SessionSwitchConflict('当前 Session 已切换，请重试。');
+      }
+      try {
+        const record = await this.openSessionAttempt(key, binding, scope, peerId, senderId, replyTarget, resumeOnly !== undefined);
+        if (record) return record;
+      } catch (error) {
+        this.assertActive();
+        if (this.modelResolver.getSessionId(key) === binding) throw error;
+      }
+    }
+  }
+
+  private async openSessionAttempt(
+    key: string,
+    binding: string | undefined,
+    scope: ChatScope,
+    peerId: string,
+    senderId: string,
+    replyTarget: ReplyTarget,
+    resumeOnly: boolean,
+  ): Promise<SessionRecord | undefined> {
+    const settings = this.peerSettings?.read(key);
+    const route = this.configuredRoute(key, settings);
     // prefs 命中 = 已知存量会话；miss 时取 0.5.x 派生 id 仅作存量探测候选，不用于新建
-    const candidateIsLegacy = this.modelResolver.getSessionId(key) === undefined;
-    let sessionId = SessionId(this.currentSessionId(key));
+    const candidate = binding ?? this.modelResolver.legacySessionId(key);
+    let sessionId = SessionId(candidate ?? mintSessionId());
+    this.assertBindingOwner(key, sessionId, binding === undefined);
     this.logger.info(`getOrCreate: key=${key} route=${route ? `${route.provider}/${route.model}` : 'host-default'} sessionId=${sessionId}`);
 
     let agent: DshAgent;
     let handle: DshAgentHandle | undefined;
-    let agentPreset: string | undefined;
+    const header = candidate === undefined ? undefined : await this.host.sessionHeader(sessionId);
+    this.assertActive();
+    this.assertBindingOwner(key, sessionId, binding === undefined);
+    let agentPreset = header?.agentPreset;
+    let cwd = header?.cwd;
 
-    const live = this.agents.get(sessionId);
+    const live = candidate === undefined ? undefined : this.agents.get(sessionId);
     if (live) {
       agent = live;
-      this.persistSessionId(key, sessionId);
       this.logger.info(`reusing live agent: key=${key}`);
     } else {
-      // preset 只解析一次：resume/create 共用同一组合，避免重复 resolve/mount 目录。
-      // 优先 session 当初的 preset（started 锁定语义），无则用当前 effective preset。
-      const presetId = (await this.resolvePersistedPreset(sessionId)) ?? this.getEffectivePresetByKey(key);
+      const presetId = header ? (header.agentPreset ?? this.config.preset) : this.getEffectivePresetByKey(key);
       const composed = await this.composePreset(presetId);
+      this.assertActive();
+      this.assertBindingOwner(key, sessionId, binding === undefined);
       agentPreset = composed.agentPreset;
-      try {
-        const resumeRoute = this.modelResolver.getResumeRoute(key);
-        const resumed = await this.agents.resume({
-          resumeSessionId: sessionId,
-          ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
-        });
-        agent = resumed.agent;
-        handle = resumed;
-        // 0.5.x 迁移：候选命中老会话，沿用并落盘
-        this.persistSessionId(key, sessionId);
-        this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
-      } catch (err) {
-        if (!(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
-        sessionId = this.resolveCreateId(key, sessionId, candidateIsLegacy);
-        const created = await this.agents.create({
-          sessionId,
-          meta: {
-            cwd: this.workspaceDir(),
-            ...(agentPreset ? { agentPreset } : {}),
-          },
-          ...(route ? { agentOptions: route } : {}),
-          ...(composed.setup ? { setup: composed.setup } : {}),
-        });
-        agent = created.agent;
-        handle = created;
-        this.persistSessionId(key, sessionId);
+      if (candidate !== undefined) {
+        try {
+          const resumeRoute = this.modelResolver.getResumeRoute(key);
+          handle = await this.agents.resume({
+            resumeSessionId: sessionId,
+            ...(resumeRoute ? { agentOptions: resumeRoute } : {}),
+            ...(composed.setup || this.peerSettings?.constrain ? { setup: async (ctx: Context, resumedAgent?: DshAgent) => {
+              await composed.setup?.(ctx, resumedAgent);
+              if (resumedAgent) await this.peerSettings?.constrain?.(resumedAgent, key);
+            } } : {}),
+          });
+          this.logger.info(`resumed session: key=${key} preset=${agentPreset ?? 'none'} route=${resumeRoute ? `${resumeRoute.provider}/${resumeRoute.model}` : 'session-own'}`);
+        } catch (err) {
+          if (resumeOnly || !(await this.mayCreateAfterResumeFailure(key, sessionId, err))) throw err;
+          if (binding === undefined) sessionId = SessionId(mintSessionId());
+        }
+      }
+      if (!handle) {
+        this.assertActive();
+        if (this.modelResolver.getSessionId(key) !== binding) return undefined;
+        this.assertBindingOwner(key, sessionId, binding === undefined);
+        const created = await this.createFresh(key, sessionId, settings);
+        agentPreset = created.agentPreset;
+        cwd = created.cwd;
+        handle = created.handle;
         this.logger.info(`created new session: key=${key} sessionId=${sessionId} preset=${agentPreset ?? 'none'}`);
       }
+      agent = handle.agent;
     }
 
+    // The host and tool-policy setup above can both finish after a reset or reload.
+    try {
+      this.assertBindingOwner(key, sessionId, binding === undefined);
+      await this.peerSettings?.constrain?.(agent, key);
+      this.assertActive();
+      if (this.modelResolver.getSessionId(key) !== binding) {
+        await handle?.dispose().catch(() => {});
+        return undefined;
+      }
+      this.assertBindingOwner(key, sessionId, binding === undefined);
+      this.assertNotArchived(sessionId);
+      this.persistSessionId(key, sessionId);
+    } catch (error) {
+      await handle?.dispose().catch(() => {});
+      throw error;
+    }
     const record: SessionRecord = {
       sessionKey: key,
       sessionId,
@@ -586,7 +889,7 @@ export class SessionManager {
       agentPreset,
     };
 
-    this.attachPrompt(agent, scope);
+    this.attachPrompt(agent, scope, key);
     this.sessions.set(key, record);
 
     // 挂载到对应工作区（侧边栏可见性）；fail-soft、异步执行，不阻塞消息处理。
@@ -594,9 +897,47 @@ export class SessionManager {
     // 闲置回收后会从侧边栏消失（详见 host/adapter.ts 的 attachSessionToWorkspace）。
     // cwd 必须与 meta.cwd 同源（workspaceDir()），否则 attachSession 的
     // header.cwd 校验（realpath 后须等于工作区 path）会失败。
-    void this.host.attachSessionToWorkspace(sessionId, this.workspaceDir());
+    void this.host.attachSessionToWorkspace(sessionId, cwd ?? this.workspaceDir());
 
     return record;
+  }
+
+  private async createFresh(key: string, sessionId: string, settings = this.peerSettings?.read(key)) {
+    const route = this.configuredRoute(key, settings);
+    const placementPreset = settings?.preset;
+    const inheritedPreset = this.modelResolver.getPreset(key) ?? this.config.preset;
+    const required = !!placementPreset && placementPreset !== inheritedPreset;
+    const composed = await this.composePreset(placementPreset || this.getEffectivePresetByKey(key), required);
+    const selectedCwd = settings?.cwd;
+    const usesDefault = !selectedCwd || selectedCwd === resolveAgentCwd(this.config.cwd);
+    const cwd = usesDefault ? this.workspaceDir() : selectedCwd;
+    if (!usesDefault && !statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error('所选工作区目录不可用。');
+    }
+    const permission = settings?.permission;
+    const permissions = permission ? this.host.globalService('permissionPresets') as {
+      catalog(): { options: readonly { value: string }[] };
+      set(session: unknown, permission: string): void;
+    } | undefined : undefined;
+    if (permission && !permissions?.catalog().options.some(option => option.value === permission)) {
+      throw new Error('所选 DSH 执行权限不可用。');
+    }
+    const handle = await this.agents.create({
+      sessionId,
+      meta: { cwd, ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}) },
+      ...(route ? { agentOptions: route } : {}),
+      ...(settings || composed.setup ? { setup: async (ctx: Context, agent?: DshAgent) => {
+        await composed.setup?.(ctx, agent);
+        if (settings && route) agent?.model?.select(route);
+        if (permissions && permission) {
+          const session = agent?.session ?? (this.host.globalService('sessions') as { get(id: string): unknown } | undefined)?.get(sessionId);
+          if (!session) throw new Error('无法为新 Session 应用执行权限。');
+          permissions.set(session, permission);
+        }
+        if (agent) await this.peerSettings?.constrain?.(agent, key);
+      } } : {}),
+    });
+    return { handle, cwd, agentPreset: composed.agentPreset };
   }
 
   /**
@@ -629,33 +970,10 @@ export class SessionManager {
     return true;
   }
 
-  /**
-   * 确认候选会话缺失后决定用哪个 id 新建。
-   *
-   * - resume 等待期间 prefs 被并发改写（`/new` 换新会话）：采用 prefs 的最新 id，
-   *   否则内存与 prefs 指向不同会话，重启后用户被切走；
-   * - 候选来自 0.5.x 确定性派生：一律铸造新 id，确定性 id 不进入新建路径；
-   * - 候选来自 prefs 且确认缺失：沿用该 id 新建，prefs 无需改写。
-   */
-  private resolveCreateId(key: string, candidate: SessionId, candidateIsLegacy: boolean): SessionId {
-    const latest = this.modelResolver.getSessionId(key);
-    if (latest !== undefined && latest !== candidate) {
-      this.logger.info(`adopting concurrently written session id: key=${key} sessionId=${latest}`);
-      return SessionId(latest);
-    }
-    if (candidateIsLegacy) {
-      const minted = SessionId(mintSessionId());
-      this.logger.info(`migrated to minted session id: key=${key} sessionId=${minted}`);
-      return minted;
-    }
-    return candidate;
-  }
-
   findBySessionId(sessionId: string): SessionRecord | undefined {
-    for (const record of this.sessions.values()) {
-      if (record.sessionId === sessionId) return record;
-    }
-    return undefined;
+    const key = this.modelResolver.findUniqueCurrentSessionKey(sessionId);
+    const record = key && this.sessions.get(key);
+    return record && record.sessionId === sessionId ? record : undefined;
   }
 
   /**
@@ -676,9 +994,11 @@ export class SessionManager {
    */
   async unarchive(scope: ChatScope, peerId: string): Promise<UnarchiveOutcome> {
     const key = this.sessionKey(scope, peerId);
-    const sessionId = this.sessions.get(key)?.sessionId ?? this.modelResolver.getSessionId(key);
+    if (!this.active || this.switching.has(key)) return 'failed';
+    const sessionId = this.modelResolver.getSessionId(key);
     if (sessionId === undefined) return 'no-session';
-    if (!this.host.isSessionArchived(sessionId)) return 'not-archived';
+    if (this.modelResolver.hasForeignCurrentBinding(key, sessionId)) return 'failed';
+    if (!this.isSessionArchived(sessionId)) return 'not-archived';
     if (!await this.host.unarchiveSession(sessionId)) {
       this.logger.warn(`unarchive failed (host capability missing or call failed): sessionId=${sessionId}`);
       return 'failed';
@@ -688,32 +1008,17 @@ export class SessionManager {
   }
 
   /**
-   * 归档会话的 followup 会被宿主的 archived-session-gate 在 `agent/pre-step` 拒绝：
-   * turn 以 `blocked` 结束、本轮消息被丢弃，模型一次都没跑。与其让用户等到超时
-   * 或者完全没回应，这里直接抛 {@link SessionArchivedError}，由入站层转成可操作提示。
-   *
-   * 不自动反归档：归档是用户/宿主的显式状态，插件不替它反转；恢复入口交给
-   * 用户（`/unarchive`、DSH 里取消归档，或 `/new` 换新会话）。
-   */
-  private assertSessionNotArchived(sessionId: string): void {
-    if (!this.host.isSessionArchived(sessionId)) return;
-    this.logger.warn(`session is archived, refusing to deliver: sessionId=${sessionId}`);
-    throw new SessionArchivedError(sessionId);
-  }
-
-  /**
    * 这条 session 对应的 QQ 地址。只读：不把宿主里的 agent 收进会话表，也不拥有它的生命周期。
    * 内存里有记录时沿用它的 replyTarget（含 msgId）；否则按 prefs 的 sessionId 反查对端。
    */
   deliveryAddress(sessionId: string): ReplyTarget | undefined {
-    const existing = this.findBySessionId(sessionId);
-    if (existing) return existing.replyTarget;
-
-    const key = this.modelResolver.findSessionKey(sessionId);
-    if (key === undefined || this.sessions.has(key)) return undefined;
+    const key = this.modelResolver.findUniqueCurrentSessionKey(sessionId);
+    if (key === undefined) return undefined;
     const parsed = this.parseSessionKey(key);
     if (parsed === undefined) return undefined;
-    return { scope: parsed.scope, targetId: parsed.peerId };
+    const existing = this.sessions.get(key);
+    if (existing && existing.sessionId !== sessionId) return undefined;
+    return { ...existing?.replyTarget, scope: parsed.scope, targetId: parsed.peerId };
   }
 
   /** `qqbot:${appId}:${scope}:${peerId}` → scope + peer。只认本机器人的 key。 */
@@ -733,13 +1038,37 @@ export class SessionManager {
     return undefined;
   }
 
-  async remove(scope: ChatScope, peerId: string): Promise<void> {
+  sessionChangePending(scope: ChatScope, peerId: string): boolean {
     const key = this.sessionKey(scope, peerId);
+    return this.inflight.has(key) || this.switching.has(key) || this.rebuilding.has(key);
+  }
+
+  async remove(scope: ChatScope, peerId: string): Promise<void> {
+    this.assertActive();
+    const key = this.sessionKey(scope, peerId);
+    const assertNotSwitching = () => {
+      if (this.switching.has(key) || this.rebuilding.has(key)) throw new SessionSwitchConflict('此 QQ 会话正在切换 Session，请稍后重试。');
+    };
+    assertNotSwitching();
+    let previous: string | undefined;
+    if (this.modelResolver.getSessionId(key) === undefined) {
+      const legacy = this.modelResolver.legacySessionId(key);
+      if (legacy !== undefined && await this.host.sessionExists(legacy)) previous = legacy;
+      this.assertActive();
+      assertNotSwitching();
+      // A concurrent resume or reset may already have established the mapping.
+      if (this.modelResolver.getSessionId(key) !== undefined) previous = undefined;
+    }
     const record = this.sessions.get(key);
-    this.modelResolver.setSessionId(key, mintSessionId());
+    try {
+      this.modelResolver.setSessionId(key, mintSessionId(), { durable: true, previous });
+    } catch {
+      throw new SessionSwitchConflict('无法保存新 Session，原会话保持不变，请稍后重试。');
+    }
 
     if (!record) return;
     this.sessions.delete(key);
+    this.cancelPendingInteractions(key);
     this.releasePrompt(record.agent);
     record.agent.cancel({ kind: 'user' });
     await record.handle.dispose().catch(() => {});
@@ -747,12 +1076,9 @@ export class SessionManager {
   }
 
   /** Agent 工作目录：显式配置优先，缺省独立目录 ~/.dsh-qqbot/workspace（不随宿主进程 cwd） */
-  private workspaceCache: string | undefined;
   private workspaceDir(): string {
-    if (this.workspaceCache) return this.workspaceCache;
     const dir = resolveAgentCwd(this.config.cwd);
     mkdirSync(dir, { recursive: true });
-    this.workspaceCache = dir;
     return dir;
   }
 
@@ -782,6 +1108,7 @@ export class SessionManager {
         throw err;
       }
     }
+    if (this.isSessionArchived(record.sessionId)) return { ok: false, reason: 'archived' };
     if (record.agent.status !== 'idle') return { ok: false, reason: 'busy' };
 
     const compaction = (await this.host.serviceFor(record.agent, 'compaction')
@@ -816,13 +1143,29 @@ export class SessionManager {
     }
   }
 
+  deactivate(): void {
+    if (!this.active) return;
+    this.active = false;
+    for (const key of this.sessions.keys()) this.cancelPendingInteractions(key);
+  }
+
+  private cancelPendingInteractions(key: string): void {
+    this.questionChannel?.cancelPending(key);
+    this.approvalChannel?.cancelPending(key);
+  }
+
+  private assertActive(): void {
+    if (!this.active) throw new SessionSwitchConflict('QQ 网关已停用，请稍后重试。');
+  }
+
   async disposeAll(): Promise<void> {
+    this.deactivate();
     this.evictor.dispose();
     const records = [...this.sessions.values()];
     this.sessions.clear();
     for (const record of records) {
       this.releasePrompt(record.agent);
-      record.agent.cancel({ kind: 'user' });
+      record.agent.cancel({ kind: 'user' }, { keepInbox: true });
     }
     await Promise.allSettled(records.map((r) => r.handle.dispose()));
     this.logger.info(`all sessions disposed (count=${records.length})`);

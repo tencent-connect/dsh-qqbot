@@ -58,7 +58,7 @@ function setup(opts?: {
     findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
   } as unknown as SessionManager;
   const outbound = createOutboundHandler(
-    manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer,
+    manager, bot, opts?.config ?? createConfig(), createLogger(), undefined, opts?.deliverer, undefined, async () => true,
   );
   return { outbound, bot, session };
 }
@@ -142,17 +142,20 @@ describe('OutboundRouter.routeStreamFrame', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it('群聊不流式：帧累积后由 assistant/message 静态发送', async () => {
+  it('群聊在轮末发送完整答复', async () => {
     const { outbound, bot } = setup({ record: createRecord(groupTarget) });
 
     outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, { type: 'turn/start', data: { turn: 1 } });
     outbound.routeStreamFrame('sess-qq', delta('a1', 'group reply'));
     await vi.advanceTimersByTimeAsync(200);
 
     outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
       type: 'assistant/message',
-      data: { message: { content: [{ type: 'text', text: 'group reply' }] } },
+      data: { turn: 1, message: { content: [{ type: 'text', text: 'group reply' }] } },
     });
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(bot.openStream).not.toHaveBeenCalled();
@@ -210,13 +213,13 @@ describe('OutboundRouter: deliverables/presented', () => {
       type: 'assistant/message',
       data: { message: { content: [{ type: 'text', text: 'final reply' }] } },
     });
-    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, turnEnd);
+    outbound.routeSessionEvent({ header: { id: 'sess-qq', cwd: '/test/selected-workspace' } }, turnEnd);
     await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
     await Promise.resolve();
 
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/report.xlsx' }]);
+    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/report.xlsx' }], '/test/selected-workspace');
     // 文本先于文件：markdown 发送的调用序在 deliver 之前
     const textOrder = (bot.sendMarkdown as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(textOrder).toBeLessThan(deliver.mock.invocationCallOrder[0]);
@@ -235,7 +238,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     await Promise.resolve();
 
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }]);
+    expect(deliver).toHaveBeenCalledWith(record.replyTarget, [{ path: '/tmp/a.png' }, { path: '/tmp/b.png' }], undefined);
   });
 
   it('assistant/message 在途文本未送达前不投递文件（等待 pending 发送完成）', async () => {
@@ -296,7 +299,7 @@ describe('OutboundRouter: deliverables/presented', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, expect.stringContaining('E_BROKEN'));
+    expect(bot.sendMarkdown).toHaveBeenCalledExactlyOnceWith(c2cTarget, '⚠️ 本轮处理失败，请稍后重试。');
     expect(deliver).toHaveBeenCalledTimes(1);
   });
 
@@ -488,18 +491,20 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
       findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
     } as unknown as SessionManager;
     const config = createConfig(externalTurns ? { proactiveDelivery: { externalTurns } } : undefined);
-    const outbound = createOutboundHandler(manager, bot, config, createLogger());
+    const outbound = createOutboundHandler(manager, bot, config, createLogger(), undefined, undefined, undefined, async () => true);
 
     outbound.routeSessionEvent(sid, { type: 'turn/start', data: { turn: 7 } });
     outbound.routeSessionEvent(sid, externalInput);
     outbound.routeSessionEvent(sid, reply('from desktop'));
+    outbound.routeSessionEvent(sid, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } });
     await vi.advanceTimersByTimeAsync(0);
     return bot;
   }
 
   it.each([
-    ['c2c 默认策略：私聊外部回合主动推送', c2cTarget, undefined, true],
-    ['c2c 默认策略：群聊外部回合不推送', groupTarget, undefined, false],
+    ['默认策略：私聊外部回合主动推送', c2cTarget, undefined, true],
+    ['默认策略：群聊外部回合主动推送', groupTarget, undefined, true],
+    ['c2c：群聊外部回合不推送', groupTarget, 'c2c' as const, false],
     ['all：群聊外部回合也推送', groupTarget, 'all' as const, true],
     ['off：私聊外部回合不推送', c2cTarget, 'off' as const, false],
   ])('%s', async (_name, target, policy, delivered) => {
@@ -545,7 +550,7 @@ describe('OutboundRouter: 主动推送策略与非 QQ 会话', () => {
 
     const pushed = { scope: 'c2c', targetId: 'user1', forceProactive: true };
     expect(bot.sendMarkdown).toHaveBeenCalledWith(pushed, 'scheduled');
-    expect(deliver).toHaveBeenCalledWith(pushed, [{ path: '/tmp/a.png' }]);
+    expect(deliver).toHaveBeenCalledWith(pushed, [{ path: '/tmp/a.png' }], undefined);
   });
 
   it('回合结束释放本回合认领的 QQ 入站登记', () => {
@@ -607,14 +612,14 @@ describe('OutboundRouter: tool/result', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it('工具错误始终发送（即使开关关闭）', async () => {
-    const { outbound, bot } = setup();
+  it('工具错误留在 DSH，即使打开工具结果开关', async () => {
+    const { outbound, bot } = setup({ config: createConfig({ showToolResults: true }) });
 
     outbound.routeSessionEvent(sid, toolCall('call-1'));
     outbound.routeSessionEvent(sid, toolResult('call-1', 'exit code 1', true));
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '❌ 工具 `bash` 执行失败\nexit code 1');
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
   it('未登记过的 callId 不投递（避免重放/迟到结果刷屏）', async () => {
@@ -646,7 +651,7 @@ describe('OutboundRouter: turn/end blocked（归档门禁）', () => {
   const blockedTurnEnd = { type: 'turn/end', data: { turn: 1, reason: { kind: 'blocked' } } };
   const sid = { header: { id: 'sess-qq' } };
 
-  it('归档会话的 blocked 回合回复可操作提示，而不是静默', async () => {
+  it('归档会话的 blocked 回合回复可操作提示', async () => {
     // 归档门禁拒绝的回合没有 user/message，用户侧原本什么都收不到
     const { outbound, bot } = setupWithArchive(true);
 

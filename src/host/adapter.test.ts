@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createHostAdapter, _resetAdapterCache } from './adapter.ts';
+import { createHostAdapter, sessionIdentityReader, _resetAdapterCache } from './adapter.ts';
 
 /** 最小 ctx：可控的 get() */
 function makeCtx(services: Record<string, unknown>) {
@@ -15,6 +15,16 @@ describe('host adapter', () => {
   beforeEach(() => {
     _resetAdapterCache();
     vi.unstubAllGlobals();
+  });
+
+  it('uses the legacy Host metadata list once to validate a batch of upgrade identities', async () => {
+    const list = vi.fn().mockResolvedValue([{ id: 'owned', cwd: '/workspace' }]);
+    const ctx = makeCtx({ sessionPersistence: { list } });
+    const owns = await sessionIdentityReader(ctx);
+    expect(await owns?.('owned')).toBe(true);
+    expect(await owns?.('unavailable')).toBe(false);
+    expect(list).toHaveBeenCalledOnce();
+    expect(await createHostAdapter(ctx).sessionHeader('owned')).toMatchObject({ cwd: '/workspace' });
   });
 
   it('sessionEvents：新宿主 snapshotEvents() 优先', () => {
@@ -103,7 +113,7 @@ describe('host adapter', () => {
   it('sessionExists：服务未注册 → undefined', async () => {
     const adapter = createHostAdapter(makeCtx({}));
     expect(await adapter.sessionExists('s1')).toBeUndefined();
-    expect(adapter.capabilities).toContain('sessionPersistence.stat(不可用，会话存在性判定降级)');
+    expect(adapter.capabilities).toContain('sessionPersistence(unavailable)');
   });
 
   it('sessionExists：服务形态不含 stat → undefined，不让 TypeError 冒出', async () => {
@@ -120,15 +130,15 @@ describe('attachSessionToWorkspace', () => {
     return { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   }
 
-  it('把会话挂载到 cwd 对应的工作区（title=qqbot）', async () => {
+  it('把会话挂载到 cwd 对应的现有或新建工作区', async () => {
     const ws = { path: '/proj', attachSession: vi.fn().mockResolvedValue(undefined) };
     const registry = { create: vi.fn().mockResolvedValue(ws) };
     const logger = makeLogger();
-    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger, () => 'QQBot · robot1');
 
     await adapter.attachSessionToWorkspace('sess-1', '/proj');
 
-    expect(registry.create).toHaveBeenCalledWith('/proj', 'QQBot');
+    expect(registry.create).toHaveBeenCalledWith('/proj', 'QQBot · robot1');
     expect(ws.attachSession).toHaveBeenCalledWith('sess-1');
     expect(logger.warn).not.toHaveBeenCalled();
   });

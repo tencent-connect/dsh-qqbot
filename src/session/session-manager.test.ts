@@ -6,19 +6,24 @@
  * - E3 连带：prefs 损坏导致映射丢失时必须留下可见日志
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { DshAgent, DshAgentHandle, DshAgentRegistry } from './types.ts';
+import type { WorkbenchAgentSettings } from '../shared/workbench-agent-settings.ts';
+import type { ModelSelection } from '../model/types.ts';
+import { ApprovalChannel, type ApprovalRequest } from '../features/approval-channel.ts';
+import { QuestionChannel } from '../features/question-channel.ts';
 
 const env = vi.hoisted(() => ({ home: '' }));
 
 vi.mock('../shared/dirs.ts', () => ({
   get PLUGIN_HOME() { return env.home; },
-  resolveAgentCwd: (cwd: string | undefined) => cwd || `${env.home}/workspace`,
+  resolveAgentCwd: (cwd: string | undefined) => cwd || join(env.home, 'workspace'),
+  resolveRobotWorkspace: (appId: string) => join(env.home, 'robots', appId, 'workspace'),
 }));
 
 const { SessionManager } = await import('./session-manager.ts');
@@ -31,6 +36,10 @@ const KEY = `qqbot:${APP_ID}:c2c:${PEER}`;
 const LEGACY_ID = legacyDerivedSessionId(KEY);
 const MINTED = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REPLY: ReplyTarget = { scope: 'c2c', targetId: PEER, msgId: 'm1' };
+const WORKBENCH_SETTINGS: WorkbenchAgentSettings = {
+  model: { provider: 'p', model: 'm' }, reasoningEffort: '', preset: '', cwd: '', permission: '',
+  groupPrompt: '', directPrompt: '', streaming: false, showToolResults: false,
+};
 
 /** agents.resume 对不存在会话的报错 */
 const notFound = (id: string): Error =>
@@ -131,6 +140,7 @@ function createManagerWithCtx(
   registry: Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>,
   ctx: Context,
   logger: Logger = createLogger(),
+  prefs?: InstanceType<typeof PrefsStore>,
 ) {
   const config = ConfigSchema({
     appId: APP_ID,
@@ -140,7 +150,7 @@ function createManagerWithCtx(
     cwd: join(env.home, 'workspace'),
     sessionIdleTimeout: 0,
   } as ImQQBotConfig);
-  const manager = new SessionManager(ctx, registry as DshAgentRegistry, config, logger);
+  const manager = new SessionManager(ctx, registry as DshAgentRegistry, config, logger, prefs);
   managers.push(manager);
   return manager;
 }
@@ -158,9 +168,227 @@ function createdIds(registry: { create: { mock: { calls: Array<[{ sessionId: str
   return registry.create.mock.calls.map(([options]) => String(options.sessionId));
 }
 
+describe('Session reasoning effort', () => {
+  const route = { provider: 'fixture', model: 'reasoning-model' };
+  const capabilities = { reasoning: { efforts: [{ id: 'low' }, { id: 'high' }], defaultEffort: 'low' } };
+  const change = { target: REPLY, senderId: PEER, assertAllowed: () => {} };
+
+  function reasoningSession({ cold = false } = {}) {
+    const id = 'session-reasoning';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, id);
+    let selection: ModelSelection = route;
+    const select = vi.fn((next: ModelSelection) => { selection = next; });
+    const handle = fakeHandle(id);
+    Object.assign(handle.agent, { model: { current: () => ({ ...selection }), select } });
+    const resolveModelInfo = vi.fn(async () => capabilities);
+    const dispose = vi.fn();
+    const observeSession = vi.fn(async () => ({
+      projections: { values: { modelSelection: { next: { ...route, reasoningEffort: 'high' } } } },
+      [Symbol.dispose]: dispose,
+    }));
+    const services = new Map<string, unknown>([
+      ['llm', { resolveModelInfo }],
+      ['sessionQuery', { observeSession }],
+      ['sessionPersistence', { stat: async (candidate: string) => candidate === id ? { header: {} } : undefined }],
+      ['sessionProjections', { snapshot: () => ({
+        values: { contextPressure: { projectedTokens: 300, pressureTokens: 100, contextWindow: 1000 } },
+      }) }],
+    ]);
+    const { registry } = createRegistry(async () => handle);
+    const manager = createManagerWithCtx({
+      ...registry, get: candidate => !cold && candidate === id ? handle.agent : undefined,
+    }, { get: name => services.get(name) } as Context, createLogger(), prefs);
+    return { id, manager, select, registry, resolveModelInfo, dispose, observeSession, agent: handle.agent };
+  }
+
+  it('sets and resets the native choice for the same Session, validating the exact model', async () => {
+    const { id, manager, select, registry, resolveModelInfo } = reasoningSession();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'max' })).rejects.toThrow('low、high');
+    expect(select).not.toHaveBeenCalled();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).resolves.toBe('high');
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'current', selection: { ...route, reasoningEffort: 'high' },
+    });
+    await expect(manager.setReasoningEffort({ ...change, effort: 'default' })).resolves.toBe('默认（low）');
+    expect(select.mock.calls).toEqual([[{ ...route, reasoningEffort: 'high' }], [route]]);
+    expect(resolveModelInfo).toHaveBeenLastCalledWith(route.provider, route.model);
+    expect(persistedId()).toBe(id);
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('shows new Session defaults without creating a Session or writing a choice', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const manager = createManager(registry);
+    await manager.remove('c2c', PEER);
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'next', selection: expect.objectContaining({ provider: 'p', model: 'm' }),
+    });
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).rejects.toThrow('先发一条普通消息');
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('reads a cold Session without activating it and resumes only that ID for a write', async () => {
+    const { id, manager, registry, dispose, observeSession } = reasoningSession({ cold: true });
+    await expect(manager.reasoningSelection('c2c', PEER)).resolves.toEqual({
+      target: 'current', selection: { ...route, reasoningEffort: 'high' },
+    });
+    expect(observeSession).toHaveBeenCalledWith(id);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(registry.resume).not.toHaveBeenCalled();
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).resolves.toBe('high');
+    expect(registry.resume).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: id }));
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(id);
+  });
+
+  it('does not create a replacement when the saved Session disappears before resume', async () => {
+    const id = 'session-no-longer-on-disk';
+    new PrefsStore().setSessionId(KEY, id);
+    const { registry } = createRegistry(async () => { throw notFound(id); });
+    const manager = createManagerWithCtx(registry, onDiskCtx(id));
+    await expect(manager.setReasoningEffort({ ...change, effort: 'high' })).rejects.toThrow('not found');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(id);
+  });
+
+  it.each(['generation', 'web selection', 'binding', 'revoked access'] as const)(
+    'protects the current selection when %s changes during the capability lookup',
+    async race => {
+      const { agent, manager, select, resolveModelInfo } = reasoningSession();
+      const catalog = deferred<typeof capabilities>();
+      resolveModelInfo.mockReturnValue(catalog.promise);
+      let allowed = true;
+      const changing = manager.setReasoningEffort({
+        ...change, effort: 'high',
+        assertAllowed: () => { if (!allowed) throw new Error('access revoked'); },
+      });
+      expect(resolveModelInfo).toHaveBeenCalledOnce();
+      if (race === 'generation') Object.assign(agent, { status: 'running' });
+      if (race === 'web selection') agent.model?.select({ provider: 'fixture', model: 'chosen-in-web' });
+      if (race === 'binding') await manager.remove('c2c', PEER);
+      if (race === 'revoked access') allowed = false;
+      const rejected = expect(changing).rejects.toThrow();
+      catalog.resolve(capabilities);
+      await rejected;
+      expect(select.mock.calls).toEqual(race === 'web selection' ? [[{ provider: 'fixture', model: 'chosen-in-web' }]] : []);
+    },
+  );
+
+  it('uses the native next choice, actionable queue and projected context usage for status', () => {
+    const { manager, agent } = reasoningSession();
+    agent.model?.select({ ...route, reasoningEffort: 'high' });
+    Object.assign(agent, {
+      status: 'running',
+      inbox: { nextTurn: [{ id: '1' }], nextStep: [
+        { id: '2', source: { kind: 'user' } }, { id: '3', source: { kind: 'time-context' } },
+      ] },
+    });
+    expect(manager.getStatus('c2c', PEER)).toMatchObject({
+      running: true, selection: { ...route, reasoningEffort: 'high' }, queued: 2, contextOccupancy: 30,
+    });
+  });
+});
+
 beforeEach(() => {
   env.home = mkdtempSync(join(tmpdir(), 'im-qqbot-session-'));
   mkdirSync(join(env.home, 'workspace'), { recursive: true });
+});
+
+it.each([true, false])('creates the robot default workspace only (uses default: %s)', async usesDefault => {
+  const robotWorkspace = join(env.home, 'robots', APP_ID, 'workspace');
+  const selectedWorkspace = usesDefault ? robotWorkspace : join(env.home, 'unavailable-project');
+  const config = ConfigSchema({ appId: APP_ID, appSecret: 'secret', cwd: robotWorkspace, sessionIdleTimeout: 0 });
+  const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+  const manager = new SessionManager(absentCtx(), registry, config, createLogger(), undefined, {
+    read: () => ({ ...WORKBENCH_SETTINGS, cwd: selectedWorkspace }),
+  });
+  managers.push(manager);
+
+  const opening = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+  if (usesDefault) {
+    await opening;
+    expect(registry.create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd: robotWorkspace } }));
+    expect(existsSync(robotWorkspace)).toBe(true);
+  } else {
+    await expect(opening).rejects.toThrow('所选工作区目录不可用');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(existsSync(selectedWorkspace)).toBe(false);
+  }
+});
+
+it('applies staged model, effort, preset, workspace and native permission on new Session only', async () => {
+  const workspace = join(env.home, 'project');
+  mkdirSync(workspace);
+  const settings: WorkbenchAgentSettings = {
+    model: { provider: 'test-provider', model: 'new-model' }, reasoningEffort: 'medium',
+    preset: 'selected', cwd: workspace, permission: 'read-only', groupPrompt: '', directPrompt: '',
+    streaming: true, showToolResults: false,
+  };
+  const config = ConfigSchema({ appId: APP_ID, appSecret: 'secret', cwd: join(env.home, 'workspace'), sessionIdleTimeout: 0 } as ImQQBotConfig);
+  const setPermission = vi.fn();
+  const selectModel = vi.fn();
+  const mount = vi.fn();
+  const native = fakeHandle(LEGACY_ID);
+  const ctx = { get: (name: string) => ({
+    sessionPersistence: { stat: async (id: string) => id === LEGACY_ID ? { header: { cwd: config.cwd, agentPreset: 'legacy' } } : undefined },
+    agentPresets: { resolve: async (id: string) => ({ id }), mount },
+    permissionPresets: { catalog: () => ({ options: [{ value: 'read-only' }] }), set: setPermission },
+  })[name as 'sessionPersistence'], on: vi.fn() } as unknown as Context;
+  const registry: DshAgentRegistry = {
+    get: () => undefined,
+    resume: async ({ resumeSessionId, setup }) => {
+      if (resumeSessionId !== LEGACY_ID) throw notFound(resumeSessionId);
+      await setup?.(native.agent.ctx, native.agent);
+      return native;
+    },
+    create: vi.fn(async ({ sessionId, setup }) => {
+      const handle = fakeHandle(sessionId);
+      const agent = { ...handle.agent, model: { select: selectModel } };
+      await setup?.(agent.ctx, agent);
+      return { ...handle, agent };
+    }),
+  };
+  const manager = new SessionManager(ctx, registry, config, createLogger(), undefined, {
+    read: () => settings, update: () => false, defaults: () => settings,
+  });
+  managers.push(manager);
+  expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(LEGACY_ID);
+  expect(mount).toHaveBeenLastCalledWith(expect.anything(), 'legacy');
+  expect(setPermission).not.toHaveBeenCalled();
+  expect(selectModel).not.toHaveBeenCalled();
+  await manager.remove('c2c', PEER);
+  const session = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+  expect(session.sessionId).not.toBe(LEGACY_ID);
+  expect(registry.create).toHaveBeenCalledWith(expect.objectContaining({ meta: { cwd: workspace, agentPreset: 'selected' } }));
+  expect(selectModel).toHaveBeenCalledWith({ provider: 'test-provider', model: 'new-model', reasoningEffort: 'medium' });
+  expect(setPermission).toHaveBeenCalledWith(session.agent.session, 'read-only');
+});
+
+it('applies a QQ model command to a restored Session before the next message', async () => {
+  const id = 'session-restored';
+  const prefs = new PrefsStore();
+  prefs.setSessionId(KEY, id, { durable: true });
+  let settings = WORKBENCH_SETTINGS;
+  let model = settings.model!;
+  const handle = fakeHandle(id);
+  const { registry } = createRegistry(async () => ({
+    ...handle, agent: { ...handle.agent, model: { current: () => model, select: value => { model = value; } } },
+  }));
+  const manager = new SessionManager(onDiskCtx(id), registry, ConfigSchema({ appId: APP_ID, appSecret: 'fixture' }), createLogger(), prefs, {
+    read: () => settings, defaults: () => WORKBENCH_SETTINGS,
+    update: (_key, patch) => { settings = { ...settings, ...patch }; return true; },
+  });
+  managers.push(manager);
+  const next = { provider: 'p', model: 'replacement' };
+  await manager.setModelOverride('c2c', PEER, next, { senderId: PEER, replyTarget: REPLY });
+  expect(manager.getEffectiveModel('c2c', PEER)).toEqual(next);
+  expect(settings.model).toEqual(next);
+  expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(id);
+  expect(registry.create).not.toHaveBeenCalled();
+  expect(registry.resume).toHaveBeenCalledTimes(1);
 });
 
 afterEach(async () => {
@@ -169,6 +397,41 @@ afterEach(async () => {
 });
 
 describe('deliveryAddress', () => {
+  it('rejects a persisted Session shared by two robots at the same OpenID', async () => {
+    const stored = 'session-shared-by-mistake';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, stored);
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, stored);
+    const { registry } = createRegistry(async () => fakeHandle(stored));
+    const manager = createManager(registry);
+    expect(manager.deliveryAddress(stored)).toBeUndefined();
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+    expect(registry.get).not.toHaveBeenCalled();
+    expect(registry.resume).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a cached Session after another robot acquires a conflicting binding', async () => {
+    const prefs = new PrefsStore();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, onDiskCtx(LEGACY_ID), createLogger(), prefs);
+    const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, original.sessionId);
+
+    expect(manager.deliveryAddress(original.sessionId)).toBeUndefined();
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+  });
+
+  it('does not probe a legacy Session ID that is already owned by another robot', async () => {
+    const prefs = new PrefsStore();
+    prefs.setSessionId(`qqbot:other-robot:c2c:${PEER}`, LEGACY_ID);
+    const { registry } = createRegistry(async () => fakeHandle(LEGACY_ID));
+    const manager = createManagerWithCtx(registry, onDiskCtx(LEGACY_ID), createLogger(), prefs);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toThrow('绑定存在冲突');
+    expect(registry.get).not.toHaveBeenCalled();
+    expect(registry.resume).not.toHaveBeenCalled();
+  });
+
   it('内存里没有会话时，只按 prefs 返回 QQ 地址，不唤醒 agent', () => {
     const sessionId = 'session-live';
     new PrefsStore().setSessionId(KEY, sessionId);
@@ -202,6 +465,21 @@ describe('deliveryAddress', () => {
 });
 
 describe('getOrCreate — 对照组（迁移主路径行为正确）', () => {
+  it('starts a fresh Session after clearing even though the legacy native Session still exists', async () => {
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, LEGACY_ID);
+    prefs.setSessionId(KEY, 'current-session');
+    prefs.clearAccountSessions(APP_ID, 1);
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const ctx = onDiskCtx(LEGACY_ID, 'current-session');
+    const manager = createManagerWithCtx(registry, ctx, createLogger(), new PrefsStore());
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(record.sessionId).toMatch(MINTED);
+    expect(record.sessionId).not.toBe(LEGACY_ID);
+    expect(createdIds(registry)).toEqual([record.sessionId]);
+  });
+
   it('全新用户：legacy 不存在 → 铸造 session- 前缀 id 创建并落盘', async () => {
     const { registry } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
 
@@ -347,6 +625,54 @@ describe('getOrCreate — E1 resume 失败按会话是否存在分流', () => {
 });
 
 describe('getOrCreate — E2 确定性 id 不进入新建路径', () => {
+  it('does not restore the old binding when resume finishes after /new', async () => {
+    const old = fakeHandle('session-old');
+    const pending = deferred<DshAgentHandle>();
+    const { registry } = createRegistry(({ resumeSessionId }) =>
+      resumeSessionId === old.agent.id ? pending.promise : Promise.reject(notFound(resumeSessionId)));
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, onDiskCtx(old.agent.id));
+    const incoming = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await vi.waitFor(() => expect(registry.resume).toHaveBeenCalledTimes(1));
+
+    await manager.remove('c2c', PEER);
+    const newBinding = persistedId();
+    pending.resolve(old);
+
+    expect((await incoming).sessionId).toBe(newBinding);
+    expect(persistedId()).toBe(newBinding);
+    expect(manager.getSessionRecord('c2c', PEER)?.sessionId).toBe(newBinding);
+    expect(old.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each(['QQ', 'Web'] as const)('discards a retired manager candidate after the new manager binds through %s', async source => {
+    const gate = deferred<void>();
+    const { registry, handles } = createRegistry(async ({ resumeSessionId }) => { throw notFound(resumeSessionId); });
+    const oldCreate = registry.create.getMockImplementation();
+    if (!oldCreate) throw new Error('test registry has no create implementation');
+    registry.create.mockImplementationOnce(async options => {
+      await gate.promise;
+      return oldCreate(options);
+    });
+    const oldManager = createManager(registry);
+    const incoming = oldManager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await vi.waitFor(() => expect(registry.create).toHaveBeenCalledTimes(1));
+
+    await oldManager.disposeAll();
+    const reloaded = createManagerWithCtx(registry, persistenceCtx(async id =>
+      handles.some(handle => handle.agent.id === id) ? { header: {} } : undefined));
+    if (source === 'QQ') await reloaded.remove('c2c', PEER);
+    else await reloaded.createAndBindSession('c2c', PEER, null, WORKBENCH_SETTINGS, () => {});
+    const current = await reloaded.getOrCreate('c2c', PEER, PEER, REPLY);
+    const rejected = expect(incoming).rejects.toThrow('已停用');
+    gate.resolve();
+    await rejected;
+
+    expect(persistedId()).toBe(current.sessionId);
+    expect(oldManager.getSessionRecord('c2c', PEER)).toBeUndefined();
+    expect(handles[1]?.dispose).toHaveBeenCalledOnce();
+  });
+
   it('E2-1 resume(legacy) 期间 /new 写入新 id → 采用 prefs 最新 id 新建，内存与 prefs 一致', async () => {
     const pending = deferred<DshAgentHandle>();
     const { registry } = createRegistry(() => pending.promise);
@@ -444,7 +770,7 @@ describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () =>
     // attach 是 fire-and-forget，等待其落到工作区
     await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith(record.sessionId));
     // 关键回归：cwd 必须等于 meta.cwd（resolveAgentCwd(config.cwd)），而非 process.cwd()
-    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot');
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot · app1（旧默认）');
   });
 
   it('恢复会话时同样挂载（升级后老会话在下一次创建记录时补挂）', async () => {
@@ -458,7 +784,7 @@ describe('getOrCreate — 会话创建/恢复后挂载到对应工作区', () =>
 
     expect(record.sessionId).toBe('session-current');
     await vi.waitFor(() => expect(ws.attachSession).toHaveBeenCalledWith('session-current'));
-    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot');
+    expect(workspaceRegistry.create).toHaveBeenCalledWith(join(env.home, 'workspace'), 'QQBot · app1（旧默认）');
   });
 });
 
@@ -470,9 +796,10 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
   function promptAgent(id: string, opts: { failSection?: boolean } = {}) {
     const sections = new Map<string, { name: string }>();
     const contexts = new Map<string, { name: string }>();
+    const listeners = new Set<string>();
     const service = {
       section: (s: { name: string }) => {
-        if (opts.failSection) throw new Error('boom: section registration rejected');
+        if (opts.failSection && s.name === 'qqbot:extra') throw new Error('boom: section registration rejected');
         sections.set(s.name, s);
         return () => { sections.delete(s.name); };
       },
@@ -483,21 +810,28 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     };
     const agent = {
       ...fakeAgent(id),
-      ctx: { get: (name: string) => (name === 'systemPrompt' ? service : undefined) },
+      ctx: {
+        get: (name: string) => (name === 'systemPrompt' ? service : undefined),
+        on: (name: string) => {
+          listeners.add(name);
+          return () => { listeners.delete(name); };
+        },
+      },
     } as unknown as DshAgent;
-    return { agent, sections, contexts };
+    return { agent, sections, contexts, listeners };
   }
 
   /** registry：create 产出带 prompt 替身的 agent，并让后续 get() 能复用它（live 路径） */
   function promptRegistry(opts: { failSection?: boolean } = {}) {
     let live: DshAgent | undefined;
-    const created: Array<{ agent: DshAgent; sections: Map<string, unknown>; contexts: Map<string, unknown> }> = [];
+    const created: Array<ReturnType<typeof promptAgent>> = [];
     const registry = {
       get: vi.fn(() => live),
       resume: vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => { throw notFound(resumeSessionId); }),
       create: vi.fn(async (options: { sessionId: string }) => {
-        const { agent, sections, contexts } = promptAgent(options.sessionId, opts);
-        created.push({ agent, sections, contexts });
+        const fixture = promptAgent(options.sessionId, opts);
+        const { agent } = fixture;
+        created.push(fixture);
         live = agent;
         return { agent, dispose: vi.fn(async () => {}) } as DshAgentHandle;
       }),
@@ -505,7 +839,7 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     return { registry, created };
   }
 
-  it('会话建立即注册 4 个 section + 2 个 context；remove() 全部释放', async () => {
+  it('会话建立时注册提示词，移除会话后释放注册项', async () => {
     const { registry, created } = promptRegistry();
     const manager = createManager(registry);
 
@@ -513,10 +847,12 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(created).toHaveLength(1);
     expect([...created[0].sections.keys()].sort()).toEqual(['qqbot:extra', 'qqbot:persona', 'qqbot:rules']);
     expect([...created[0].contexts.keys()].sort()).toEqual(['qqbot:background', 'qqbot:turn-meta']);
+    expect([...created[0].listeners]).toEqual(['system-prompt/assemble']);
 
     await manager.remove('c2c', PEER);
     expect(created[0].sections.size).toBe(0);
     expect(created[0].contexts.size).toBe(0);
+    expect(created[0].listeners.size).toBe(0);
   });
 
   it('extra section 惰性读取 config：改 directPrompt 即时生效，无需重装', async () => {
@@ -578,8 +914,176 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     expect(allLogText(logger)).toContain('qq prompt install failed');
 
     // 失败不入表：同 agent 再次触发安装时重试（此处模拟再次 remove→复用）
-    expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
+    await expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
     expect(created[0].sections.size).toBe(0);
+  });
+});
+
+it.each([true, false])('preserves only a verified legacy Session on the first QQ /new (exists=%s)', async exists => {
+  const { registry } = createRegistry(async () => { throw new Error('unexpected resume'); });
+  const manager = createManagerWithCtx(registry, onDiskCtx(...(exists ? [LEGACY_ID] : [])));
+  expect(persistedId()).toBeUndefined();
+  await manager.remove('c2c', PEER);
+  expect(new PrefsStore().listSessionBindings(APP_ID)).toEqual([
+    { key: KEY, current: expect.stringMatching(MINTED), history: exists ? [LEGACY_ID] : [] },
+  ]);
+});
+
+describe('web workbench session switching', () => {
+  const settings = WORKBENCH_SETTINGS;
+
+  it.each(['QQ /new', 'Web switch', 'gateway retirement'])('settles both in-flight cards immediately on %s', async change => {
+    const old = fakeHandle('session-old');
+    const { registry } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const receipt = deferred<void>();
+    const sender = { sendMarkdown: vi.fn(() => receipt.promise) };
+    const logger = createLogger();
+    manager.questionChannel = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, logger);
+    manager.approvalChannel = new ApprovalChannel(manager, sender, { access: { c2cMode: 'open', c2cAllow: [] } }, logger);
+
+    const question = manager.questionChannel.routeRequest(
+      { agent: { id: old.agent.id }, questions: [{ id: 'q', question: 'Continue?' }] },
+      async () => { throw new Error('question unexpectedly delegated'); },
+    ).catch((error: unknown) => error);
+    let ask: ((request: ApprovalRequest) => unknown) | undefined;
+    manager.approvalChannel.install({
+      on(_event, handler) {
+        ask = request => handler(request, () => { throw new Error('approval unexpectedly delegated'); });
+        return () => true;
+      },
+    });
+    const approval = ask?.({ agent: { id: old.agent.id }, toolName: 'bash' });
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(2);
+
+    try {
+      if (change === 'QQ /new') await manager.remove('c2c', PEER);
+      else if (change === 'Web switch') await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+      else manager.deactivate();
+      const status = await Promise.race([
+        Promise.all([approval, question]),
+        new Promise<never>((_, reject) => setImmediate(() => reject(new Error('card request still pending')))),
+      ]);
+      expect(status).toEqual(['cancelled', expect.objectContaining({ code: 'ASK_ABORTED' })]);
+    } finally {
+      receipt.resolve();
+      await new Promise<void>(resolve => setImmediate(resolve));
+      manager.questionChannel.uninstall();
+    }
+  });
+
+  it('waits for the new native session, keeps history, and sends waiting input to the new binding', async () => {
+    const gate = deferred<void>();
+    const old = fakeHandle('session-old');
+    vi.mocked(old.dispose).mockRejectedValueOnce(new Error('cleanup failed'));
+    const stored = new Set([old.agent.id]);
+    const { registry } = createRegistry(async () => old);
+    registry.create.mockImplementation(async ({ sessionId }) => {
+      await gate.promise;
+      stored.add(sessionId);
+      return fakeHandle(sessionId);
+    });
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async id => stored.has(id) ? { header: {} } : undefined));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const start = manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    const incoming = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(persistedId()).toBe(old.agent.id);
+    await expect(manager.remove('c2c', PEER)).rejects.toThrow('正在切换');
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    gate.resolve();
+    const id = await start;
+    expect((await incoming).sessionId).toBe(id);
+    expect(persistedId()).toBe(id);
+    await vi.waitFor(() => expect(old.dispose).toHaveBeenCalledOnce());
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('已变化');
+    expect(registry.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the old binding and releases the candidate when permission changes during creation', async () => {
+    const old = fakeHandle('session-old');
+    const { registry, handles } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    let checks = 0;
+    await expect(manager.createAndBindSession('c2c', PEER, record.sessionId, settings, () => {
+      if (++checks === 2) throw new Error('QQ 会话已暂停');
+    })).rejects.toThrow('已暂停');
+    expect(persistedId()).toBe(record.sessionId);
+    expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(record);
+    expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the current binding if saving either the Web or QQ switch fails', async () => {
+    const old = fakeHandle('session-old');
+    const { registry, handles } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    const current = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    const prefsPath = join(env.home, 'model-prefs.json');
+    const backup = join(env.home, 'saved-prefs.json');
+    let checks = 0;
+
+    try {
+      await expect(manager.createAndBindSession('c2c', PEER, current.sessionId, settings, () => {
+        if (++checks !== 2) return;
+        renameSync(prefsPath, backup);
+        mkdirSync(prefsPath);
+      })).rejects.toThrow();
+      expect(checks).toBe(2);
+      await expect(manager.remove('c2c', PEER)).rejects.toThrow('无法保存新 Session');
+    } finally {
+      if (checks === 2) {
+        rmSync(prefsPath, { recursive: true, force: true });
+        renameSync(backup, prefsPath);
+      }
+    }
+
+    expect(persistedId()).toBe(current.sessionId);
+    expect(await manager.getOrCreate('c2c', PEER, PEER, REPLY)).toBe(current);
+    expect(handles[0]?.dispose).toHaveBeenCalledOnce();
+    expect(old.dispose).not.toHaveBeenCalled();
+  });
+
+  it('stops archived ingress, resumes the same binding after restore, and allows an explicit new Session', async () => {
+    const old = fakeHandle('session-old');
+    const { registry } = createRegistry(async () => old);
+    const workspace = { archivedSessionIds: [old.agent.id] };
+    const ctx = {
+      get: (name: string) => name === 'workspaceRegistry' ? workspace
+        : name === 'sessionPersistence' ? { stat: async () => ({ header: {} }) } : undefined,
+      on: vi.fn(),
+    } as unknown as Context;
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, ctx);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toMatchObject({ code: 'session-archived' });
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+    workspace.archivedSessionIds = [];
+    const original = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    expect(original.sessionId).toBe(old.agent.id);
+    workspace.archivedSessionIds = [old.agent.id];
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY)).rejects.toMatchObject({ code: 'session-archived' });
+    const next = await manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {});
+    expect((await manager.getOrCreate('c2c', PEER, PEER, REPLY)).sessionId).toBe(next);
+    expect(new PrefsStore().listSessionBindings(APP_ID)[0]?.history).toEqual([old.agent.id]);
+  });
+
+  it('declines a new session when the current native agent is running', async () => {
+    const old = fakeHandle('session-old');
+    Object.defineProperty(old.agent, 'status', { value: 'running' });
+    const { registry } = createRegistry(async () => old);
+    new PrefsStore().setSessionId(KEY, old.agent.id);
+    const manager = createManagerWithCtx(registry, persistenceCtx(async () => ({ header: {} })));
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    await expect(manager.createAndBindSession('c2c', PEER, old.agent.id, settings, () => {})).rejects.toThrow('空闲后');
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(persistedId()).toBe(old.agent.id);
   });
 });
 
@@ -606,6 +1110,8 @@ describe('getOrCreate — 归档会话', () => {
 
     await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
       .rejects.toMatchObject({ code: 'session-archived' });
+    await expect(manager.compact('c2c', PEER, { senderId: PEER, replyTarget: REPLY }))
+      .resolves.toEqual({ ok: false, reason: 'archived' });
     expect(registry.resume).not.toHaveBeenCalled();
     expect(registry.create).not.toHaveBeenCalled();
   });
@@ -620,6 +1126,7 @@ describe('getOrCreate — 归档会话', () => {
 
     await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
       .rejects.toMatchObject({ code: 'session-archived' });
+    await expect(manager.compact('c2c', PEER)).resolves.toEqual({ ok: false, reason: 'archived' });
   });
 
   it('未归档时照常恢复（存档的是别的会话不影响）', async () => {
@@ -690,5 +1197,18 @@ describe('unarchive — QQ 侧取消归档', () => {
 
     await expect(manager.unarchive('c2c', PEER)).resolves.toBe('failed');
     expect(archived).toContain(sessionId);
+  });
+
+  it('keeps the archive when the Session is also bound to another QQ peer', async () => {
+    const sessionId = 'session-ambiguous';
+    const prefs = new PrefsStore();
+    prefs.setSessionId(KEY, sessionId);
+    prefs.setSessionId(`qqbot:${APP_ID}:c2c:another-peer`, sessionId);
+    const restore = vi.fn();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([sessionId], restore));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('failed');
+    expect(restore).not.toHaveBeenCalled();
   });
 });

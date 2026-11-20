@@ -3,7 +3,7 @@ import { configDraft, configPatch, isConfigDirty, normalizeConfig, parseConfigDr
 
 function baseline(): ConfigWire {
   return {
-    appId: 'account-a', provider: '', model: '', cwd: '/old', streaming: true,
+    appId: 'account-a', alias: '', requireMention: true,
     access: { c2cMode: 'allowlist', c2cAllow: ['owner'], groupMode: 'open', groupAllow: [] },
   };
 }
@@ -12,32 +12,32 @@ describe('config form draft reconciliation', () => {
   it('keeps a group edit while accepting a newly bound private owner and readonly fields', () => {
     const initial = baseline();
     const form: ConfigWire = { ...initial, access: { ...initial.access!, groupMode: 'allowlist', groupAllow: ['group-a'] } };
-    const incoming: ConfigWire = { ...initial, cwd: '/new', streaming: false, access: { ...initial.access!, c2cAllow: ['new-owner'] } };
+    const incoming = { ...initial, alias: '新名称', robotRevision: 2, access: { ...initial.access!, c2cAllow: ['new-owner'] } };
 
     const refreshed = rebaseConfig(initial, form, incoming);
 
     expect(refreshed.access).toEqual({ c2cMode: 'allowlist', c2cAllow: ['new-owner'], groupMode: 'allowlist', groupAllow: ['group-a'] });
-    expect(refreshed.streaming).toBe(false);
-    expect(refreshed.cwd).toBe('/new');
+    expect(refreshed.alias).toBe('新名称');
+    expect(refreshed.robotRevision).toBe(2);
     expect(configPatch(incoming, refreshed)).toEqual({ access: refreshed.access });
   });
 
-  it('preserves and submits upstream prompt edits while refreshing untouched model defaults', () => {
+  it('preserves the group mention policy edit while applying a concurrent rename', () => {
     const initial = baseline();
-    const form = { ...initial, groupPrompt: 'keep my draft' };
-    const incoming = { ...initial, model: 'new-default' };
+    const form = { ...initial, requireMention: false };
+    const incoming = { ...initial, alias: '另一个页面改的名称' };
 
     const refreshed = rebaseConfig(initial, form, incoming);
 
-    expect(refreshed.groupPrompt).toBe('keep my draft');
-    expect(refreshed.model).toBe('new-default');
+    expect(refreshed.requireMention).toBe(false);
+    expect(refreshed.alias).toBe('另一个页面改的名称');
     expect(isConfigDirty(incoming, refreshed)).toBe(true);
-    expect(configPatch(initial, form)).toEqual({ groupPrompt: 'keep my draft' });
+    expect(configPatch(initial, form)).toEqual({ requireMention: false });
   });
 
   it('clears a restored draft when a save completed before the client reloaded', () => {
     const initial = baseline();
-    const submitted = { ...initial, directPrompt: 'saved instruction' };
+    const submitted = { ...initial, requireMention: false };
     const restored = rebaseConfig(initial, submitted, submitted);
 
     expect(isConfigDirty(submitted, restored)).toBe(false);
@@ -58,17 +58,19 @@ describe('config form draft reconciliation', () => {
     const serverResponse = { ...initial, appSecret: 'must-not-store', cwd: '/changed', newSecret: 'unknown' };
 
     expect(configPatch(initial, serverResponse)).toEqual({});
-    const stored = configDraft(serverResponse, { ...serverResponse, model: 'edited' });
+    const form = { ...serverResponse, groupPrompt: 'previous panel only', alias: 'edited' };
+    const stored = configDraft(serverResponse, form);
     expect(JSON.stringify(stored)).not.toContain('must-not-store');
     expect(JSON.stringify(stored)).not.toContain('newSecret');
-    expect(stored.form.cwd).toBeUndefined();
-    expect(stored.form.model).toBe('edited');
+    expect(stored.form).not.toHaveProperty('cwd');
+    expect(stored.form).not.toHaveProperty('groupPrompt');
+    expect(stored.form.alias).toBe('edited');
   });
 
   it('rejects corrupt persisted field values', () => {
-    expect(parseConfigDraft({ baseline: baseline(), form: { model: { invalid: true } } })).toBeUndefined();
+    expect(parseConfigDraft({ baseline: baseline(), form: { requireMention: { invalid: true } } })).toBeUndefined();
     expect(parseConfigDraft({ baseline: baseline(), form: { access: { c2cMode: 'open' } } })).toBeUndefined();
-    expect(parseConfigDraft(configDraft(baseline(), { ...baseline(), model: 'draft' }))?.form.model).toBe('draft');
+    expect(parseConfigDraft(configDraft(baseline(), { ...baseline(), alias: 'draft' }))?.form.alias).toBe('draft');
   });
 });
 

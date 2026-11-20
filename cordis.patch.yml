@@ -25,3 +25,5 @@
         processingTimeoutMs: 1800000
         historyLimit: 10
         debug: false
+    - id: im-qqbot-workbench-history
+      name: '@tencent-connect/dsh-qqbot-workbench-history'

@@ -8,7 +8,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import type { AccessControlConfig, ImQQBotConfig } from '../config.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import { updateProfileConfig, readProfileAccess, readProfileAccessSnapshot } from '../setup/persist.ts';
+import { updateProfileConfig, readProfileAccessSnapshot, type HostAccessSource } from '../setup/persist.ts';
 
 /** 配对码随机源：均匀分布于 [0, 1)。配对码是白名单授权凭据，必须使用密码学随机数。 */
 const secureRandom = (): number => randomBytes(4).readUInt32BE(0) / 2 ** 32;
@@ -22,17 +22,32 @@ export interface AccountAccessDeps {
   random?: () => number;
   store?: MemberStore;
   pairing?: PairingService;
+  hostAccess?: HostAccessSource;
+  access?: {
+    read(): AccessControlConfig;
+    update(change: (access: AccessControlConfig) => AccessControlConfig): void;
+  };
+}
+
+export function allowsConversation(access: AccessControlConfig, scope: ChatScope, openid: string): boolean {
+  const mode = scope === 'group' ? access.groupMode : access.c2cMode;
+  const allow = scope === 'group' ? access.groupAllow : access.c2cAllow;
+  return mode === 'open' || (mode === 'allowlist' && allow.includes(openid));
 }
 
 export class AccountAccessService {
   readonly store: MemberStore;
   readonly pairing: PairingService;
-  constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}) {
+  private readonly accessBackend?: AccountAccessDeps['access'];
+  private readonly hostAccess?: HostAccessSource;
+  constructor(readonly config: ImQQBotConfig, readonly logger: Logger, deps: AccountAccessDeps = {}, dataDir = PLUGIN_HOME) {
+    this.accessBackend = deps.access;
+    this.hostAccess = deps.hostAccess;
     this.pairing = deps.pairing ?? new PairingService({
-      stateFile: join(PLUGIN_HOME, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
+      stateFile: join(dataDir, `pairing-${createHash('sha256').update(config.appId).digest('hex')}.json`),
       random: deps.random ?? secureRandom,
     });
-    this.store = deps.store ?? new MemberStore(PLUGIN_HOME, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
+    this.store = deps.store ?? new MemberStore(dataDir, config.appId, () => config.access.c2cMode === 'allowlist' ? config.access.c2cAllow : []);
   }
   // ── 配对码认领（Web 生成码 / QQ 核销） ──────────────────────────────
   /** Web：为一种名单生成限时配对批次，替换时旧码失效。 */
@@ -183,31 +198,30 @@ export class AccountAccessService {
   }
 
   private updateMembership(purpose: Exclude<PairPurpose, 'owner'>, change: (list: readonly string[]) => string[]): boolean {
+    const field = purpose === 'allow-group' ? 'groupAllow' : 'c2cAllow';
+    const update = (access: AccessControlConfig) => ({ ...access, [field]: change(access[field]) });
+    if (this.accessBackend) {
+      this.accessBackend.update(update);
+      return true;
+    }
+
     const profileDir = getProfileDir() ?? undefined;
     const { appId, access: fallback } = this.config;
-    const { access, revision } = readProfileAccessSnapshot(fallback, profileDir, appId);
-    const field = purpose === 'allow-group' ? 'groupAllow' : 'c2cAllow';
-    const next = { ...access, [field]: change(access[field]) };
-    const persisted = updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision });
-    if (persisted) this.syncConfigAccess(next);
-    return persisted;
+    const { access, revision } = readProfileAccessSnapshot(fallback, profileDir, appId, this.hostAccess);
+    const next = update(access);
+    return updateProfileConfig({ access: next }, profileDir, this.logger, { appId, fallback, revision, hostAccess: this.hostAccess });
   }
 
-  /**
-   * 把最新 access 写回宿主持有的 config 对象。这是刻意的 HMR 窗口同步：
-   * updateProfileConfig 触发宿主重载之前，旧 fiber 仍在服务 QQ 请求，
-   * 必须立即看到新名单，否则会按旧名单放行/拒绝。
-   */
-  private syncConfigAccess(access: AccessControlConfig): void {
-    this.config.access = access;
+  currentAccess(): AccessControlConfig {
+    if (this.accessBackend) return this.accessBackend.read();
+    return readProfileAccessSnapshot(this.config.access, getProfileDir() ?? undefined, this.config.appId, this.hostAccess).access;
   }
-
-  currentAccess() {
-    return readProfileAccess(this.config.access, getProfileDir() ?? undefined, this.config.appId);
+  allowsConversation(scope: ChatScope, openid: string): boolean {
+    return allowsConversation(this.currentAccess(), scope, openid);
   }
   commandAccessError(actor?: string): string | undefined {
-    const mode = this.currentAccess().commandMode;
-    return commandAccessError(mode, actor, mode === 'allowlist' && this.isOwner(actor));
+    const { commandMode } = this.currentAccess();
+    return commandAccessError(commandMode, actor, commandMode === 'allowlist' && this.isOwner(actor));
   }
   isOwner(actor?: string): boolean { return !!actor && this.store.ownerIds().includes(actor); }
 }

@@ -13,6 +13,7 @@
  *   > 宿主 agentDefaultModel 服务
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type LlmRuntime from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
 import type { ModelRoute, ModelEntry } from './types.ts';
@@ -36,11 +37,12 @@ export class ModelResolver {
     ctx: Context,
     config: ImQQBotConfig,
     logger?: Logger,
+    prefs?: PrefsStore,
   ) {
     this.ctx = ctx;
     this.config = config;
     this.logger = logger;
-    this.prefs = new PrefsStore(
+    this.prefs = prefs ?? new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
       { onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`) },
     );
@@ -106,15 +108,19 @@ export class ModelResolver {
   }
 
   /** sessionId → sessionKey（prefs 的反向查找） */
-  findSessionKey(sessionId: string): string | undefined {
-    return this.prefs.findSessionKey(sessionId);
+  findUniqueCurrentSessionKey(sessionId: string): string | undefined {
+    return this.prefs.findUniqueCurrentSessionKey(sessionId);
+  }
+
+  hasForeignCurrentBinding(sessionKey: string, sessionId: string): boolean {
+    return this.prefs.hasForeignCurrentBinding(sessionKey, sessionId);
   }
 
   /**
    * 记录指定 sessionKey 的最新 sessionId（fork 后调用）并持久化
    */
-  setSessionId(sessionKey: string, sessionId: string): void {
-    this.prefs.setSessionId(sessionKey, sessionId);
+  setSessionId(sessionKey: string, sessionId: string, options?: { durable: true; previous?: string }): void {
+    this.prefs.setSessionId(sessionKey, sessionId, options);
   }
 
   /**
@@ -122,6 +128,10 @@ export class ModelResolver {
    */
   clearSessionId(sessionKey: string): void {
     this.prefs.clearSessionId(sessionKey);
+  }
+
+  legacySessionId(sessionKey: string): string | undefined {
+    return this.prefs.legacySessionId(sessionKey);
   }
 
   /**
@@ -151,18 +161,25 @@ export class ModelResolver {
    * 优先级：config 显式指定 > settings.yaml（只读） > 宿主 agentDefaultModel
    * 最终兜底 deepseek-official/deepseek-v4-flash，确保 {{model}} 变量始终有值。
    */
-  resolveDefault(): ModelRoute {
-    if (this.config.provider && this.config.model) {
+  resolveDefault(includePluginConfig = true): ModelRoute {
+    const host = this.readFromHost();
+    if (!includePluginConfig && host) return host;
+    if (includePluginConfig && this.config.provider && this.config.model) {
       return { provider: this.config.provider, model: this.config.model };
     }
 
     const fromSettings = this.settings.readDefaultRoute();
     if (fromSettings) return fromSettings;
 
-    const fromHost = this.readFromHost();
-    if (fromHost) return fromHost;
+    if (host) return host;
 
     return { provider: 'deepseek-official', model: 'deepseek-v4-flash' };
+  }
+
+  async resolveReasoning(route: ModelRoute) {
+    const llm = this.getService('llm') as Pick<LlmRuntime, 'resolveModelInfo'> | undefined;
+    if (typeof llm?.resolveModelInfo !== 'function') throw new Error('Host model capabilities are unavailable.');
+    return (await llm.resolveModelInfo(route.provider, route.model)).reasoning;
   }
 
   /**

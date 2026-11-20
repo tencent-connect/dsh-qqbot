@@ -1,3 +1,6 @@
+packages:
+  - plugins/workbench-history
+linkWorkspacePackages: true
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

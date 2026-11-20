@@ -10,7 +10,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
-- **One shared state across surfaces**: the settings section, main panel, and sidebar bind page share a single status poller — multiple open pages no longer issue duplicate requests, phases stay consistent across surfaces during hot-reload windows, and polling pauses while the page is hidden.
 - **Pairing codes for allowlists**: generate a 10-minute code in account settings and have users send it to the bot in the matching chat to join the DM/group/command roster; one code admits multiple people, with manual OpenID bulk-adding and copy/export as well. After an identity is removed, codes issued before the removal can no longer re-add it.
 - **Independent slash-command access**: new `access.commandMode` (open / allowlist / disabled) checks commands by sender identity, managed separately from the chat admission allowlists.
 - **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
@@ -21,26 +20,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### ⚠️ Behavior Changes
 
 - **In-app surfaces moved onto the host-authenticated channel**: the browser-writable endpoints (binding, config, pairing) no longer serve from self-registered bare routes — everything now mounts on the host `/api` shared channel, where source checks (DNS-rebinding / cross-site defense) and login authentication are enforced by the host and improve automatically with host upgrades. The settings and bind pages now expect a logged-in session (local deployments are unaffected).
-- **The bind page no longer opens by itself**: pending binding no longer auto-opens the sidebar page; enter via the Start-page "QQ Bot binding" card or Settings → QQ Bot to scan or fill in credentials. The always-on pending-binding poller is gone with it — the status endpoint is no longer requested while those pages are closed.
-- **Minimum host raised to 0.2.0-rc.2**: hosts from 0.1.x are no longer supported (their question-channel protocol is incompatible); installing on an older host is now rejected explicitly.
-- **Questions surface on QQ and the desktop at once**: an `ask_user_question` is delivered to both QQ and the desktop/Web, first answer wins — whichever side replies first settles it, and the other side goes inert (a late QQ button press no longer advances; when QQ wins, the stale desktop card disappears).
+- **Bind from the QQ workbench**: open QQ Bot in the sidebar or Settings in the plugin details, then choose Add bot.
+- **Answer questions in QQ or DSH**: on hosts with question events, questions in QQ turns accept the first answer from QQ or DSH.
 - **Slash commands open by default**: `/preset`, `/model`, and other admin commands were previously limited to allowlisted users; with `access.commandMode` they are open to everyone by default — set it to `allowlist` and configure the command roster to keep them restricted.
 - **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
 
 ### Fixed
 
-- **Archived sessions no longer go silent**: once a session is archived the host rejects the turn before it starts, so the plugin had nothing to deliver and messages sent in QQ received no reply at all. The plugin now checks the archive state before delivery and replies that the session is archived and the message was not processed, with tappable `/unarchive` and `/new` command tags; `/compact` reports the same condition explicitly. A turn blocked by the archive gate after delivery is reported too instead of staying silent.
+- **Archived sessions no longer go silent**: the bot checks the archive state before submitting the message and replies with tappable `/unarchive` and `/new` commands if the Session is archived. `/compact` reports the same condition. If the host blocks the turn after submission, the bot replies once it verifies the QQ input and delivery permissions.
 - **Fixed the bind page 404 (boot failure)**: in some environments the previous release failed to register the panel routes, leaving the bind page a permanent 404; the root cause was an illegal host-service access and is fixed.
-- **Fixed an in-flight request blocking remounts**: closing every bind-related page and reopening it no longer has the first status read wait on a stale request (up to 10 seconds when the server hangs).
-- **Settings nav icon follows the theme**: the icon color now tracks the host theme instead of rendering near-black on dark backgrounds.
-- **Question channel survives hot reloads**: plugin hot reloads (saving config, QR binding) used to silently disable the QQ question channel — afterwards `ask_user_question` reached no surface at all or failed outright. The channel now hooks in via events and its lifecycle follows the plugin automatically. The full question flow (multi-question stepping, buttons, timeouts, racing the desktop) is regression-tested.
+- **Question channel survives hot reloads**: the question listener follows the robot plugin's lifecycle. Reloading it cancels its pending questions.
 - **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
 
 ### Internal (developer-facing)
 
-- Browser-side architecture rework: host service contracts are now typed (reading an undeclared service is a compile error), seat wiring and view composition are decoupled, and styles collapse into a single namespaced, reference-counted stylesheet.
 - Added an end-to-end regression on the real host package (`@deepseek-ai/dsh-client-connection` 0.2.2-rc.3): envelope protocol, 404 semantics, owner gating, and fiber-unload deregistration.
-
 
 ## [0.5.5] - 2026-10-30
 

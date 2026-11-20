@@ -1,0 +1,308 @@
+import type { Context } from '@deepseek-ai/cordis';
+import type { Logger } from '../types.ts';
+import type { DshAgent, DshAgentRegistry } from '../session/index.ts';
+import { WORKBENCH_BASE_PERMISSIONS, type WorkbenchAgentSettings, type WorkbenchToolChoice } from '../shared/workbench-agent-settings.ts';
+
+type ToolDefinition = Readonly<WorkbenchToolChoice>;
+interface ToolExecutor {
+  describe(tools: readonly ToolDefinition[]): { schemas: readonly ToolDefinition[] };
+  execute(input: unknown): unknown;
+}
+interface Tools {
+  definitions(scope?: object): readonly ToolDefinition[];
+  guard(check: (execution: { name: string; agent?: object }) => string | undefined): () => void;
+  overrideExecutor?(executor: ToolExecutor): () => void;
+}
+interface Permissions {
+  current(session: unknown): string;
+}
+interface PresetScope {
+  readonly defaultId: string;
+  acquireScope(id?: string): Promise<{ key: object } & AsyncDisposable>;
+}
+interface SessionLineage {
+  stat?(id: string): Promise<{ header: { parentSession?: string } } | undefined>;
+}
+type NativeExecutor = new (ctx: Context) => ToolExecutor;
+const nativeModule = '@deepseek-ai/dsh-tool-executor-native';
+function loadNative(): Promise<NativeExecutor> {
+  return import(nativeModule).then(module => {
+    if (typeof module.NativeToolExecutor !== 'function') throw new Error('当前 DSH 缺少原生工具执行器。');
+    return module.NativeToolExecutor as NativeExecutor;
+  }, () => { throw new Error('当前 DSH 缺少原生工具执行器。'); });
+}
+
+// Delegation can outlive the calling Agent or use a different provider. The
+// PTC transport is not a capability that can appear in a custom tool list.
+const excluded = new Set(['run_code', 'subagent', 'spawn_agent', 'send_message', 'interrupt_agent', 'workflow', 'plugin_manager']);
+const usable = (name: string): boolean => !excluded.has(name) && !name.startsWith('subagent_') && !name.startsWith('schedule_');
+const nativePermissionEvents = new Set(['permission/preset', 'sandbox/mode', 'approval/policy']);
+const definitions = (ctx: Context): Tools | undefined => ctx.get('tools') as Tools | undefined;
+const unavailable = '当前 DSH 无法安全恢复原生工具执行器。请更新 DSH，或将此 QQ 会话切回原生工具设置。';
+
+function canRestoreTools(tools: Tools | undefined): tools is Tools & Required<Pick<Tools, 'overrideExecutor'>> {
+  return typeof tools?.guard === 'function' && typeof tools.overrideExecutor === 'function';
+}
+
+export async function workbenchToolChoices(ctx: Context, preset?: string): Promise<WorkbenchToolChoice[]> {
+  const tools = definitions(ctx);
+  if (!canRestoreTools(tools)) throw new Error(unavailable);
+  const presets = ctx.get('agentPresets') as PresetScope | undefined;
+  if (!presets) throw new Error('无法读取 DSH Agent 预设。');
+  const id = preset || presets.defaultId;
+  await loadNative();
+  await using lease = await presets.acquireScope(id);
+  return tools.definitions(lease.key).filter(tool => usable(tool.name)).map(({ name, description }) => ({
+    name, ...(description ? { description: description.slice(0, 500) } : {}),
+  })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function rank(permission: string): number {
+  return WORKBENCH_BASE_PERMISSIONS.findIndex(value => value === permission);
+}
+
+function expands(from: WorkbenchAgentSettings | undefined, to: WorkbenchAgentSettings | undefined): boolean {
+  if (from?.tools === undefined) return false;
+  const tools = from.tools;
+  return to?.tools === undefined || to.tools.some(name => !tools.includes(name))
+    || rank(to.permission) > rank(from.permission);
+}
+
+export class WorkbenchToolPolicies {
+  private readonly installed = new Map<DshAgent, {
+    release(): void;
+    withinNativeCap(): boolean;
+    failure?: string;
+  }>();
+  private readonly owners = new Map<DshAgent, string>();
+  private readonly disabled = new Set<string>();
+  private readonly generations = new Map<string, number>();
+  private closed = false;
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly agents: DshAgentRegistry,
+    private readonly read: (key: string) => WorkbenchAgentSettings | undefined,
+    private readonly owner: (id: string) => string | undefined,
+    private readonly logger?: Logger,
+    private readonly discardPending?: (agent: DshAgent, key: string) => void,
+  ) {
+    const lifecycle = ctx as unknown as {
+      on(event: 'agent/created' | 'agent/disposed', handler: (event: { agent: DshAgent }) => void | Promise<void>, options: { global: true }): void;
+      on(event: 'session/event', handler: (session: DshAgent['session'], event: { type: string }) => void, options: { global: true }): void;
+    };
+    lifecycle.on('agent/created', async ({ agent }) => {
+      const key = await this.resolveOwner(agent);
+      if (key && this.active(key)) await this.restore(agent, key);
+    }, { global: true });
+    lifecycle.on('agent/disposed', ({ agent }) => {
+      this.release(agent);
+      this.owners.delete(agent);
+    }, { global: true });
+    lifecycle.on('session/event', (session, event) => {
+      if (!nativePermissionEvents.has(event.type)) return;
+      const agent = this.agents.get(session.id);
+      if (agent?.session !== session || agent.status !== 'running') return;
+      if (this.installed.get(agent)?.withinNativeCap() === false) {
+        // Cancel synchronously so work already past the guard cannot start.
+        agent.cancel({ kind: 'user' }, { keepInbox: true });
+      }
+    }, { global: true });
+  }
+
+  private active(key: string): boolean {
+    return !this.closed && !this.disabled.has(accountFor(key));
+  }
+
+  enableAccount(appId: string): boolean {
+    return !this.closed && this.disabled.delete(appId);
+  }
+
+  detachAccount(appId: string): void {
+    this.disabled.add(appId);
+    this.generations.set(appId, (this.generations.get(appId) ?? 0) + 1);
+    for (const [agent, key] of this.owners) {
+      if (accountFor(key) === appId) this.detach(agent, key);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const [agent, key] of this.owners) this.detach(agent, key);
+  }
+
+  blocked(key: string): string | undefined {
+    if (this.read(key)?.tools === undefined) return undefined;
+    if (!canRestoreTools(definitions(this.ctx))) return unavailable;
+    for (const [agent, owner] of this.owners) {
+      const failure = this.installed.get(agent)?.failure;
+      if (owner === key && failure !== undefined) return failure;
+    }
+    return undefined;
+  }
+
+  private release(agent: DshAgent): void {
+    const current = this.installed.get(agent);
+    this.installed.delete(agent);
+    current?.release();
+  }
+
+  private detach(agent: DshAgent, key: string): void {
+    try {
+      this.discardPending?.(agent, key);
+    } catch {
+      this.logger?.warn('QQBot could not retire queued work for a detached Session.');
+    }
+    try {
+      if (this.installed.has(agent) && agent.status === 'running') {
+        agent.cancel({ kind: 'user' }, { keepInbox: true });
+      }
+    } catch {
+      this.logger?.warn('QQBot could not cancel the turn for a detached Session.');
+    } finally {
+      this.owners.delete(agent);
+      this.release(agent);
+    }
+  }
+
+  private async restore(agent: DshAgent, key: string): Promise<void> {
+    try {
+      await this.attach(agent, key);
+    } catch (error) {
+      if (!this.active(key) || this.owners.get(agent) !== key || this.installed.has(agent)) return;
+      const failure = error instanceof Error ? error.message : unavailable;
+      const tools = definitions(agent.ctx);
+      const release = tools?.guard?.(() => failure) ?? (() => {});
+      this.installed.set(agent, { failure, release, withinNativeCap: () => false });
+      if (agent.status === 'running') agent.cancel({ kind: 'user' }, { keepInbox: true });
+      this.logger?.warn('QQBot paused a Session whose saved tool policy could not be restored.');
+    }
+  }
+
+  private knownOwner(agent: DshAgent): string | undefined {
+    return this.owners.get(agent) ?? this.owner(agent.id);
+  }
+
+  private async resolveOwner(agent: DshAgent): Promise<string | undefined> {
+    const direct = this.knownOwner(agent);
+    if (direct !== undefined) return direct;
+    const seen = new Set([agent.id]);
+    let parent = agent.session.header?.parentSession;
+    while (parent !== undefined && !seen.has(parent)) {
+      seen.add(parent);
+      const live = this.agents.get(parent);
+      const key = live ? this.knownOwner(live) : this.owner(parent);
+      if (key !== undefined) return key;
+      const lineage = this.ctx.get('sessionPersistence') as SessionLineage | undefined;
+      parent = live ? live.session.header?.parentSession : (await lineage?.stat?.(parent))?.header.parentSession;
+    }
+    return undefined;
+  }
+
+  async restoreLive(onlyKey?: string, strict = false): Promise<void> {
+    for (const agent of this.agents.list?.() ?? []) {
+      const key = await this.resolveOwner(agent);
+      if (!key || !this.active(key) || (onlyKey !== undefined && onlyKey !== key) || this.agents.get(agent.id) !== agent) continue;
+      if (strict) await this.attach(agent, key);
+      else await this.restore(agent, key);
+    }
+  }
+
+  async attach(agent: DshAgent, key: string, force = false): Promise<void> {
+    if (!this.active(key)) throw new Error('QQ 会话关联已停用。');
+    const generation = this.generations.get(accountFor(key));
+    this.owners.set(agent, key);
+    const existing = this.installed.get(agent);
+    if (existing?.failure !== undefined) throw new Error(existing.failure);
+    if (existing || (!force && this.read(key)?.tools === undefined)) return;
+    const tools = definitions(agent.ctx);
+    const permission = agent.ctx.get('permissionPresets') as Permissions | undefined;
+    if (!canRestoreTools(tools) || !permission?.current) throw new Error(unavailable);
+    const Native = await loadNative();
+    if (!this.active(key) || this.owners.get(agent) !== key || this.generations.get(accountFor(key)) !== generation) {
+      throw new Error('QQ 会话关联已变化，请重试。');
+    }
+    if (this.installed.has(agent)) return;
+    const executor = new Native(agent.ctx);
+    const withinCap = (policy: WorkbenchAgentSettings): boolean => {
+      const limit = rank(policy.permission);
+      const actual = rank(permission.current(agent.session));
+      return actual >= 0 && limit >= actual;
+    };
+    const allows = (policy: WorkbenchAgentSettings | undefined, name: string): boolean =>
+      policy?.tools === undefined || (usable(name) && policy.tools.includes(name) && withinCap(policy));
+    const unguard = tools.guard(execution => {
+      try {
+        const policy = this.read(key);
+        return (policy?.tools === undefined || (execution.agent === agent && allows(policy, execution.name))) ? undefined : '此 QQ 会话未允许该工具，或当前原生权限超出基础权限。';
+      } catch { return '无法验证此 QQ 会话的工具权限。'; }
+    });
+    try {
+      const deselect = tools.overrideExecutor({
+        describe: definitions => {
+          const policy = this.read(key);
+          return executor.describe(definitions.filter(tool => allows(policy, tool.name)));
+        },
+        execute: input => executor.execute(input),
+      });
+      this.installed.set(agent, {
+        release: () => { try { deselect(); } finally { unguard(); } },
+        withinNativeCap: () => {
+          try {
+            const policy = this.read(key);
+            return policy?.tools === undefined || withinCap(policy);
+          } catch { return false; }
+        },
+      });
+    } catch (error) {
+      unguard();
+      throw error;
+    }
+  }
+
+  private live(key: string, sessions: readonly string[]): DshAgent[] {
+    const roots = new Set(sessions);
+    return (this.agents.list?.() ?? sessions.flatMap(id => this.agents.get(id) ?? []))
+      .filter(agent => roots.has(agent.id) || this.knownOwner(agent) === key);
+  }
+
+  async beforeSave(key: string, sessions: readonly string[], next: WorkbenchAgentSettings): Promise<() => () => void> {
+    const previous = this.read(key);
+    if (next.tools === undefined && previous?.tools === undefined) return () => () => {};
+    if (!this.agents.list) throw new Error('当前 DSH 无法验证运行中的子 Agent 工具权限。');
+    const widening = expands(previous, next);
+    const narrowing = expands(next, previous);
+    const checkIdle = (live: readonly DshAgent[]) => {
+      if (widening && live.some(agent => agent.status !== 'idle')) throw new Error('会话正在运行，请在空闲后扩大工具权限。');
+    };
+    if (next.tools !== undefined) await this.restoreLive(key, true);
+    const live = this.live(key, sessions);
+    checkIdle(live);
+    if (next.tools !== undefined) for (const agent of live) {
+      if (this.agents.get(agent.id) === agent) await this.attach(agent, key, true);
+    }
+    return () => {
+      const current = this.live(key, sessions);
+      checkIdle(current);
+      if (next.tools !== undefined && current.some(agent => !this.installed.has(agent) || this.installed.get(agent)?.failure !== undefined)) {
+        throw new Error('会话已重新打开，请重试保存。');
+      }
+      // Host guards run before dispatch wrappers such as the async checkpoint.
+      // Fence work already admitted by the old policy after the write succeeds.
+      return () => {
+        if (narrowing) for (const agent of current) {
+          if (agent.status === 'running') agent.cancel({ kind: 'user' }, { keepInbox: true });
+        }
+      };
+    };
+  }
+
+  reconcile(key: string, sessions: readonly string[]): void {
+    if (this.read(key)?.tools !== undefined) return;
+    for (const agent of this.live(key, sessions)) this.release(agent);
+  }
+}
+
+function accountFor(key: string): string {
+  return key.split(':', 2)[1] ?? '';
+}

@@ -43,11 +43,11 @@ No command line needed — everything happens inside the app:
 
 <img src="./assets/docs/install.png" alt="In-app plugin install" width="560" />
 
-2. **Connect**: avatar at the bottom-left → Settings → "QQ Bots" → scan the QR code with mobile QQ
-
-<img src="./assets/docs/setting.png" alt="Settings QR binding" width="560" />
+2. **Connect**: open "QQ Bots" in the left sidebar and scan the QR code with mobile QQ. To add another bot, click the plus button above the bot list.
 
 Credentials are saved automatically after the scan; later launches need no re-scan.
+
+The main package installs the matching QQ Message History component. You can turn off its UI under **Plugins → QQ Bot → Included components**. The bot continues to record messages according to the conversation's retention setting.
 
 ### Method 2: Manual
 
@@ -89,6 +89,26 @@ export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+### Upgrade from the official 0.5.5 release
+
+Stop the Host and back up the profile's `cordis.patch.yml` and `~/.dsh-qqbot/model-prefs.json`. Install the new version in the same profile and start it again. QQBot reuses the binding and access lists and imports model, preset, and current Session preferences for that AppID. It checks Session IDs against the Host's configured storage. Existing Sessions and their working directories remain accessible from DSH.
+
+If the old configuration omits `access.commandMode`, slash commands use **Everyone**. The same command policy applies to all admitted senders. Use the slash command settings to choose a separate command allowlist or turn commands off.
+
+QQBot stores settings, history, and delivery state in `qqbot-state/` under the profile by default. Set `QQBOT_DATA_DIR` to an absolute path to choose a separate directory. If another Host owns the same directory, stop it or choose a separate profile and directory.
+
+To roll back, stop the Host, reinstall `@tencent-connect/dsh-qqbot@0.5.5`, restore the backed-up profile configuration, and restart. Version 0.5.5 can still read its original preferences file.
+
+### Host capabilities
+
+| Tested Host | QQ messaging | Workbench and history | Custom tools in standard and PTC modes |
+| --- | --- | --- | --- |
+| Official `0.1.0-rc.8` with its release's Cordis dependencies | Supported | Requires the Host Fetch and UI interfaces | Upgrade needed |
+| Official `0.2.2-rc.3` | Supported | Supported | Upgrade needed |
+| Host with reversible scoped executors and dispatch guards | Supported | Supported | Supported |
+
+When the Host lacks the required tool interfaces, the workbench shows why affected QQ conversations are paused. Switch the conversation to native tools or upgrade the Host to resume it.
+
 ## Configuration
 
 | Config | Type | Default | Description |
@@ -109,7 +129,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `maxQueue` | number | `20` | Max concurrent queue length |
 | `historyLimit` | number | `10` | Group history buffer size |
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
-| `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
+| `showToolResults` | boolean | `false` | Show successful tool-call results. A failed turn sends one brief notice |
 | `debug` | boolean | `false` | Debug mode |
 
 ### Access control (access)
@@ -131,13 +151,29 @@ All three rosters (direct chat, group, commands) support three ways to add membe
 
 The config API returns `config.accessRevision`; submit it together with `access` updates. If the roster or mode changed since your read, the update returns 409 instead of overwriting the newer grants.
 
+### QQ group message scope and proactive messaging
+
+Ask the group owner to open the bot's settings in the mobile QQ group. Set these permissions separately for each group.
+
+| Mobile QQ setting | Behavior in DSH |
+|---|---|
+| Bot group message scope → Receive all group messages | QQ can deliver new messages that do not mention the bot. The workbench records them when the group is allowed and both receiving and saving messages are enabled for the conversation. In mention-only mode, ordinary messages can become recent context but do not start an Agent turn on their own. The workbench starts recording when messages arrive and does not backfill group history. |
+| Allow the bot to proactively message the group | The bot can send when no usable reply reference is available. Manual workbench sends prefer a valid reply reference when one exists. Automatic delivery of web replies uses a separate bot setting. |
+
+<img src="./assets/qq-group-permissions/message-scope.png" alt="Group message scope options in mobile QQ" width="300" />
+<img src="./assets/qq-group-permissions/proactive.png" alt="Proactive group messaging setting in mobile QQ" width="300" />
+
+The phone status bar and the bot adder’s display name are masked.
+
 ### Proactive delivery (proactiveDelivery)
 
 Turns triggered by QQ inbound always reply passively; service turns (e.g. schedules) are always pushed proactively. This only controls turns driven by non-QQ input (e.g. continuing a QQ session from the desktop):
 
 | Config | Type | Default | Description |
 |------|------|--------|------|
-| `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` never push; `c2c` push direct chats only; `all` push direct and group chats |
+| `proactiveDelivery.externalTurns` | `off` / `c2c` / `all` | `all` | Controls automatic delivery of Web replies and answers to agent questions. Choose off, direct chats only, or direct and group chats. |
+
+Groups receive the final answer once the turn is saved, or one short notice if the turn fails. Web input mixed into a QQ turn stops further automatic delivery. Editing, deleting, or re-queuing a QQ input revokes its delivery receipt. If a manual send has an unknown result, check QQ before sending again.
 
 ### Rich media (media)
 
@@ -173,11 +209,12 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/compact` | Compact session history (replace old records with a summary) |
 | `/unarchive` (alias `/restore`) | Unarchive the current session (archived sessions process no messages) |
 | `/model` | View or switch model |
+| `/effort [level]` | View reasoning effort and available levels. Set the current Session's effort while idle, or use `/effort default` to restore the model default |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/stop` | Abort the current generation |
 | `/bot-ping` | Network latency test (transport & processing time) |
 | `/bot-version` | View version info |
-| `/bot-status` | View current session status |
+| `/bot-status` | View the model, reasoning effort, generation state, queue size, and estimated context usage |
 | `/bot-help` | View all commands |
 
 ## Session Routing
@@ -215,6 +252,8 @@ pnpm dev
 export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
+
+See the [testing guide](./TESTING.md) for the local QQ fixture, isolated Host checks, and coverage limits. Agents can use [qqbot-verify](./.agents/skills/qqbot-verify/SKILL.md).
 
 ## License
 

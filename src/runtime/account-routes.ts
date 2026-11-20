@@ -6,9 +6,10 @@
  * 浏览器认证由宿主施加；本模块只做业务校验。
  */
 import type { PairPurpose } from '../shared/pairing-protocol.ts';
-import { ACCOUNT_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import type { Context } from '@deepseek-ai/cordis';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import type { RpcMethodHandler, RpcResult } from '../rpc-carrier.ts';
-import { rpcFailure, rpcOk } from '../rpc-carrier.ts';
+import { registerPluginRpc, rpcFailure, rpcOk } from '../rpc-carrier.ts';
 import type { AccountAccessService } from './account-service.ts';
 
 function field(payload: Record<string, unknown>, name: string, empty = false): string {
@@ -29,15 +30,37 @@ function pairPurpose(payload: Record<string, unknown>): PairPurpose {
  * @param service - 账号访问服务（配对码与名单）
  * @param commands - 斜杠命令清单
  */
-export function createAccountRpcHandler(service: AccountAccessService, commands: () => unknown): RpcMethodHandler {
+interface AccountRouteTarget {
+  service: AccountAccessService;
+  enabled: boolean;
+}
+
+export function registerAccountRoutes(
+  ctx: Context,
+  resolve: (appId: string | null) => AccountRouteTarget | undefined,
+  commands: (target: AccountRouteTarget) => unknown,
+): void {
+  registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(resolve, commands));
+}
+
+export function createAccountRpcHandler(
+  resolve: (appId: string | null) => AccountRouteTarget | undefined,
+  commands: (target: AccountRouteTarget) => unknown,
+): RpcMethodHandler {
   return async (method, payload): Promise<RpcResult> => {
     try {
+      const appId = payload.appId === undefined ? null : field(payload, 'appId');
+      const target = resolve(appId);
+      if (method === ACCOUNT_METHODS.commands && !target && appId === null) return rpcOk({ commands: [] });
+      if (!target) return rpcFailure('account/not-found', '找不到这个 QQ 机器人');
+      const { service } = target;
       switch (method) {
         case ACCOUNT_METHODS.commands:
-          return rpcOk({ commands: commands() });
+          return rpcOk({ commands: commands(target) });
         case ACCOUNT_METHODS.pairStatus:
           return rpcOk(service.pairStatus());
         case ACCOUNT_METHODS.pairIssue: {
+          if (!target.enabled) return rpcFailure('pair/rejected', '请先启用这台机器人，再生成配对码');
           const purpose = pairPurpose(payload);
           const previousCode = payload.previousCode === undefined ? undefined : field(payload, 'previousCode');
           const previousClaims = previousCode
@@ -52,7 +75,7 @@ export function createAccountRpcHandler(service: AccountAccessService, commands:
         }
         case ACCOUNT_METHODS.pairManual: {
           const purpose = pairPurpose(payload);
-          const openid = field(payload, 'openid', true);
+          const openid = field(payload, 'openid');
           const result = service.addManualMember(purpose, openid);
           if (!result.ok) return rpcFailure('pair/rejected', result.message);
           return rpcOk({ ...result, ...service.pairStatus() });

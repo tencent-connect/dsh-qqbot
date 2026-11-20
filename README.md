@@ -43,11 +43,11 @@ QQ 用户 → QQ WebSocket → dsh-qqbot → ctx.agents → dsh agent loop → L
 
 <img src="./assets/docs/install.png" alt="端内添加插件" width="560" />
 
-2. **连接**：左下角头像 → 设置 →「QQ 机器人」→ 手机 QQ 扫码连接
-
-<img src="./assets/docs/setting.png" alt="设置页扫码连接" width="560" />
+2. **连接**：打开左侧的「QQ 机器人」工作台，用手机 QQ 扫码连接。已有机器人时，点击机器人列表顶部的「＋」继续添加。
 
 扫码成功后凭据自动保存，后续启动无需再次扫码。
+
+主包会安装同版本的「QQ 消息记录」。在插件详情的「包含的组件」中可单独停用记录界面，机器人仍会按会话设置保存消息。
 
 ### 方式二：手动执行
 
@@ -89,6 +89,26 @@ export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+### 从官方 0.5.5 升级
+
+先退出该 profile 的 Host，并备份它的 `cordis.patch.yml` 与 `~/.dsh-qqbot/model-prefs.json`。在原 profile 安装新版后直接启动。QQBot 沿用绑定及群聊、私聊名单，按 AppID 导入模型、预设和当前 Session 关联。关联需通过当前 Host 的 Session 持久化校验。原 Session 和工作目录继续通过 DSH 打开。
+
+旧配置省略 `access.commandMode` 时，斜杠命令默认采用「所有人」。获准接入的发送者适用相同的命令授权规则。可以在「斜杠命令」中选择独立的命令白名单或关闭。
+
+设置、记录与投递凭证默认位于当前 profile 的 `qqbot-state/`。可用 `QQBOT_DATA_DIR` 指定独立的绝对路径。另一 Host 已占用同一实际目录时，请先退出占用进程或改用独立 profile 和目录。
+
+回退时退出 Host，重新安装 `@tencent-connect/dsh-qqbot@0.5.5`，恢复备份的 profile 配置，再启动。同一 profile 的旧偏好文件仍可供 0.5.5 读取。
+
+### DSH 宿主能力
+
+| 已验证的宿主 | QQ 收发 | QQ 工作台与记录组件 | 标准与 PTC 自定义工具 |
+| --- | --- | --- | --- |
+| 官方 `0.1.0-rc.8`（按发布版本固定 Cordis 依赖） | 支持 | 需要宿主提供 Fetch 和 UI 接口 | 需要升级 |
+| 官方 `0.2.2-rc.3` | 支持 | 支持 | 需要升级 |
+| 提供可撤销作用域执行器与派发守卫的宿主 | 支持 | 支持 | 支持 |
+
+缺少工具权限接口时，已有受限 QQ 会话会暂停执行，并在工作台显示原因。可切回原生工具设置，或升级支持该接口的宿主。
+
 ## 配置项
 
 | 配置 | 类型 | 默认值 | 说明 |
@@ -109,7 +129,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `maxQueue` | number | `20` | 并发队列最大长度 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
-| `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
+| `showToolResults` | boolean | `false` | 是否展示工具调用成功结果。整轮失败时只发送简短提示 |
 | `debug` | boolean | `false` | 调试模式 |
 
 ### 访问控制（access）
@@ -131,13 +151,39 @@ QQ 斜杠命令与群聊、私聊共用“所有人／白名单／关闭”模�
 
 配置接口的 GET 返回 `config.accessRevision`，更新 `access` 时应一并提交该值；名单或模式已变化时返回 409，不覆盖现有授权。
 
+### QQ 群消息范围与主动发言
+
+请群主在手机 QQ 的群聊中打开该机器人的设置，按需配置以下权限。每个群分别设置。
+
+| 手机 QQ 设置 | DSH 中的行为 |
+|---|---|
+| 「机器人可获取的群聊消息范围」→「获取群内全部消息」 | QQ 可推送后续未 @ 机器人的普通群消息。群获准接入、开启「接收 QQ 消息」且启用本机消息记录时，工作台会记录收到的消息。启用「群聊仅回复 @机器人的消息」时，普通消息可以进入近期上下文，但不会单独启动 Agent。工作台从收到的消息开始记录，不补拉群历史。 |
+| 「机器人主动在群聊内发言」 | 允许机器人在没有可用回复凭据时发消息。工作台直接发送时优先使用可用的回复凭据。QQ 侧授权与网页回答是否自动推送分别配置。 |
+
+<img src="./assets/qq-group-permissions/message-scope.png" alt="手机 QQ 群消息范围选项" width="300" />
+<img src="./assets/qq-group-permissions/proactive.png" alt="手机 QQ 机器人主动发言设置" width="300" />
+
+截图已遮盖手机状态栏和机器人添加者的昵称。
+
+QQ 工作台支持独立启停记录组件，右侧会话设置也可由扩展注册分组。见 [QQ 工作台扩展](./docs/workbench/extensions.md)。
+
 ### 主动推送（proactiveDelivery）
 
 QQ 入站触发的回合始终被动回复；定时任务等服务回合始终主动推送到 QQ。下表只控制「非 QQ 输入（如桌面续聊 QQ 会话）」的回合：
 
 | 配置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` 不推送；`c2c` 仅推送私聊；`all` 私聊和群聊都推送 |
+| `proactiveDelivery.externalTurns` | `off` / `c2c` / `all` | `all` | 关闭、仅私聊或同时推送私聊和群聊，适用于网页续聊和网页补答 |
+
+### 回合来源与投递防重
+
+QQ 提问通过原生 `followup` 进入 Inbox。同一群或联系人的输入按到达顺序排队。入站回执绑定平台消息、发送者、Session、回复目标和正文摘要。编辑、删除或重新排队会撤销原回执。重启后无法验证来源的待处理输入也会停止 QQ 自动投递。
+
+群聊在本轮结束并确认 Session 落盘后发送最终答复，整轮失败时发一条简短提示。QQ 回合混入网页输入后停止后续自动投递。私聊流式、工具结果、最终正文和文件共用来源与接入检查。QQ 会话中的文件工具使用本轮已验证的对话目标。独立 DSH 会话可显式指定允许的目标，发送前会检查文件路径。
+
+插件数据目录下的账号独立 `delivery-*.jsonl` 只保存输入关联、摘要和发送操作状态，不保存聊天正文。提交前持久登记，重复事件、重载和重启不主动重发或重新入队。每个流式请求和文件上传后的发送都会复查权限。首个流式帧因回复目标过期而明确被拒时，沿用原有静态回复路径。提问卡片只有在平台明确拒绝时才改为纯文本，同一道题共用一个投递标识。结果未知时停止自动发送。接口接受只表示 QQ 平台接受请求。
+
+请随 profile 数据一起保留账本。记录损坏或不完整时停止发送，并保留原账本。手动发送明确被平台拒绝时，可用原操作重试。状态为「发送结果未知」时请先在 QQ 核对。
 
 ### 富媒体理解（media）
 
@@ -173,11 +219,13 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
 | `/unarchive`（别名 `/restore`） | 取消归档当前会话（归档后消息不会被处理） |
 | `/model` | 查看或切换模型 |
+| `/effort [档位]` | 查看当前推理强度与可选档位，空闲时为当前 Session 设置档位。用 `/effort default` 恢复模型默认值 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/stop` | 中止当前生成 |
 | `/bot-ping` | 网络延迟检测（返回传输与处理耗时） |
 | `/bot-version` | 查看版本信息 |
-| `/bot-status` | 查看当前会话状态 |
+| `/bot-me` | 查看自己的 OpenID，群聊中同时显示群 OpenID |
+| `/bot-status` | 查看模型、推理强度、生成状态、排队消息数和上下文占用估算 |
 | `/bot-help` | 查看所有指令 |
 
 ## 会话路由
@@ -187,6 +235,8 @@ sessionKey: `qqbot:${appId}:${scope}:${peerId}`，新会话铸造 UUID 会话 id
 解析策略：进程内复用 → 持久化恢复 → 全新创建。
 
 QQ 群聊和私聊的补充提示词按当前 Agent 作用域加载，恢复会话时继续使用对应场景的配置。
+
+补充提示词可直接填写，也可选择 DSH 宿主上的 MD、TXT、DOCX 文件。采用文件时，保存设置会绑定路径，之后每次组装模型请求时读取原文件。MD 和 TXT 可预览并在工作台保存到原文件。DOCX 可预览正文，也可在带桌面的宿主上打开原文编辑。
 
 ## 设计原则
 
@@ -217,6 +267,8 @@ pnpm dev
 export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
+
+测试入口、隔离 Host 用法与覆盖边界见 [测试指南](./TESTING.md)；Agent 可使用 [qqbot-verify](./.agents/skills/qqbot-verify/SKILL.md)。
 
 ## License
 

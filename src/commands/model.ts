@@ -66,7 +66,9 @@ export function modelCommand({ manager, config }: CommandDeps): CategorizedComma
         return '用法: /model provider/model\n示例: /model deepseek-official/deepseek-v4-flash';
       }
 
-      await manager.setModelOverride(scope, peerId, { provider, model });
+      await manager.setModelOverride(scope, peerId, { provider, model }, {
+        senderId: cmdCtx.message.senderId, replyTarget: cmdCtx.replyTarget,
+      });
       return `✅ 模型已切换: ${provider}/${model}\n立即生效，对话上下文保留。`;
     },
   };

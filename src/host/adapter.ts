@@ -6,6 +6,7 @@
  * 调用方只依赖本模块的稳定签名，不再直接假设宿主形态。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { ModelSelection } from '../model/types.ts';
 
 /** 日志最小接口 */
 export interface AdapterLogger {
@@ -25,6 +26,8 @@ export interface HostAdapter {
   buildForkSeed(events: readonly unknown[], boundary: number): Promise<readonly unknown[] | undefined>;
   /** 会话 header 读取（取 agentPreset 等）；会话不存在、服务缺失或读取失败返回 undefined */
   sessionHeader(sessionId: string): Promise<SessionHeaderLike | undefined>;
+  storedModelSelection(sessionId: string): Promise<ModelSelection | undefined>;
+  contextOccupancy(session: unknown): number | undefined;
   /**
    * 会话是否存在于持久化层。
    *
@@ -60,9 +63,23 @@ export interface HostAdapter {
   readonly capabilities: string[];
 }
 
+interface SessionQueryLike {
+  observeSession(id: string): Promise<Disposable & {
+    projections?: { values: { modelSelection?: { next: ModelSelection | null } } };
+  }>;
+}
+
+interface ContextPressureLike {
+  projectedTokens?: number;
+  pressureTokens?: number;
+  contextWindow?: number;
+}
+
 /** 会话 header 的最小结构（只读插件关心的字段；`agentPreset` 在 header 顶层） */
 export interface SessionHeaderLike {
+  id?: string;
   agentPreset?: string;
+  cwd?: string;
 }
 
 /** 工作区实体最小契约（对齐 dsh-workspace Workspace） */
@@ -81,9 +98,6 @@ export interface WorkspaceRegistryLike {
   unarchiveSession?: (sessionId: string) => Promise<void>;
 }
 
-/** 插件创建的工作区显示名；仅在该 cwd 尚无工作区时生效（幂等 create 不改既有 title） */
-const WORKSPACE_TITLE = 'QQBot';
-
 /**
  * 持久化服务的最小只读契约。
  *
@@ -92,7 +106,8 @@ const WORKSPACE_TITLE = 'QQBot';
  * `list`（全量扫描）。
  */
 interface SessionPersistenceLike {
-  stat(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+  stat?(id: string): Promise<{ header?: SessionHeaderLike } | undefined>;
+  list?(): Promise<readonly SessionHeaderLike[]>;
 }
 
 /**
@@ -101,9 +116,23 @@ interface SessionPersistenceLike {
  * 宿主服务是版本漂移点，必须探测方法是否存在再调用：直接调用缺失的方法会抛
  * `TypeError`，与「后端故障」混在一起，让调用方误以为求证过了。
  */
-function statCapablePersistence(ctx: Context): SessionPersistenceLike | undefined {
+function sessionPersistence(ctx: Context): SessionPersistenceLike | undefined {
   const persistence = safeGet(ctx, 'sessionPersistence') as SessionPersistenceLike | undefined;
-  return typeof persistence?.stat === 'function' ? persistence : undefined;
+  return typeof persistence?.stat === 'function' || typeof persistence?.list === 'function' ? persistence : undefined;
+}
+
+async function readSessionHeader(persistence: SessionPersistenceLike, id: string): Promise<SessionHeaderLike | undefined> {
+  return persistence.stat ? (await persistence.stat(id))?.header
+    : (await persistence.list?.())?.find(header => header.id === id);
+}
+
+/** Older Hosts expose only a metadata list. Take it once for the upgrade. */
+export async function sessionIdentityReader(ctx: Context): Promise<((id: string) => Promise<boolean>) | undefined> {
+  const persistence = sessionPersistence(ctx);
+  if (!persistence) return undefined;
+  if (persistence.stat) return async id => (await readSessionHeader(persistence, id))?.id === id;
+  const ids = new Set((await persistence.list?.())?.map(header => header.id));
+  return async id => ids.has(id);
 }
 
 /** 取出可用的 workspaceRegistry；形态不匹配返回 undefined（dsh-workspace 未挂载时无侧边栏） */
@@ -143,16 +172,20 @@ async function importModule(spec: string, logger?: AdapterLogger): Promise<Recor
   return mod;
 }
 
-export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAdapter {
+export function createHostAdapter(
+  ctx: Context,
+  logger?: AdapterLogger,
+  workspaceTitle?: (cwd: string) => string | undefined,
+): HostAdapter {
   const capabilities: string[] = [];
 
   // events 读取路径只有运行时才能确定，sessionEvents 内自适应
   capabilities.push('sessionEvents(s自适应)');
 
   // 可能在插件启动后才注册，sessionExists/sessionHeader 内每次重新探测；此处仅记录启动时形态
-  capabilities.push(statCapablePersistence(ctx)
-    ? 'sessionPersistence.stat(可用)'
-    : 'sessionPersistence.stat(不可用，会话存在性判定降级)');
+  const persistence = sessionPersistence(ctx);
+  capabilities.push(persistence?.stat ? 'sessionPersistence.stat'
+    : persistence?.list ? 'sessionPersistence.list' : 'sessionPersistence(unavailable)');
   capabilities.push(workspaceRegistry(ctx)
     ? 'workspaceRegistry.create(可用)'
     : 'workspaceRegistry.create(不可用，侧边栏工作区归属降级)');
@@ -207,19 +240,48 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
     },
 
     async sessionHeader(sessionId) {
-      const persistence = statCapablePersistence(ctx);
+      const persistence = sessionPersistence(ctx);
       if (!persistence) return undefined;
       try {
-        return (await persistence.stat(sessionId))?.header;
+        return await readSessionHeader(persistence, sessionId);
       } catch {
         return undefined; // 读不到 preset 不该阻断会话打开，回落到当前 effective preset
       }
     },
 
+    async storedModelSelection(sessionId) {
+      const query = safeGet(ctx, 'sessionQuery') as SessionQueryLike | undefined;
+      if (typeof query?.observeSession !== 'function') return undefined;
+      const observation = await query.observeSession(sessionId);
+      try {
+        return observation.projections?.values.modelSelection?.next ?? undefined;
+      } finally {
+        observation[Symbol.dispose]();
+      }
+    },
+
+    contextOccupancy(session) {
+      const projections = safeGet(ctx, 'sessionProjections') as {
+        snapshot(session: unknown, keys: readonly string[]): { values: { contextPressure?: ContextPressureLike } };
+      } | undefined;
+      if (typeof projections?.snapshot !== 'function') return undefined;
+      try {
+        const pressure = projections.snapshot(session, ['contextPressure']).values.contextPressure;
+        const used = pressure?.projectedTokens ?? pressure?.pressureTokens;
+        const window = pressure?.contextWindow;
+        if (used === undefined || !Number.isFinite(used) || used < 0
+          || window === undefined || !Number.isFinite(window) || window <= 0) return undefined;
+        return Math.min(100, Math.round(used / window * 100));
+      } catch {
+        return undefined;
+      }
+    },
+
     async sessionExists(sessionId) {
-      const persistence = statCapablePersistence(ctx);
+      const persistence = sessionPersistence(ctx);
       if (!persistence) return undefined;
-      return (await persistence.stat(sessionId)) !== undefined;
+      return persistence.stat ? (await persistence.stat(sessionId)) !== undefined
+        : (await readSessionHeader(persistence, sessionId)) !== undefined;
     },
 
     isSessionArchived(sessionId) {
@@ -251,7 +313,7 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
         return;
       }
       try {
-        const workspace = await registry.create(cwd, WORKSPACE_TITLE);
+        const workspace = await registry.create(cwd, workspaceTitle?.(cwd));
         if (!workspace || typeof workspace.attachSession !== 'function') {
           // 宿主接口演进：返回对象不含 attachSession → warn 避免静默失效
           logger?.warn?.(`host adapter: workspaceRegistry.create 返回了无 attachSession 的对象，跳过会话 ${sessionId}`);

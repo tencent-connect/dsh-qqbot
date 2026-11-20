@@ -79,14 +79,13 @@ export function meCommand({ config }: CommandDeps): CategorizedCommand {
   };
 }
 
-/** /stop — 中止当前生成（隐藏） */
+/** /stop — 中止当前生成 */
 export function stopCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'stop',
     category: 'agent',
     scope: 'all',
     description: '中止当前生成',
-    hidden: true,
     handler: (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
       const record = manager.getSessionRecord(scope, peerId);

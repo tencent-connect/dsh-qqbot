@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
-import type { AssembleContext, PromptContext, PromptSection, SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import type { AssembleContext, PromptAssembly, PromptContext, PromptSection, SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { installQQPrompt, turnMetaText, type QQPromptEntry, type QQTurnContext } from '../prompt/index.ts';
 import { EXTRA_MAX_CHARS as QQ_EXTRA_PROMPT_MAX_CHARS } from './extra.ts';
 
@@ -11,10 +14,22 @@ function fakeSystemPrompt() {
     section(s: PromptSection) { sections.set(s.name, s); return () => sections.delete(s.name); },
     context(c: PromptContext) { contexts.set(c.name, c); return () => contexts.delete(c.name); },
   } satisfies Pick<SystemPrompt, 'section' | 'context'>;
-  const ctx = { get: (n: string) => n === 'systemPrompt' ? service : undefined } as unknown as Context;
+  type Listener = (assembly: PromptAssembly, context: AssembleContext, next: () => Promise<PromptAssembly>) => Promise<PromptAssembly>;
+  let listener: Listener | undefined;
+  const ctx = {
+    get: (n: string) => n === 'systemPrompt' ? service : undefined,
+    on(_event: 'system-prompt/assemble', handler: Listener) { listener = handler; return () => { listener = undefined; }; },
+  } as unknown as Context;
   const render = (map: ReadonlyMap<string, PromptSection | PromptContext>, c: AssembleContext) => [...map.values()].sort((a, b) => a.order - b.order)
     .map((s) => typeof s.text === 'function' ? s.text(c) : s.text).filter((t) => t.length > 0).join('NL');
-  return { ctx, sections, contexts, renderSections: (c: AssembleContext = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: AssembleContext = {}) => render(contexts, c) };
+  const assemble = async (context: AssembleContext = {}): Promise<PromptAssembly> => {
+    const assembly = {
+      sections: [...sections.values()].map(section => ({ name: section.name, text: typeof section.text === 'function' ? section.text(context) : section.text })),
+      contexts: [], variables: {}, tools: [],
+    };
+    return listener ? listener(assembly, context, async () => assembly) : assembly;
+  };
+  return { ctx, sections, contexts, assemble, renderSections: (c: AssembleContext = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: AssembleContext = {}) => render(contexts, c) };
 }
 
 const NL = String.fromCharCode(10);
@@ -74,6 +89,26 @@ describe('installQQPrompt (DSH section/context 注册)', () => {
     expect(rendered).toContain(prompt);
     expect(rendered).not.toContain('OTHER_SCOPE_ONLY');
     expect(rendered).not.toContain(scope === 'group' ? 'OLD_GROUP' : 'OLD_DIRECT');
+  });
+  it('resolves the chosen file at assembly and reports a missing file after a previous read', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qq-prompt-assembly-'));
+    const path = join(directory, 'group.md');
+    const sp = fakeSystemPrompt();
+    const handle = installQQPrompt(sp.ctx, entry({
+      extraPrompts: () => ({ group: { kind: 'file', path }, direct: { kind: 'file', path: join(directory, 'unused.md') } }),
+    }));
+    try {
+      await writeFile(path, 'first');
+      const output = async () => (await sp.assemble()).sections.find(section => section.name === 'qqbot:extra')?.text;
+      await expect(output()).resolves.toBe('first');
+      await writeFile(path, 'second');
+      await expect(output()).resolves.toBe('second');
+      await rm(path);
+      await expect(output()).rejects.toThrow('找不到补充提示词文件');
+    } finally {
+      handle.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
   it('reads verified turn facts lazily and clears them when the current turn has none', () => {
     const sp = fakeSystemPrompt();

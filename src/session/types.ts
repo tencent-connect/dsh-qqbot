@@ -3,9 +3,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ChatScope, ReplyTarget } from '../types.ts';
+import type { ModelSelection } from '../model/types.ts';
 
 /** AgentSetup hook 类型 */
-export type AgentSetup = (agentCtx: Context) => Promise<void> | void;
+export type AgentSetup = (agentCtx: Context, agent?: DshAgent) => Promise<void> | void;
 
 /** dsh SessionEvent 简化类型（用于统计 token 用量 / 导出） */
 export interface SessionEventLike {
@@ -23,14 +24,24 @@ export interface SessionEventLike {
 export interface DshAgent {
   readonly id: string;
   readonly ctx: Context;
+  readonly model?: {
+    current?(): ModelSelection | undefined;
+    select(route: ModelSelection): void;
+  };
   /** 当前生命周期状态（用于判断是否正在生成） */
   readonly status: 'idle' | 'running';
   /** 底层 session（fork 时作为 source；snapshotEvents 用于统计/导出） */
   readonly session: {
     readonly id: string;
+    readonly header?: { agentPreset?: string; parentSession?: string };
     snapshotEvents(): readonly SessionEventLike[];
   };
-  cancel(cause: { kind: string }): void;
+  readonly inbox?: {
+    readonly nextStep: readonly { id: string; source?: { kind: string } }[];
+    readonly nextTurn: readonly { id: string }[];
+    remove(id: string): unknown;
+  };
+  cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void;
   followup(message: unknown): void;
   whenIdle(): Promise<void>;
   /** 运行一个非 turn 维护任务（compact 等需要 idle 时串行执行的操作） */
@@ -88,10 +99,11 @@ export interface DshAgentHandle {
 export interface DshAgentRegistry {
   /** 获取进程内已存活的 agent */
   get(sessionId: string): DshAgent | undefined;
+  list?(): readonly DshAgent[];
   /** 从持久化存储恢复 session */
   resume(options: {
     resumeSessionId: string;
-    agentOptions?: { provider?: string; model?: string };
+    agentOptions?: { provider?: string; model?: string; reasoningEffort?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
   /** 创建全新 session */
@@ -101,7 +113,7 @@ export interface DshAgentRegistry {
     seed?: readonly unknown[];
     /** 继承前缀长度（seeded fork 用，对齐宿官方 commands.fork） */
     inheritedEventCount?: number;
-    agentOptions?: { provider?: string; model?: string };
+    agentOptions?: { provider?: string; model?: string; reasoningEffort?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
 }
@@ -137,20 +149,21 @@ export interface SessionRecord {
   replyTarget: ReplyTarget;
   scope: ChatScope;
   peerId: string;
-  senderId: string;
+  senderId?: string;
   lastActivity: number;
   agentPreset?: string;
 }
 
-/** 会话状态信息（/status 用） */
+/** 会话状态信息（/bot-status 用） */
 export interface SessionStatus {
-  active: boolean;
-  sessionId?: string;
-  provider?: string;
-  model?: string;
+  sessionId: string;
+  selection?: ModelSelection;
+  running: boolean;
+  queued?: number;
+  contextOccupancy?: number;
   preset?: string;
   lastActivity?: number;
-  messageCount?: number;
+  messageCount: number;
 }
 
 /** token 用量统计（/cost 用） */

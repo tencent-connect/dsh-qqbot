@@ -12,11 +12,11 @@ import { BUTTONS_PER_ROW, buttonLabel, encodeButtonData } from './button-utils.t
  *
  * 多行多列布局：每行 BUTTONS_PER_ROW 个按钮，减少选项多时的刷屏。
  *
- * button_data 编码 `{"t":"question","q":<问题id>,"i":<选项下标>}`，由分发器解码。
+ * button_data 编码 `{"t":"question","q":<题目令牌>,"i":<选项下标>}`，由分发器解码。
  * `t` 顶层判别字段供 interaction 统一路由；`q` 关联「当前正在问的题」：逐题
- * 推进时旧题按钮在新题发出后被点击，其 q 不等于当前题 id，可被识别并忽略。
+ * 推进时旧题按钮在新题发出后被点击，其 q 不等于当前题令牌，可被识别并忽略。
  */
-export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefined {
+export function buildKeyboard(question: UserQuestion, answerToken = question.id): InlineKeyboard | undefined {
   const opts = question.options ?? [];
   if (opts.length === 0 || question.multiSelect) return undefined;
 
@@ -26,7 +26,7 @@ export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefine
       buttons: opts.slice(i, i + BUTTONS_PER_ROW).map((o, offset) => {
         const idx = i + offset;
         return {
-          id: `q-${question.id}-opt-${idx}`,
+          id: `q-${answerToken}-opt-${idx}`,
           render_data: {
             label: buttonLabel(o.label),
             visited_label: '✓ 已选',
@@ -36,10 +36,10 @@ export function buildKeyboard(question: UserQuestion): InlineKeyboard | undefine
             type: 1,
             permission: { type: 2 },
             click_limit: 1,
-            data: encodeButtonData({ t: 'question', q: question.id, i: idx }),
+            data: encodeButtonData({ t: 'question', q: answerToken, i: idx }),
           },
           // 同一题的选项共享分组：点一个后其余变灰（单选互斥）
-          group_id: `q-${question.id}`,
+          group_id: `q-${answerToken}`,
         };
       }),
     });

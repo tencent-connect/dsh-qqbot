@@ -90,13 +90,13 @@ describe('persistCredentialsToProfile', () => {
     expect(entryIds(after)).toEqual(['insert', 'ui-settings', 'im-qqbot', 'llm-deepseek']);
   });
 
-  it('userOpenid 覆盖 c2cAllow 并切到白名单模式（旧扫码者不残留），保留群配置', () => {
+  it('preserves saved access when the primary scanner returns an OpenID', () => {
     writeFileSync(patchPath, [
       '- id: im-qqbot',
       '  config:',
-      '    appId: old-app',
+      '    appId: test-app',
       '    access:',
-      '      c2cMode: open',
+      '      c2cMode: allowlist',
       '      c2cAllow:',
       '        - old-owner',
       '      groupMode: open',
@@ -107,8 +107,8 @@ describe('persistCredentialsToProfile', () => {
     const after = readFileSync(patchPath, 'utf8');
     expect(after).toContain('c2cMode: allowlist');
     expect(after).toContain('groupMode: open');
-    expect(after).toContain('qr-user');
-    expect(after).not.toContain('old-owner');
+    expect(after).toContain('old-owner');
+    expect(after).not.toContain('qr-user');
   });
 
   it('userOpenid 相同时幂等（不重复）', () => {
@@ -125,14 +125,14 @@ describe('persistCredentialsToProfile', () => {
     expect((after.match(/qr-user/g) ?? []).length).toBe(1);
   });
 
-  it('无 access 配置时新建（白名单模式 + 仅扫码者，不固化群配置）', () => {
+  it('keeps private access open for the first primary scan', () => {
     expect(persistCredentialsToProfile({ ...credentials, userOpenid: 'qr-user' }, dir, log)).toBe(true);
 
     const after = readFileSync(patchPath, 'utf8');
-    expect(after).toContain('c2cMode: allowlist');
-    expect(after).toContain('c2cAllow');
-    expect(after).toContain('qr-user');
-    expect(after).not.toContain('groupMode');
+    expect(after).not.toContain('qr-user');
+    expect(readProfileAccess({}, dir, credentials.appId)).toEqual({
+      c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'open',
+    });
   });
 
   it('文件不存在时安全重建（新条目）', () => {
@@ -189,6 +189,12 @@ describe('persistCredentialsToProfile', () => {
 });
 
 describe('removeCredentialsFromProfile', () => {
+  it('does not remove credentials if the primary AppID changed', () => {
+    writeFileSync(patchPath, SHARED_PATCH, 'utf8');
+    expect(removeCredentialsFromProfile(dir, log, 'different-app')).toBe(false);
+    expect(readFileSync(patchPath, 'utf8')).toBe(SHARED_PATCH);
+  });
+
   it('仅移除凭据字段，保留条目其余 config 与其他插件内容', () => {
     writeFileSync(patchPath, SHARED_PATCH, 'utf8');
 

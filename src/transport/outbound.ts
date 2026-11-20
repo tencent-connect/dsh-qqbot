@@ -8,15 +8,14 @@ import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { ARCHIVED_SESSION_NOTICE } from '../shared/session-notice.ts';
-import { chunkMarkdownText } from './chunker.ts';
-import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
+import { OutboundBuffer, sendText, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import type { DeliverablesDelivererLike } from './deliverables.ts';
 import { QqInputRegistry } from './qq-input-origin.ts';
 import { TurnTracker, type DeliveryPlan } from './turn-tracker.ts';
+import { assertDeliveryAllowed, deliveryPart, deliveryTrace, replyDelivery } from './delivery-context.ts';
 import {
   parseEvent,
-  extractTurnError,
   type MessageEvent,
   type ToolCallEvent,
   type ToolResultEvent,
@@ -36,6 +35,8 @@ export type OutboundHandler = (session: SessionLike, event: RawSessionEvent) => 
 
 /** 出站事件入口集合：durable 事件 + 实时流式帧 */
 export interface OutboundHandlers {
+  dispose(): void;
+  discardInput(sessionId: string, messageId: string): void;
   /** durable session 事件入口（注册到 ctx.on('session/event')） */
   routeSessionEvent(session: SessionLike, event: RawSessionEvent): void;
   /**
@@ -46,7 +47,7 @@ export interface OutboundHandlers {
 
 /** dsh Session 简化类型 */
 export interface SessionLike {
-  header: { id: string };
+  header: { id: string; cwd?: string };
 }
 
 /** 工具调用记录（tool/call 建立，tool/result 消费） */
@@ -55,17 +56,31 @@ interface ToolCallRecord {
   args: string;
 }
 
-/** 不展示给用户的轮次错误码（底层传输/网络错误，对用户无意义，且常被重试兜住） */
-const SILENT_TURN_ERROR_CODES = new Set(['STREAM_CLOSED']);
-
 /**
  * 出站路由器：持有会话级状态，按事件类型分发到处理器。
  * 回合归属与投递目标委托给 TurnTracker（与提问/审批/发文件共享）。
  */
 class OutboundRouter {
+  private closed = false;
+  private readonly groupAnswers = new Map<string, { seen: Set<string>; text?: string }>();
+
+  public discardInput(sessionId: string, messageId: string): void {
+    this.tracker.discard(sessionId, messageId);
+  }
+
+  public dispose(): void {
+    this.closed = true;
+    this.groupAnswers.clear();
+    for (const buffer of this.buffers.values()) buffer.cancel();
+    this.buffers.clear();
+    this.streamAttempts.clear();
+    this.toolCalls.clear();
+    this.presentedFiles.clear();
+    this.presentedCalls.clear();
+  }
   private readonly buffers = new Map<string, OutboundBuffer>();
   private readonly toolCalls = new Map<string, ToolCallRecord>();
-  private readonly streamAttempts = new Map<string, string>();
+  private readonly streamAttempts = new Map<string, { id: string; revision?: number; step?: number; index: number }>();
   /** 每会话本轮已声明的交付文件（deliverables/presented，轮末清空） */
   private readonly presentedFiles = new Map<string, PresentedFileRef[]>();
   /** 每会话已见过的 present callId（轮内去重，防事件重放导致重复投递） */
@@ -82,6 +97,7 @@ class OutboundRouter {
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
   private readonly deliverer: DeliverablesDelivererLike | undefined;
   private readonly tracker: TurnTracker;
+  private readonly outputOptions = new Map<string, Pick<ImQQBotConfig, 'streaming' | 'showToolResults'>>();
 
   public constructor(
     manager: SessionManager,
@@ -91,6 +107,7 @@ class OutboundRouter {
     tracker: TurnTracker,
     toolsRegistry: ToolsRegistryLike | undefined,
     deliverer?: DeliverablesDelivererLike,
+    private readonly flushSession?: (session: SessionLike) => Promise<boolean>,
   ) {
     this.manager = manager;
     this.bot = bot;
@@ -103,13 +120,25 @@ class OutboundRouter {
 
   /** 事件分发入口 */
   public route(session: SessionLike, raw: RawSessionEvent): void {
+    if (this.closed) return;
     const sessionId = session.header.id;
     if (raw.type === 'turn/start') {
-      if (this.tracker.begin(sessionId, eventTurn(raw.data))) this.resetTurnState(sessionId);
+      if (this.tracker.begin(sessionId, eventTurn(raw.data))) {
+        this.resetTurnState(sessionId);
+        try {
+          this.outputOptions.set(sessionId, this.manager.replyOptions?.(sessionId) ?? this.config);
+        } catch {
+          this.outputOptions.set(sessionId, { streaming: false, showToolResults: false });
+        }
+      }
       return;
     }
     if (raw.type === 'user/message') {
       this.tracker.note(sessionId, raw.data);
+      if (this.tracker.planFor(sessionId) === undefined) {
+        this.buffers.get(sessionId)?.cancel();
+        this.buffers.delete(sessionId);
+      }
       return;
     }
     if (!this.tracker.isCurrent(sessionId, raw.type, eventTurn(raw.data))) return;
@@ -117,24 +146,47 @@ class OutboundRouter {
     const event = parseEvent(raw);
     if (event === undefined) return;
 
-    const plan = this.tracker.planFor(sessionId);
+    const preStepFailure = event.type === 'turn/end' && (event.failure === 'model-unavailable' || event.failure === 'blocked');
+    const plan = this.tracker.planFor(sessionId) ?? (preStepFailure ? this.tracker.planForPreStepFailure(sessionId) : undefined);
     if (event.type === 'turn/end') {
       this.tracker.end(sessionId);
-      this.finishTurn(sessionId, event, plan);
+      if (plan?.target.scope === 'group') void this.finishGroup(session, event, plan);
+      else {
+        this.groupAnswers.delete(sessionId);
+        this.finishTurn(sessionId, event, plan, session.header.cwd);
+      }
+      this.outputOptions.delete(sessionId);
       return;
     }
     if (plan === undefined) return;
+    if (plan.target.scope === 'group') {
+      if (event.type === 'assistant/message' && (raw.surfaceOp === undefined || raw.surfaceOp === 'append')) {
+        const answer = this.groupAnswers.get(sessionId) ?? { seen: new Set<string>() };
+        const id = event.id;
+        if (id !== undefined && answer.seen.has(id)) return;
+        if (id !== undefined) answer.seen.add(id);
+        const text = messageText(event);
+        answer.text = raw.data.interrupted !== true && !event.content.some(block => block.type === 'tool-call') && text.trim()
+          ? text : undefined;
+        this.groupAnswers.set(sessionId, answer);
+      } else if (event.type === 'deliverables/presented') {
+        this.onPresented(sessionId, event);
+      }
+      return;
+    }
 
     const record = this.manager.findBySessionId(sessionId);
     switch (event.type) {
       case 'assistant/chunk':
+        plan.target = replyDelivery(plan.target, raw.data.step ?? this.streamAttempts.get(sessionId)?.step ?? 0);
         this.appendChunk(sessionId, plan, event.text);
         break;
       case 'assistant/message':
+        plan.target = replyDelivery(plan.target, raw.data.step ?? this.streamAttempts.get(sessionId)?.step ?? 0);
         this.onMessage(sessionId, plan, event);
         break;
       case 'tool/call':
-        if (record !== undefined) this.onToolCall(event);
+        if (record !== undefined) this.onToolCall(sessionId, event);
         break;
       case 'tool/result':
         if (record !== undefined) this.onToolResult(record, plan, event);
@@ -157,7 +209,11 @@ class OutboundRouter {
    */
   public routeStreamFrame(agentId: string, delta: StreamDelta): void {
     if (delta.kind === 'attempt-start') {
-      this.streamAttempts.set(agentId, delta.attemptId);
+      if (this.tracker.verifiesSources && (delta.turn === undefined || delta.step === undefined
+        || !this.tracker.isCurrent(agentId, 'stream', delta.turn) || !this.tracker.planFor(agentId))) return;
+      const previous = this.streamAttempts.get(agentId);
+      if (previous?.revision !== undefined && delta.revision !== undefined && delta.revision <= previous.revision) return;
+      this.streamAttempts.set(agentId, { id: delta.attemptId, revision: delta.revision, step: delta.step, index: -1 });
       this.buffers.get(agentId)?.reset();
       return;
     }
@@ -165,10 +221,21 @@ class OutboundRouter {
     // text-delta：首帧未见 start 时自愈记录，迟到帧丢弃
     const current = this.streamAttempts.get(agentId);
     if (current === undefined) {
-      this.streamAttempts.set(agentId, delta.attemptId);
-    } else if (current !== delta.attemptId) {
+      if (this.tracker.verifiesSources) return;
+      this.streamAttempts.set(agentId, { id: delta.attemptId, index: -1 });
+    } else if (current.id !== delta.attemptId || (current.revision !== undefined
+      && (delta.revision === undefined || delta.revision <= current.revision))) {
       return;
     }
+
+    if (current && delta.index !== undefined) {
+      if (delta.index <= current.index) return;
+      current.index = delta.index;
+    }
+    if (current && delta.revision !== undefined) current.revision = delta.revision;
+    const plan = this.tracker.planFor(agentId);
+    if (plan === undefined || plan.target.scope === 'group') return;
+    plan.target = replyDelivery(plan.target, current?.step ?? 0);
 
     // 已有 buffer：目标在创建时已拍下，直接追加，避免每帧重新解析
     const existing = this.buffers.get(agentId);
@@ -176,8 +243,6 @@ class OutboundRouter {
       existing.append(delta.text);
       return;
     }
-    const plan = this.tracker.planFor(agentId);
-    if (plan === undefined) return;
     this.appendChunk(agentId, plan, delta.text);
   }
 
@@ -190,7 +255,7 @@ class OutboundRouter {
         this.bot,
         this.config.textChunkLimit,
         this.logger,
-        this.shouldStream(plan),
+        this.shouldStream(sessionId, plan),
       );
       this.buffers.set(sessionId, buffer);
     }
@@ -198,15 +263,16 @@ class OutboundRouter {
   }
 
   /** 被动回复且 c2c 有 msgId 才流式（群聊、主动推送均不流式） */
-  private shouldStream(plan: DeliveryPlan): boolean {
+  private shouldStream(sessionId: string, plan: DeliveryPlan): boolean {
     return !plan.proactive
-      && this.config.streaming
+      && (this.outputOptions.get(sessionId) ?? this.config).streaming
       && plan.target.scope === 'c2c'
       && !!plan.target.msgId;
   }
 
   /** 新回合开始：丢弃上一轮残留的出站状态 */
   private resetTurnState(sessionId: string): void {
+    this.groupAnswers.delete(sessionId);
     this.buffers.get(sessionId)?.cancel();
     this.buffers.delete(sessionId);
     this.streamAttempts.delete(sessionId);
@@ -223,11 +289,7 @@ class OutboundRouter {
       return;
     }
 
-    const textParts: string[] = [];
-    for (const block of event.content) {
-      if (block.type === 'text' && block.text) textParts.push(block.text);
-    }
-    const fullText = textParts.join('\n');
+    const fullText = messageText(event);
     if (!fullText.trim()) return;
 
     this.trackText(sessionId, this.send(plan.target, fullText, 'sendMarkdown'));
@@ -240,17 +302,18 @@ class OutboundRouter {
   }
 
   /** 工具调用：仅记录，不发送（避免刷屏，等待结果） */
-  private onToolCall(event: ToolCallEvent): void {
-    this.toolCalls.set(event.callId, { name: event.name, args: event.arguments });
+  private onToolCall(sessionId: string, event: ToolCallEvent): void {
+    this.toolCalls.set(`${sessionId}:${event.callId}`, { name: event.name, args: event.arguments });
   }
 
-  /** 工具结果：错误始终发送，成功结果按开关 */
+  /** 失败详情留在原生会话，成功结果按开关发送。 */
   private onToolResult(record: SessionRecord, plan: DeliveryPlan, event: ToolResultEvent): void {
-    const call = this.toolCalls.get(event.callId);
-    this.toolCalls.delete(event.callId);
+    const key = `${record.sessionId}:${event.callId}`;
+    const call = this.toolCalls.get(key);
+    this.toolCalls.delete(key);
     if (call === undefined) return;
 
-    if (event.error === undefined && !event.isError && !this.config.showToolResults) return;
+    if (event.failed || !(this.outputOptions.get(record.sessionId) ?? this.config).showToolResults) return;
 
     const text = formatToolResult(
       call.name,
@@ -261,7 +324,7 @@ class OutboundRouter {
     );
     if (!text) return;
 
-    void this.send(plan.target, text, 'sendToolResult');
+    void this.send(deliveryPart(plan.target, 'tool-result', event.callId), text, 'sendToolResult');
   }
 
   /** 收集本轮声明的交付文件：事件总是先于 turn/end 到达，轮末统一投递 */
@@ -279,16 +342,41 @@ class OutboundRouter {
     this.presentedFiles.set(sessionId, files);
   }
 
+  private async finishGroup(session: SessionLike, end: TurnEndEvent, { target }: DeliveryPlan): Promise<void> {
+    const id = session.header.id;
+    const answer = this.groupAnswers.get(id)?.text;
+    const files = this.presentedFiles.get(id) ?? [];
+    this.resetTurnState(id);
+    if (!end.completed && !end.truncated && !end.failure) return;
+    try {
+      if (!await this.flushSession?.(session)) {
+        this.logger.warn('QQ group reply skipped because the Session could not be flushed.');
+        return;
+      }
+      if (this.closed) return;
+      if (deliveryTrace(target) !== undefined) assertDeliveryAllowed(target);
+      if (end.failure) {
+        await sendText(this.bot, target, this.failureNotice(id, end.failure), this.config.textChunkLimit);
+        return;
+      }
+      const text = end.truncated ? [answer, '⚠️ 已达到输出上限，回复可能不完整。'].filter(Boolean).join('\n\n') : answer;
+      if (text !== undefined) await this.send(target, text, 'sendGroupReply');
+      if (!this.closed && files.length > 0) await this.deliverer?.deliver(target, files, session.header.cwd);
+    } catch (error) {
+      this.logger.warn(`QQ group reply could not be delivered: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /**
    * 轮次结束：文本先送达、再投递交付文件、最后清理状态，异常结束时告知用户。
-   * 外层轮次失败不撤销已完成的声明（宿主契约），故失败轮的文件仍投递。
+   * 已阻止或模型不可用的回合只投递提示。其他失败沿用宿主已完成的文件声明。
    */
-  private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined): void {
+  private finishTurn(sessionId: string, event: TurnEndEvent, plan: DeliveryPlan | undefined, sessionCwd?: string): void {
     const buffer = this.buffers.get(sessionId);
     // 文本 flush 可等待，保证回复先于交付文件到达用户
     let flushTask: Promise<void> = Promise.resolve();
     if (buffer !== undefined) {
-      if (buffer.text.trim()) {
+      if (!event.failure && buffer.text.trim()) {
         flushTask = buffer.flush();
       } else {
         buffer.cancel();
@@ -296,64 +384,55 @@ class OutboundRouter {
       this.buffers.delete(sessionId);
     }
     this.streamAttempts.delete(sessionId);
-    const files = this.presentedFiles.get(sessionId) ?? [];
+    const files = event.failure === 'model-unavailable' || event.failure === 'blocked'
+      ? [] : this.presentedFiles.get(sessionId) ?? [];
     this.presentedFiles.delete(sessionId);
     this.presentedCalls.delete(sessionId);
     // assistant/message 已在轮内先行发送的文本可能仍在途：与 turn/end 自身的 flush 一起等待
     const pending = this.pendingText.get(sessionId) ?? Promise.resolve();
     this.pendingText.delete(sessionId);
 
-    const failure = extractTurnError(event.reason);
-    // 归档门禁拒绝的回合没有 user/message 归属，只有 blocked 一条线索：
-    // 这里再看一次归档集合，把"什么都没发生"变成一句可操作的话。
-    const archived = failure?.code === 'TURN_BLOCKED' && this.sessionArchived(sessionId);
     void (async () => {
       await Promise.all([flushTask, pending]);
-      if (plan !== undefined && failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
-        await this.send(plan.target, turnFailureNotice(failure, archived), 'sendTurnEndError');
+      if (plan !== undefined && event.failure) {
+        await this.send(plan.target, this.failureNotice(sessionId, event.failure), 'sendTurnEndError');
       }
       if (files.length > 0 && this.deliverer !== undefined && plan !== undefined) {
-        await this.deliverer.deliver(plan.target, files);
+        await this.deliverer.deliver(plan.target, files, sessionCwd);
       }
       this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
     })();
   }
 
-  /** 会话是否已归档；管理层未提供该能力时按未归档处理 */
-  private sessionArchived(sessionId: string): boolean {
-    return this.manager.isSessionArchived?.(sessionId) === true;
+  private failureNotice(sessionId: string, failure: NonNullable<TurnEndEvent['failure']>): string {
+    switch (failure) {
+      case 'blocked':
+        return this.manager.isSessionArchived?.(sessionId)
+          ? ARCHIVED_SESSION_NOTICE
+          : '⚠️ 本轮处理被阻止，未能完成。请在 DSH 中查看会话状态。';
+      case 'model-unavailable':
+        return '⚠️ 当前模型不可用，请切换模型后重试。';
+      case 'other':
+        return '⚠️ 本轮处理失败，请稍后重试。';
+    }
   }
 
   /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
   private async send(target: ReplyTarget, text: string, tag: string): Promise<void> {
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
-    for (const chunk of chunks) {
-      try {
-        await this.bot.sendMarkdown(target, chunk);
-      } catch (err) {
-        this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    try {
+      await sendText(this.bot, target, text, this.config.textChunkLimit);
+    } catch (err) {
+      this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
 
-function eventTurn(data: Record<string, unknown>): number | undefined {
-  return Number.isSafeInteger(data.turn) ? data.turn as number : undefined;
+function messageText(event: MessageEvent): string {
+  return event.content.flatMap(block => block.type === 'text' && block.text ? [block.text] : []).join('\n');
 }
 
-/**
- * 回合失败的用户可见文案。
- *
- * `blocked` 只有归档门禁这一条成因是确定的，其余仍按通用"被阻止"表述，
- * 避免把别的 pre-step 拒绝误说成归档。
- */
-function turnFailureNotice(failure: { code: string; message: string }, archived: boolean): string {
-  if (failure.code === 'TURN_BLOCKED') {
-    return archived
-      ? ARCHIVED_SESSION_NOTICE
-      : '⚠️ 本轮处理被阻止，未能完成。请在 DSH 中查看会话状态。';
-  }
-  return `⚠️ 本轮异常结束\n\`${failure.code}\`: ${failure.message}`;
+function eventTurn(data: Record<string, unknown>): number | undefined {
+  return Number.isSafeInteger(data.turn) ? data.turn as number : undefined;
 }
 
 /** 按配置组装回合跟踪器（入站登记表需与 handleInbound 共享同一实例） */
@@ -362,11 +441,12 @@ export function createTurnTracker(
   config: ImQQBotConfig,
   logger: Logger,
   inputs: QqInputRegistry = new QqInputRegistry(),
+  allowed?: (target: ReplyTarget) => boolean,
 ): TurnTracker {
   return new TurnTracker(
     manager,
     inputs,
-    { externalTurns: config.proactiveDelivery?.externalTurns ?? 'c2c' },
+    { appId: config.appId, externalTurns: config.proactiveDelivery?.externalTurns ?? 'all', allowed },
     logger,
   );
 }
@@ -387,10 +467,13 @@ export function createOutboundHandler(
   toolsRegistry?: ToolsRegistryLike,
   deliverer?: DeliverablesDelivererLike,
   tracker?: TurnTracker,
+  flushSession?: (session: SessionLike) => Promise<boolean>,
 ): OutboundHandlers {
   const turns = tracker ?? createTurnTracker(manager, config, logger);
-  const router = new OutboundRouter(manager, bot, config, logger, turns, toolsRegistry, deliverer);
+  const router = new OutboundRouter(manager, bot, config, logger, turns, toolsRegistry, deliverer, flushSession);
   return {
+    dispose: () => router.dispose(),
+    discardInput: (sessionId, messageId) => router.discardInput(sessionId, messageId),
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),
   };

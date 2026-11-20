@@ -13,12 +13,13 @@ describe('classifyTurnInput', () => {
   });
 
   it('宿主注入和 notice 不代表读者', () => {
-    expect(classifyTurnInput({ kind: 'user-question-reply' }, false)).toBe('internal');
-    expect(classifyTurnInput({ kind: 'runtime-context' }, false)).toBe('internal');
-    expect(classifyTurnInput({ kind: 'time-context' }, false)).toBe('internal');
+    expect(classifyTurnInput({ kind: 'user-question-reply' }, false)).toBe('external');
+    expect(classifyTurnInput({ kind: 'user-question-reply' }, true)).toBe('qq');
+    expect(classifyTurnInput({ kind: 'runtime-context' }, false)).toBe('context');
+    expect(classifyTurnInput({ kind: 'time-context' }, false)).toBe('context');
     expect(classifyTurnInput({ kind: 'schedule' }, false)).toBe('internal');
-    expect(classifyTurnInput({ kind: 'user', form: 'notice' }, true)).toBe('internal');
-    expect(classifyTurnInput(undefined, false)).toBe('internal');
+    expect(classifyTurnInput({ kind: 'user', form: 'notice' }, true)).toBe('context');
+    expect(classifyTurnInput(undefined, false)).toBe('context');
   });
 });
 

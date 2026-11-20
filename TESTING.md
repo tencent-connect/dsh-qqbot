@@ -1,0 +1,164 @@
+# QQ 机器人测试
+
+端到端夹具在 `tests/e2e/`，形式化模型和待建模场景见[模型索引](tests/formal/README.md)。Agent 指引在 [qqbot-verify](.agents/skills/qqbot-verify/SKILL.md)，`.codex/skills` 和 `.claude/skills` 都以相对符号链接指向 `.agents/skills`。
+
+## 日常检查
+
+安装仓库依赖后，运行受影响的单元测试、类型检查和构建：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test
+pnpm typecheck:client
+pnpm build
+```
+
+这些命令不证明插件能在真实 Host 中加载。构建前先确认产物是否正在被其他实例使用；宿主集成启动器本身不会重建插件或 DSH。
+
+## 形式化检查
+
+安装 Java 11 或更高版本，下载 [TLC 1.7.4](https://github.com/tlaplus/tlaplus/releases/tag/v1.7.4) 的 `tla2tools.jar` 到仓库外。运行器验证 JAR 的 SHA-256。Java 不在 PATH 时可设置 `JAVA` 为可执行文件路径。
+
+```bash
+TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal
+pnpm test src/transport/manual-send.test.ts src/transport/delivery-safety.test.ts
+pnpm test src/runtime/account-service.test.ts src/runtime/pairing-service.test.ts src/runtime/pairing-state.test.ts
+pnpm test src/session/session-manager.test.ts src/gateway/bootstrap.test.ts
+pnpm test src/transport/qq-delivery.test.ts src/transport/timeline-observer.test.ts
+pnpm test src/features/approval-channel.test.ts src/features/question-channel.test.ts
+pnpm test src/runtime/workbench-tools.test.ts
+```
+
+第一条运行手动发送、配对撤权、Session 切换、流式回退、审批与提问、入站归属与出站准入，以及自定义工具权限的模型及负对照。后续命令用插件代码回放反例。流式回执超时、撤权和 HTTP 重定向使用真实 QQ SDK 和本地 HTTP 服务，审批与提问使用可控的发卡 Promise 重放取消和晚到回执。当前仓库未接入此 CI 步骤。
+
+添加 `--ledger-loss` 后，通过 `lib/` 中的生产发送器和 QQ SDK 向本地 HTTP 服务重放。它验证重启后账本缺失、清空和恢复时，同一操作总共只发一次 POST。修改发送源码后先重建，再运行回放。
+
+```bash
+TLA2TOOLS=/absolute/path/to/tla2tools.jar pnpm verify:formal --ledger-loss
+```
+
+回放和模型都通过时返回 0，环境或结果有问题时返回 2。运行范围与账本恢复说明见[手动发送模型](tests/formal/qq-delivery/README.md)。
+
+## 隔离 Host 回放自定义工具
+
+先按[双包安装说明](docs/workbench/extensions.md)构建两个 QQ 插件包，使用支持 `tools.overrideExecutor` 的 DSH checkout（无需重建 Host）。本命令在新的绝对路径目录中安装包，启动独立 Home、工作区和 loopback 网关；不连接真实 QQ 或模型服务。需要可用的 `pnpm` 和 Node 22.19+ 或 24+。
+
+```bash
+node tests/e2e/tool-policy-host.mjs /absolute/dsh-source \
+  /absolute/dsh-qqbot.tgz /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+脚本通过真实 Host 抓取提交给 OpenAI 兼容接口的 `tools` 字段，并核对 Session 工具结果和文件是否创建。测试夹具把 `write` 停在 Host 守卫通过之后，分别通过 QQ 设置撤权、通过 DSH 原生 `/permission` 将权限调到上限之外。释放等待后，预期工具本体不会执行。恢复原生权限后，新一轮应能正常写入。脚本另启动真实的宿主内子 Agent，检查旧请求和 PTC 的授权。用同时缺少 QQ 撤权和原生权限修复的旧包跑正对照时追加 `baseline`。证据写入运行目录的 `report.json`，Host 结束后自动停止。
+
+默认回放也检查原生 Session 的权限恢复。停用 QQ 主组件后，原 Session 提供并运行 `write`。重新启用后，模型只看到 QQ 策略允许的 `read`，尝试 `write` 会被拦下。随后仅解绑并在原 Session 再次写入。用新的输出目录追加 `fixed --clear-bindings`，可回放「解绑并清除记录」，同时检查 QQ 关联已删除、原 Session 仍可使用 `write`。
+
+在命令末尾加 `fixed --browser` 可在同一 Host 回放 QQ 消息列和工具弹窗。浏览器使用 Host Web 工作区的 Playwright。已安装 Chrome 时可设 `QQBOT_BROWSER_CHANNEL=chrome`。用例覆盖引用、消息刷新失败后重试、返回 QQ 对话、旧工具组合、分类批量勾选，以及浏览器确认和服务端保存的边界。
+
+同一回放还会在机器人默认值和现有会话中绑定提示词文件，核对预览及模型请求都读到更新后的文件内容，并验证文件缺失时模型请求会停止。
+
+## 消息保留期与回退
+
+在上述隔离 Host 命令末尾加 `fixed --browser /absolute/old-qqbot.tgz`。浏览器回放自定义天数、撤销、缩短确认与实际过期记录删除，再使用同一隔离 Home 启动旧包，核对原 Session 和剩余记录。
+
+保存自定义天数后，仍只识别 7 天、30 天、长期保留和暂停记录的旧包会拒绝读取设置。回退时先停止使用该数据目录的 Host，再用新版包中附带的脚本转换。脚本把自定义项转为长期保留，并将转换前的设置原样备份到指定的新文件。
+
+```bash
+node /absolute/new-qqbot/scripts/prepare-retention-rollback.mjs \
+  /absolute/qqbot-data/conversation-settings.json /absolute/new-backup.json
+```
+
+转换完成后安装旧包并启动 Host。回退前已经清理的消息无法从这份设置备份恢复。
+
+## 从 0.5.5 升级和干净安装
+
+用 npm 发布的 DSH CLI 和正式 QQBot 0.5.5 安装包回放。脚本从旧包写入实际格式的会话和偏好，测试单次安装主包、回退及双进程目录锁。候选记录包在回环 registry 暂存。QQ 网关和模型均使用本地夹具。
+
+```bash
+node tests/e2e/upgrade-055.mjs /absolute/dsh/lib/bin.js \
+  /absolute/official-0.5.5.tgz /absolute/qqbot.tgz \
+  /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+使用 RC3 时运行默认模式。它验证带锚点和 `!!js` 的旧白名单、停留在同一 Session 时完整读回超长提示词、同 profile 的另一台机器人在单条设置异常后仍可收发和保存，以及降级后已撤销的成员依旧被拦。还会归档接回的旧 Session，验证提示、`/unarchive` 和 `/restore`，并确认恢复后继续使用原 Session。旧版 CLI 的基础收发回放在末尾加 `gateway`。RC8 的 npm 浮动依赖需固定到发行时的 Cordis 和相关插件版本。完整权限回放使用支持可撤销执行器的隔离 Host。
+
+## 隔离 Host 回放斜杠授权、队列与网页补答
+
+按[双包安装说明](docs/workbench/extensions.md)准备同版本安装包。使用支持 `session/updateQueue` 的 DSH 源码目录、Node 22.19+ 或 24+，并在 PATH 中提供 pnpm。输出目录使用全新的绝对路径。
+
+```bash
+node tests/e2e/access-delivery-host.mjs /absolute/dsh-source \
+  /absolute/dsh-qqbot.tgz /absolute/workbench-history.tgz /absolute/new-run-dir
+```
+
+脚本在独立 profile 安装候选包，使用回环 QQ 网关和模型。两位发送者分别私聊机器人，并在同一个已获准接入的群里发消息，其中一人进入斜杠命令白名单。逐一验证「所有人」「白名单」「关闭」下的 `/model`、`/preset`、`/effort` 和 `/bot-ping`。每种模式下四条普通消息都应收到回复，服务范围、命令白名单和 Session 关联保持原值。
+
+推理强度用例核对帮助中的 `/effort` 和 `/stop`，验证私聊和群聊实际请求使用所选档位，恢复默认后使用模型默认档位。检查无 Session 时的查询、生成中拒绝改档、排队及上下文状态，以及重启后读回原 Session 的选择。
+
+队列用例先让网页请求占住群 Session 的当前轮，再调用宿主 RPC 编辑、删除或转向排队的 QQ 消息。核对实际模型请求。删除后下次 @ 仍能读到之前的群背景，转向使消息和背景进入当前轮。两位成员的未 @ 消息和排队后到达的背景各进入历史一次。只有正常网页回合和有效的 QQ 输入会发到回环网关。
+
+网页补答在私聊和群聊各运行一次开启与关闭对照。等待限时提问进入待补答状态且原回合结束，再调用网页使用的 `userQuestions/answer`。补答应开始新回合。网页推送关闭时，网关收不到补答产生的消息，普通 QQ 输入仍能收到回复。回放结果写入 `report.json`。
+
+## 本地协议夹具
+
+验证入口要求 Node 22.19+ 或 Node 24+（不支持 Node 23）及 Python 3.10+。请先确认当前终端使用的版本。
+
+```bash
+node scripts/verify-qqbot.mjs
+node scripts/verify-qqbot.mjs --help
+```
+
+默认模式只验证本地 QQ HTTP/WebSocket 夹具与启动器边界，不启动 DSH，不调用模型，也不连接真实 QQ。虚拟凭据、固定测试用户和群组仅供回环测试；成功响应表示本地协议契约成立，不能据此判断真实 QQ 账号权限。
+
+## 隔离 Host
+
+另外需要已安装依赖的 DSH 源码目录。宿主 RPC 与 profile 契约目前按 DSH `0.2.2-alpha.2` 编写。插件必须包含 QQ 工作台的机器人状态接口；这个入口使用当前插件已有的构建产物。
+
+使用已验证可用的 provider 与模型。准备一个仓库外的 YAML patch，只包含测试需要的 `llm-pi-ai` provider 配置和 `agent-default-model` 配置；两者的 provider/model 必须与 `--primary` 一致。配置中的 `apiKeyEnv` 引用环境变量，密钥从调用者环境提供，不把密钥写入 patch。提供方的首个模型作为 primary，另一个可用模型作为 secondary。
+
+```bash
+node scripts/verify-qqbot.mjs --mode host \
+  --dsh-source /absolute/path/to/deepseek-harness \
+  --model-patch /absolute/path/to/test-model.patch.yml \
+  --primary example-provider/primary-model \
+  --secondary example-provider/secondary-model \
+  --reasoning high
+```
+
+未加 `--allow-model-requests` 时，只运行不需要生成的命令与配置场景，模型收发检查标记为 skipped。
+
+需要完整模型验证时，显式添加：
+
+```text
+--allow-model-requests
+```
+
+此时固定测试消息只发往 primary；secondary 仅选择而不生成。若 primary 不支持指定推理等级，应选择它实际支持的等级或省略 `--reasoning`。额外的宿主标题请求可能使用该服务自己的推理等级，报告应与主请求分开说明。
+
+可用 `--preset-primary`、`--preset-secondary` 选择已安装的预设，默认 `standard`、`minimal`；`--host-port`、`--fixture-port` 可指定空闲端口，默认自动分配。`--output` 指定本次新建的私有输出目录，已存在目录会被拒绝。
+
+验证发行包时，先按[双包安装说明](docs/workbench/extensions.md)构建并打包，再在上述命令同时追加 `--core-package` 和 `--history-package`，各自指向对应的绝对 `.tgz` 路径。启动器通过 CLI 安装两份包，在真实 Host 验证两个组件都已运行、停用记录期间主机器人仍回复并保存入站、恢复记录读取到该条消息，以及主组件停用和恢复后的依赖与网关状态。结果写入 `components.json`。第三列显隐另在浏览器检查。
+
+启动器会：
+
+1. 新建 `DSH_HOME`、profile、`QQBOT_DATA_DIR` 和工作目录。默认使用 CLI 的本地 `link:` 路径，指定发行包时使用 `file:` 路径。
+2. 把显式提供的模型 patch 写入该 profile，并设置虚拟 QQ 账号与本地端点。
+3. 检查真实模型目录、默认路由与预设。默认名称存在但 provider 列表为空时直接失败。
+4. 通过真实 QQ SDK 协议、配置 HTTP 接口和 Session RPC 运行矩阵，保存报告。
+5. 成功或失败后都停止本次创建的 Host 和夹具，保留输出目录便于诊断。
+
+它不会自动读取日常凭据文件、复用已绑定 QQ 的 profile、重建 DSH、按端口终止其他进程，或自动推送代码。
+
+## 证据与覆盖边界
+
+Host 模式的报告位于启动器打印的私有目录；默认离线模式的测试结果输出到终端。日志可能包含宿主认证 URL；不要整份提交或粘贴日志。提交测试代码，不提交本机 run 目录、绑定资料、真实 openid、请求内容或历史验收快照。
+
+命令模式重点检查：
+
+- 私聊、群聊的 QQ SDK 收发及模型覆盖隔离。
+- `/preset` 保存对话偏好，拒绝未知预设并支持重置。
+- `/new`、`/reset`、`/clear` 更换当前绑定，保留偏好和其他对话的绑定。
+- 保存插件配置后观察 SDK 重新连接，再读回配置、会话绑定和命令回复。
+
+启用模型后，额外检查一轮私聊生成，核对实际 `request/header` 的模型及推理等级、回复标记和工作目录。运行中取消、压缩、已运行 Session 的冷恢复和真实 QQ 鉴权需要另行验证。前端变化还应在浏览器中检查原生选择器、保存读回、错误状态、草稿以及浅色和深色主题，见 [Agent 验证指引](.agents/skills/qqbot-verify/SKILL.md)。
+
+新场景应加入矩阵和对应本地回归，而不是把一次成功结果写死进 skill。新增开发测试文件需保持在 npm 发布包之外。

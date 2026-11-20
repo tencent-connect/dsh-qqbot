@@ -5,20 +5,13 @@
  *   { type: string, data: Record<string, unknown> }
  * 这里把可识别的事件解析为 discriminated union，未知类型或字段缺失返回 undefined。
  */
+import { isFailedToolResult, type ToolResultData } from './tool-presenter.ts';
 
 /** 原始 dsh 事件（弱类型，来自 ctx.on('session/event')） */
 export interface RawSessionEvent {
   type: string;
+  surfaceOp?: string;
   data: Record<string, unknown>;
-}
-
-/** turn/end 事件的 reason 结构（兼容 error/failure/顶层 message 三种形态） */
-export interface TurnEndReason {
-  kind?: string;
-  error?: { message?: string; code?: string };
-  failure?: { message?: string; code?: string };
-  message?: string;
-  code?: string;
 }
 
 /** assistant/chunk 事件（仅保留 text-delta） */
@@ -30,6 +23,7 @@ export interface ChunkEvent {
 /** assistant/message 事件 */
 export interface MessageEvent {
   type: 'assistant/message';
+  id?: string;
   content: Array<{ type: string; text?: string }>;
 }
 
@@ -45,9 +39,7 @@ export interface ToolCallEvent {
 export interface ToolResultEvent {
   type: 'tool/result';
   callId: string;
-  /** 结果消息自带的失败标记（error 之外的另一条错误路径） */
-  isError: boolean;
-  error?: { name: string; code: string };
+  failed: boolean;
   /** 原始 data 透传给 presenter 做结构化展示 */
   raw: Record<string, unknown>;
 }
@@ -55,8 +47,12 @@ export interface ToolResultEvent {
 /** turn/end 事件 */
 export interface TurnEndEvent {
   type: 'turn/end';
-  reason: TurnEndReason;
+  completed: boolean;
+  truncated?: true;
+  failure?: 'blocked' | 'model-unavailable' | 'other';
 }
+
+const UNAVAILABLE_MODEL_CODES = new Set(['AUTH', 'ACCOUNT_TOKEN_INVALID', 'UNKNOWN_MODEL', 'MODEL_UNSUPPORTED', 'NO_ADAPTER']);
 
 /** present 工具声明的一个交付文件 */
 export interface PresentedFileRef {
@@ -97,9 +93,9 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'assistant/message': {
-      const message = (raw.data as { message?: { content?: Array<{ type: string; text?: string }> } }).message;
+      const message = (raw.data as { message?: { id?: string; content?: Array<{ type: string; text?: string }> } }).message;
       if (message === undefined || !Array.isArray(message.content)) return undefined;
-      return { type: 'assistant/message', content: message.content };
+      return { type: 'assistant/message', ...(typeof message.id === 'string' ? { id: message.id } : {}), content: message.content };
     }
 
     case 'tool/call': {
@@ -109,24 +105,26 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'tool/result': {
-      const data = raw.data as {
-        message?: { source?: { callId?: string }; isError?: boolean };
-        error?: { name: string; code: string };
-      };
+      const data = raw.data as ToolResultData & { message?: { source?: { callId?: string } } };
       const callId = data.message?.source?.callId;
       if (!callId) return undefined;
-      return {
-        type: 'tool/result',
-        callId,
-        isError: data.message?.isError === true,
-        error: data.error,
-        raw: raw.data,
-      };
+      return { type: 'tool/result', callId, failed: isFailedToolResult(data), raw: raw.data };
     }
 
     case 'turn/end': {
-      const reason = (raw.data as { reason?: TurnEndReason }).reason ?? {};
-      return { type: 'turn/end', reason };
+      const reason = raw.data.reason;
+      if (reason === null || typeof reason !== 'object' || !('kind' in reason)) {
+        return { type: 'turn/end', completed: false };
+      }
+      if (reason.kind === 'max-tokens') return { type: 'turn/end', completed: false, truncated: true };
+      if (reason.kind === 'blocked') return { type: 'turn/end', completed: false, failure: 'blocked' };
+      if (reason.kind !== 'error') return { type: 'turn/end', completed: reason.kind === 'completed' };
+      const error = 'error' in reason ? reason.error : undefined;
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+      return {
+        type: 'turn/end', completed: false,
+        failure: typeof code === 'string' && UNAVAILABLE_MODEL_CODES.has(code) ? 'model-unavailable' : 'other',
+      };
     }
 
     case 'deliverables/presented': {
@@ -149,36 +147,14 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
   }
 }
 
-/**
- * 从 turn/end reason 提取错误信息
- *
- * 兼容三种形态：error（新格式）、failure（旧格式）、顶层 message/code（最旧格式）。
- *
- * `blocked` 也要提取：宿主的 archived-session-gate 在 `agent/pre-step` 拒绝时
- * 以 `blocked` 收尾（典型是会话已归档），这一轮既没有 `user/message` 也没有
- * `error`，不在这里认领就完全不会出声。
- */
-export function extractTurnError(reason: TurnEndReason): { code: string; message: string } | undefined {
-  if (reason.kind === 'blocked') {
-    return { code: 'TURN_BLOCKED', message: '本轮处理被阻止，未完成。' };
-  }
-  if (reason.kind !== 'error') return undefined;
-
-  const detail = reason.error ?? reason.failure;
-  return {
-    code: detail?.code ?? reason.code ?? 'UNKNOWN',
-    message: detail?.message ?? reason.message ?? 'unknown error',
-  };
-}
-
 // ── agent/assistant-stream 实时流式帧（宿主 v2+） ──
 
 /**
  * 归一化后的流式增量（`agent/assistant-stream` 瞬态帧，chunk 不进 session log）。
  */
 export type StreamDelta =
-  | { kind: 'attempt-start'; attemptId: string }
-  | { kind: 'text-delta'; attemptId: string; text: string };
+  | { kind: 'attempt-start'; attemptId: string; turn?: number; step?: number; revision?: number }
+  | { kind: 'text-delta'; attemptId: string; text: string; revision?: number; index?: number };
 
 /**
  * 解析 `agent/assistant-stream` 的 payload（对齐 @deepseek-ai/dsh-agent 的
@@ -199,12 +175,21 @@ export function parseStreamFrame(raw: unknown): { agentId: string; delta: Stream
   if (typeof attemptId !== 'string' || !attemptId) return undefined;
 
   if (type === 'start') {
-    return { agentId, delta: { kind: 'attempt-start', attemptId } };
+    const identity = frame as { turn?: unknown; step?: unknown; revision?: unknown };
+    return { agentId, delta: { kind: 'attempt-start', attemptId,
+      ...(typeof identity.turn === 'number' ? { turn: identity.turn } : {}),
+      ...(typeof identity.step === 'number' ? { step: identity.step } : {}),
+      ...(typeof identity.revision === 'number' ? { revision: identity.revision } : {}),
+    } };
   }
   if (type === 'chunk') {
     const chunk = (frame as { chunk?: { type?: unknown; text?: unknown } | null }).chunk;
     if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string' || !chunk.text) return undefined;
-    return { agentId, delta: { kind: 'text-delta', attemptId, text: chunk.text } };
+    const identity = frame as { revision?: unknown; index?: unknown };
+    return { agentId, delta: { kind: 'text-delta', attemptId, text: chunk.text,
+      ...(typeof identity.revision === 'number' ? { revision: identity.revision } : {}),
+      ...(typeof identity.index === 'number' ? { index: identity.index } : {}),
+    } };
   }
   return undefined;
 }

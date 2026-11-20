@@ -11,6 +11,8 @@
 import type { ExternalTurnDelivery } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import type { QqInputRegistry } from './qq-input-origin.ts';
+import { bindDelivery } from './delivery-context.ts';
+import { deliveryKey } from './delivery-ledger.ts';
 import {
   classifyTurnInput,
   createTurnState,
@@ -39,23 +41,31 @@ export interface TurnTrackerManagerLike {
 }
 
 export interface TurnTrackerOptions {
+  appId: string;
   externalTurns: ExternalTurnDelivery;
+  allowed?: (target: ReplyTarget) => boolean;
 }
 
 interface TrackedTurn {
   state: TurnDeliveryState;
   /** 本回合认领的 QQ 入站消息 id，回合结束时释放登记 */
   inputs: Set<string>;
+  target: ReplyTarget;
+  external: boolean;
+  invalid: boolean;
+  preparationInput?: { messageId: string; content: unknown } | null;
 }
 
 /** user/message 事件数据（宿主契约：data 即 UserMessage；兼容 { message } 包裹形态） */
 interface UserMessageData {
   id?: unknown;
   source?: TurnInputSource;
-  message?: { id?: unknown; source?: TurnInputSource };
+  content?: unknown;
+  message?: { id?: unknown; source?: TurnInputSource; content?: unknown };
 }
 
 export class TurnTracker implements DeliveryTargetResolver {
+  public get verifiesSources(): boolean { return this.inputs.ledger !== undefined; }
   private readonly turns = new Map<string, TrackedTurn>();
   private readonly manager: TurnTrackerManagerLike;
   private readonly inputs: QqInputRegistry;
@@ -82,22 +92,69 @@ export class TurnTracker implements DeliveryTargetResolver {
     if (turn === undefined) return false;
     const current = this.turns.get(sessionId);
     if (current?.state.turn === turn) return false;
-    if (this.addressOf(sessionId) === undefined) return false;
-    if (current !== undefined) this.release(current);
-    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set() });
+    if (this.verifiesSources && current && current.state.turn > turn) return false;
+    const address = this.addressOf(sessionId);
+    if (!address) return false;
+    if (current) {
+      current.invalid = true;
+      this.release(current);
+    }
+    this.turns.set(sessionId, { state: createTurnState(turn), inputs: new Set(), target: { ...address }, external: false, invalid: false });
     return true;
+  }
+
+  public discard(sessionId: string, messageId: string): void {
+    const tracked = this.turns.get(sessionId);
+    if (tracked?.inputs.has(messageId)) tracked.invalid = true;
+    this.inputs.release(messageId);
+    this.inputs.ledger?.discardInput(sessionId, messageId);
+  }
+
+  public noteClaim(sessionId: string, turn: number, message: UserMessageData): void {
+    const tracked = this.turns.get(sessionId);
+    if (!this.verifiesSources || !tracked || tracked.state.turn !== turn || tracked.preparationInput === null) return;
+    const { messageId, source, content } = readUserMessage(message);
+    if (!messageId || classifyTurnInput(source, this.inputs.has(messageId)) !== 'qq'
+      || (tracked.preparationInput && tracked.preparationInput.messageId !== messageId)) {
+      tracked.preparationInput = null;
+      return;
+    }
+    tracked.preparationInput = { messageId, content };
+  }
+
+  /** The Host can fail preparation after claiming the inbox and before appending user/message. */
+  public planForPreStepFailure(sessionId: string): DeliveryPlan | undefined {
+    const tracked = this.turns.get(sessionId);
+    const candidate = tracked?.preparationInput;
+    if (!tracked || !candidate || tracked.invalid || tracked.state.origin !== null || tracked.state.sawInternal) return undefined;
+    const receipt = this.inputs.claim(candidate.messageId, sessionId, candidate.content, tracked.state.turn, tracked.target);
+    if (!receipt) return undefined;
+    tracked.inputs.add(receipt.messageId);
+    tracked.target = { ...receipt.target };
+    noteTurnInput(tracked.state, 'qq');
+    return this.planFor(sessionId);
   }
 
   /** user/message：按这一条消息归类，不发送 */
   public note(sessionId: string, data: Record<string, unknown>): void {
+    const { messageId, source, content } = readUserMessage(data);
+    if (messageId && source?.kind === 'user') this.inputs.admitBackground(sessionId, messageId, content);
     const tracked = this.turns.get(sessionId);
     if (tracked === undefined) return;
-    const { messageId, source } = readUserMessage(data);
-    const qqOwned = this.inputs.has(messageId);
+    const receipt = messageId ? this.inputs.claim(messageId, sessionId, content, tracked.state.turn, tracked.target) : undefined;
+    if (!receipt && messageId && this.inputs.ledger?.knowsInput(messageId)) tracked.invalid = true;
+    const qqOwned = this.inputs.ledger ? receipt !== undefined : this.inputs.has(messageId);
+    if (receipt) {
+      if (tracked.inputs.size > 0 && !tracked.inputs.has(receipt.messageId)) tracked.invalid = true;
+      tracked.target = { ...receipt.target };
+    }
+    const origin = classifyTurnInput(source, qqOwned);
+    if (origin === 'external') tracked.external = true;
+    if (receipt && origin !== 'qq') tracked.invalid = true;
     if (qqOwned && messageId !== undefined) tracked.inputs.add(messageId);
 
     const before = deliveryMode(tracked.state);
-    noteTurnInput(tracked.state, classifyTurnInput(source, qqOwned));
+    noteTurnInput(tracked.state, origin);
     if (before === 'proactive' || deliveryMode(tracked.state) !== 'proactive') return;
 
     const plan = this.planFor(sessionId);
@@ -115,7 +172,7 @@ export class TurnTracker implements DeliveryTargetResolver {
    */
   public isCurrent(sessionId: string, type: string, turn: number | undefined): boolean {
     const tracked = this.turns.get(sessionId);
-    if (tracked === undefined) return true;
+    if (tracked === undefined) return !this.inputs.ledger;
     if (type === 'turn/end') return turn === tracked.state.turn;
     return turn === undefined || turn === tracked.state.turn;
   }
@@ -138,6 +195,22 @@ export class TurnTracker implements DeliveryTargetResolver {
     const base = this.addressOf(sessionId);
     if (base === undefined) return undefined;
     const tracked = this.turns.get(sessionId);
+    if (this.inputs.ledger) {
+      if (!tracked || tracked.invalid) return undefined;
+      if (tracked.inputs.size > 0 && tracked.external) return undefined;
+      if (tracked.state.origin === null && !tracked.state.sawInternal) return undefined;
+      const target = tracked.state.origin === 'qq' ? tracked.target
+        : { scope: tracked.target.scope, targetId: tracked.target.targetId, forceProactive: true };
+      const allowed = () => !tracked.invalid
+        && (!tracked.external || (tracked.inputs.size === 0 && this.allowsExternal(target)))
+        && this.matchesBinding(sessionId, target)
+        && (this.options.allowed?.(target) ?? true);
+      if (!allowed()) return undefined;
+      return {
+        target: bindDelivery(target, { appId: this.options.appId, key: deliveryKey(sessionId, tracked.state.turn), sessionId, allowed }),
+        proactive: tracked.state.origin !== 'qq',
+      };
+    }
     if (tracked === undefined || deliveryMode(tracked.state) === 'passive') {
       return { target: base, proactive: false };
     }
@@ -165,9 +238,15 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 
   private addressOf(sessionId: string): ReplyTarget | undefined {
-    const record = this.manager.findBySessionId(sessionId);
-    if (record !== undefined) return record.replyTarget;
-    return this.manager.deliveryAddress?.(sessionId);
+    return this.manager.deliveryAddress
+      ? this.manager.deliveryAddress(sessionId)
+      : this.manager.findBySessionId(sessionId)?.replyTarget;
+  }
+
+  private matchesBinding(sessionId: string, target: ReplyTarget): boolean {
+    if (!this.manager.deliveryAddress) return true;
+    const current = this.manager.deliveryAddress(sessionId);
+    return current?.scope === target.scope && current.targetId === target.targetId;
   }
 
   private release(tracked: TrackedTurn): void {
@@ -175,11 +254,11 @@ export class TurnTracker implements DeliveryTargetResolver {
   }
 }
 
-function readUserMessage(data: Record<string, unknown>): { messageId: string | undefined; source: TurnInputSource | undefined } {
-  const raw = data as UserMessageData;
+function readUserMessage(raw: UserMessageData): { messageId: string | undefined; source: TurnInputSource | undefined; content: unknown } {
   const id = raw.id ?? raw.message?.id;
   return {
     messageId: typeof id === 'string' && id !== '' ? id : undefined,
     source: raw.source ?? raw.message?.source,
+    content: raw.content ?? raw.message?.content,
   };
 }

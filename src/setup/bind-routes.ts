@@ -14,11 +14,12 @@ import type { RpcMethodHandler, RpcResult } from '../rpc-carrier.ts';
 import { rpcFailure, rpcOk } from '../rpc-carrier.ts';
 import {
   persistCredentialsToProfile,
-  removeCredentialsFromProfile,
+  unbindProfileCredentials,
   updateProfileConfig,
   readProfileAccessSnapshot,
   AccessConfigConflict,
   type SetupCredentials,
+  type HostAccessSource,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
@@ -61,6 +62,7 @@ export interface BindRpcOptions {
    * 用于 config.get 回显（appSecret 剔除后返回）。
    */
   currentConfig?: () => Record<string, unknown>;
+  hostAccess?: HostAccessSource;
   /**
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
@@ -180,14 +182,7 @@ function handleUnbind(options: BindRpcOptions): RpcResult {
   }
   const result: UnbindResult = options.onUnbind === undefined
     ? (() => {
-        const removed = removeCredentialsFromProfile(getProfileDir() ?? undefined, undefined);
-        if (removed) {
-          // 清除进程内凭据：扫码绑定成功时会写入 env（供热更新后的下次
-          // apply 兜底读取）；不清则 HMR 重载后新 fiber 仍从 env 读到
-          // 凭据，解绑不生效（状态一直停留在 bound）
-          delete process.env.QQBOT_APPID;
-          delete process.env.QQBOT_SECRET;
-        }
+        const removed = unbindProfileCredentials(getProfileDir() ?? undefined, undefined, options.boundAppId?.() ?? undefined);
         return removed
           ? { persisted: true }
           : { persisted: false, error: '无法定位 profile 目录或写入失败，请手动编辑 cordis.patch.yml' };
@@ -209,7 +204,7 @@ function handleConfigGet(options: BindRpcOptions): RpcResult {
   const { appSecret: _s, memory: _retired, ...safe } = current;
   try {
     const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
+    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId, options.hostAccess);
     return rpcOk({ config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
   } catch (error) {
     return rpcFailure('config/unreadable', error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。');
@@ -256,7 +251,7 @@ function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptio
     const profileDir = getProfileDir() ?? undefined;
     const current = options.currentConfig?.() ?? {};
     const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
+    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId, options.hostAccess);
     if (payload.expectedAppId !== (appId.length === 0 ? null : appId)) {
       return rpcFailure(RPC_ERROR_CODES.accountChanged, 'QQ 账号已变化，请刷新配置后重试。');
     }
@@ -265,7 +260,7 @@ function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptio
     }
     persisted = options.onUpdateConfig === undefined
       ? updateProfileConfig(validated, profileDir, undefined,
-        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId })
+        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId, hostAccess: options.hostAccess })
       : options.onUpdateConfig(validated);
   } catch (error) {
     if (error instanceof AccessConfigConflict) {

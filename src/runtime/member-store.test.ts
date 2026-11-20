@@ -42,7 +42,7 @@ describe('account-only identity storage', () => {
   });
 
   it('keeps the upstream PrefsStore as the only owner of Session, model and preset preferences', () => {
-    const prefsPath = join(root, 'model-prefs.json'); const prefs = new PrefsStore(undefined, { path: prefsPath });
+    const prefsPath = join(root, 'session-preferences.json'); const prefs = new PrefsStore(undefined, { path: prefsPath });
     prefs.setSessionId('qqbot:app:group:team', 'old-session'); prefs.setPreset('qqbot:app:c2c:alice', 'old-preset');
     prefs.setOverride('qqbot:app:group:team', { provider: 'provider', model: 'model' });
     const bytes = readFileSync(prefsPath);
@@ -58,14 +58,14 @@ describe('account-only identity storage', () => {
   });
 
   it.each(['none', 'another-account', 'invalid-scope'])('does not promote the conversation allowlist for %s preferences', scenario => {
-    if (scenario !== 'none') writeFileSync(join(root, 'model-prefs.json'), JSON.stringify({ sessionIds: { [scenario === 'another-account' ? 'qqbot:other:group:peer' : 'qqbot:app:channel:peer']: 'session' } }));
+    if (scenario !== 'none') writeFileSync(join(root, 'session-preferences.json'), JSON.stringify({ sessionIds: { [scenario === 'another-account' ? 'qqbot:other:group:peer' : 'qqbot:app:channel:peer']: 'session' } }));
     const legacy = vi.fn(() => ['unexpected']);
     expect(new MemberStore(root, 'app', legacy).ownerIds()).toEqual([]); expect(legacy).not.toHaveBeenCalled();
   });
 
   it('preserves an explicitly empty old command list instead of repopulating it', () => {
     writeFileSync(catalogPath(), JSON.stringify({ format: 2, appId: 'app', owners: [], entries: [] }));
-    writeFileSync(join(root, 'model-prefs.json'), JSON.stringify({ sessionIds: { 'qqbot:app:group:team': 'old-session' } }));
+    writeFileSync(join(root, 'session-preferences.json'), JSON.stringify({ sessionIds: { 'qqbot:app:group:team': 'old-session' } }));
     expect(new MemberStore(root, 'app', () => ['unexpected']).ownerIds()).toEqual([]);
   });
 
@@ -104,7 +104,7 @@ describe('account-only identity storage', () => {
     if (source === 'identity catalog') {
       writeFileSync(catalogPath(), JSON.stringify({ format: 2, appId: 'app', owners }));
     } else {
-      new PrefsStore(undefined, { path: join(root, 'model-prefs.json') }).setSessionId('qqbot:app:c2c:owner-0', 'old-session');
+      new PrefsStore(undefined, { path: join(root, 'session-preferences.json') }).setSessionId('qqbot:app:c2c:owner-0', 'old-session');
     }
     const members = new MemberStore(root, 'app', () => owners);
     expect(members.ownerIds()).toEqual(owners);
