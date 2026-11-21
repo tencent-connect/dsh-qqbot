@@ -10,8 +10,11 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsdown';
 
+/** 包清单：模块 id 与展示版本都取这里，保证与发布包一致。 */
+const MANIFEST = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { name: string; version: string };
+
 /** 浏览器模块 id：与包名一致（宿主按包名注册 boot 图行），改名发布时须同步。 */
-const ID = (JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { name: string }).name;
+const ID = MANIFEST.name;
 
 /**
  * 平台种子表：宿主 PLATFORM_MODULES 在全部已声明 dshReleases 上的交集
@@ -68,6 +71,9 @@ export default defineConfig({
   dts: false,
   clean: false,
   sourcemap: true,
+  // 版本号构建期固定进 bundle（与宿主 DSH_CLIENT_VERSION 的做法一致）：
+  // client.js 与包同版本发布，设置页无需在运行时向服务端请求版本。
+  define: { __DSH_QQBOT_VERSION__: JSON.stringify(MANIFEST.version) },
   deps: {
     // 种子表保持外部引用，其余整体内联
     neverBundle: isSeedModule,

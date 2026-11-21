@@ -411,6 +411,7 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
         placeholder: '留空继承 DSH 默认', options: modelChoices, inheritLabel: '继承 DSH 默认',
         loading: modelChoicesLoading, disabled: busy,
         help: modelHelp,
+        panelNotice: modelChoicesError ? '候选加载失败，可直接输入「提供方/模型」' : undefined,
         onChange: applyModelRef,
       }),
       createElement(ComboboxField, {
@@ -418,6 +419,7 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
         placeholder: '留空继承 DSH 默认', options: presets, inheritLabel: '继承 DSH 默认',
         loading: presetsLoading, disabled: busy,
         help: presetsError ? '候选加载失败，可直接手动输入' : '新会话使用的 Agent 预设；不可用项无法选择',
+        panelNotice: presetsError ? '候选加载失败，可直接手动输入' : undefined,
         onChange: (value: string) => patch('preset', value),
       }),
       ...([

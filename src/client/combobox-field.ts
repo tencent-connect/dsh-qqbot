@@ -52,6 +52,8 @@ export interface ComboboxFieldProps {
   loading?: boolean;
   disabled?: boolean;
   help?: ReactNode;
+  /** 面板顶部提示（如候选加载失败），仅展开时可见 */
+  panelNotice?: string;
   onChange: (value: string) => void;
 }
 
@@ -65,6 +67,7 @@ export function ComboboxField({
   loading = false,
   disabled = false,
   help,
+  panelNotice,
   onChange,
 }: ComboboxFieldProps): ReactNode {
   const [open, setOpen] = useState(false);
@@ -179,6 +182,7 @@ export function ComboboxField({
           role: 'listbox',
           ref: listRef,
         },
+        panelNotice === undefined ? null : createElement('div', { className: 'imqb-combo-notice', role: 'status' }, panelNotice),
         loading
           ? createElement('div', { className: 'imqb-combo-empty' }, '加载中…')
           : rows.length === 0
