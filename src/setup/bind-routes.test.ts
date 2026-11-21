@@ -1,263 +1,124 @@
 /**
- * 端内绑定路由测试
- *
- * 用假的 webServer 捕获注册的 handler，验证：
- * 状态查询协议（含 bound 相位）、refresh / manual 动作、
- * 方法守卫、Origin 信任校验与 manual 请求体校验。
+ * 绑定 RPC 处理器单元测试 —— 方法分发、校验与 persist 语义。
+ * 传输面（信封/围栏/405）由宿主 Connection 通道承载，见 rpc-carrier.test.ts。
  */
-import { EventEmitter } from 'node:events';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import {
-  BIND_CONFIG_PATH,
-  BIND_MANUAL_PATH,
-  BIND_REFRESH_PATH,
-  BIND_STATE_PATH,
-  BIND_UNBIND_PATH,
-  registerBindRoutes,
-  type BindRoutesOptions,
-  type WebRoute,
-} from './bind-routes.ts';
 import type { BindingService } from './binding-service.ts';
-import { accessRevision, persistCredentialsToProfile, readProfileAccess, updateProfileConfig } from './persist.ts';
+import { createBindRpcHandler, type BindRpcOptions } from './bind-routes.ts';
+import { readProfileAccess, persistCredentialsToProfile, updateProfileConfig, accessRevision } from './persist.ts';
+import { BIND_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import type { RpcResult } from '../rpc-carrier.ts';
 
-/** 默认 unbind/persist 实现依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
+/** persist 依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
 const profileDirState = vi.hoisted(() => ({ dir: undefined as string | undefined }));
 vi.mock('../shared/index.ts', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return { ...actual, getProfileDir: () => profileDirState.dir };
 });
 
-/** 假 req：EventEmitter + headers/method + 可读 body */
-function fakeReq(method: string, headers: Record<string, string | undefined> = {}, body?: string): IncomingMessage {
-  const req = new EventEmitter() as unknown as IncomingMessage;
-  (req as { method?: string }).method = method;
-  (req as { headers: Record<string, string | undefined> }).headers = headers;
-  Object.assign(req, {
-    resume: vi.fn(),
-    // 模拟异步可读流：POST body 异步推送
-    [Symbol.asyncIterator]() {
-      const chunks = body === undefined ? [] : [Buffer.from(body, 'utf8')];
-      let index = 0;
-      return {
-        next: () => Promise.resolve(index < chunks.length
-          ? { done: false, value: chunks[index++] as Buffer }
-          : { done: true as const, value: undefined }),
-      };
-    },
-  });
-  return req;
-}
+const signal = (): AbortSignal => new AbortController().signal;
 
-/** 假 res：捕获 writeHead/end */
-function fakeRes(): ServerResponse & { statusCode: number; body: string; headers: Record<string, string> } {
-  const res = {
-    statusCode: 0,
-    body: '',
-    headers: {} as Record<string, string>,
-    writeHead(status: number, headers: Record<string, string>) {
-      res.statusCode = status;
-      res.headers = headers;
-    },
-    end(payload?: string) {
-      if (payload !== undefined) res.body += payload;
-    },
-  };
-  return res as unknown as ServerResponse & { statusCode: number; body: string; headers: Record<string, string> };
-}
-
-function createHarness(options: BindRoutesOptions = {}): {
-  routes: Map<string, WebRoute>;
-  service: { wireState: () => unknown; refresh: () => void };
-  manualSubmits: unknown[];
-  dispose: () => void;
-} {
-  const routes = new Map<string, WebRoute>();
-  const webServer = {
-    register(route: WebRoute): () => void {
-      routes.set(route.path, route);
-      return () => { routes.delete(route.path); };
-    },
-  };
+function createHarness(options: BindRpcOptions = {}) {
   const service = {
     wireState: vi.fn(() => ({ phase: 'starting' })),
     refresh: vi.fn(),
   } as unknown as BindingService;
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const manualSubmits: unknown[] = [];
-  const wrappedOptions: BindRoutesOptions = {
+  const wrappedOptions: BindRpcOptions = {
     ...options,
     onManualCredentials: (credentials) => {
       manualSubmits.push(credentials);
       return options.onManualCredentials?.(credentials) ?? { persisted: true };
     },
   };
-  const dispose = registerBindRoutes(webServer, service, logger, wrappedOptions);
-  return {
-    routes,
-    service: service as unknown as { wireState: () => unknown; refresh: () => void },
-    manualSubmits,
-    dispose,
-  };
+  const handler = createBindRpcHandler(service, logger, wrappedOptions);
+  const call = (method: string, payload: Record<string, unknown> = {}): Promise<RpcResult> =>
+    Promise.resolve(handler(method, method === BIND_METHODS.configSet
+      ? { expectedAppId: options.boundAppId?.() ?? options.currentConfig?.().appId ?? null, ...payload }
+      : payload, signal()));
+  return { service, manualSubmits, call };
 }
 
-async function invoke(route: WebRoute | undefined, req: IncomingMessage, res: ServerResponse): Promise<void> {
-  if (route === undefined) throw new Error('route not registered');
-  await route.handler(req, res);
-}
+let cleanupDir: string | undefined;
 
-function json(res: { body: string }): unknown {
-  return JSON.parse(res.body);
-}
+afterEach(() => {
+  if (cleanupDir !== undefined) {
+    rmSync(cleanupDir, { recursive: true, force: true });
+    cleanupDir = undefined;
+  }
+  if (profileDirState.dir !== undefined) {
+    rmSync(profileDirState.dir, { recursive: true, force: true });
+    profileDirState.dir = undefined;
+  }
+});
 
-describe('bind-routes', () => {
-  it('注册状态、刷新与手动提交三条精确路由', () => {
-    const { routes } = createHarness();
-    expect(routes.has(BIND_STATE_PATH)).toBe(true);
-    expect(routes.has(BIND_REFRESH_PATH)).toBe(true);
-    expect(routes.has(BIND_MANUAL_PATH)).toBe(true);
-    expect(routes.get(BIND_STATE_PATH)?.kind).toBe('exact');
+describe('bind-rpc handler', () => {
+  it('分发全部已知方法，未知方法报 unknown-method', async () => {
+    const { call } = createHarness({ boundAppId: () => '102120114', onUnbind: () => ({ persisted: true }), onUpdateConfig: () => true });
+    for (const method of Object.values(BIND_METHODS)) {
+      const result = await call(method);
+      // 业务成功与否取决于注入，分发只保证方法被处理器认识
+      expect(result.ok === true || result.error?.code !== RPC_ERROR_CODES.unknownMethod).toBe(true);
+    }
+    expect(await call('bind.nope')).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.unknownMethod } });
   });
 
-  it('GET state：返回 200 + 序列化相位 + no-store', async () => {
-    const { routes, service } = createHarness();
+  it('state：返回扫码状态机相位', async () => {
+    const { call, service } = createHarness();
     service.wireState = () => ({ phase: 'waiting', url: 'https://q.qq.com/t1', issuedAt: 1 });
-
-    const res = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
-
-    expect(res.statusCode).toBe(200);
-    expect(res.headers['cache-control']).toBe('no-store');
-    expect(json(res)).toEqual({ phase: 'waiting', url: 'https://q.qq.com/t1', issuedAt: 1 });
+    expect(await call(BIND_METHODS.state)).toEqual({ ok: true, value: { phase: 'waiting', url: 'https://q.qq.com/t1', issuedAt: 1 } });
   });
 
-  it('GET state（bound）：优先返回脱敏 appId，不触碰扫码状态机', async () => {
-    const { routes, service } = createHarness({ boundAppId: () => '102120114' });
-
-    const res = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
-
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ phase: 'bound', appId: '102120114' });
+  it('state（bound）：优先返回脱敏 appId，不触碰扫码状态机', async () => {
+    const { call, service } = createHarness({ boundAppId: () => '102120114' });
+    expect(await call(BIND_METHODS.state)).toEqual({ ok: true, value: { phase: 'bound', appId: '102120114' } });
     expect(service.wireState).not.toHaveBeenCalled();
   });
 
-  it('HEAD state：允许', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('HEAD', { host: 'x' }), res);
-    expect(res.statusCode).toBe(200);
-  });
-
-  it('POST state：405', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('POST', { host: 'x' }), res);
-    expect(res.statusCode).toBe(405);
-  });
-
-  it('POST refresh：调用 service.refresh 并返回 starting', async () => {
-    const { routes, service } = createHarness();
-    const req = fakeReq('POST', { host: '127.0.0.1:3080' });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_REFRESH_PATH), req, res);
-
+  it('refresh：调用 service.refresh 并返回 starting', async () => {
+    const { call, service } = createHarness();
+    expect(await call(BIND_METHODS.refresh)).toEqual({ ok: true, value: { phase: 'starting' } });
     expect(service.refresh).toHaveBeenCalledOnce();
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ phase: 'starting' });
   });
 
-  it('GET refresh：405', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_REFRESH_PATH), fakeReq('GET', { host: 'x' }), res);
-    expect(res.statusCode).toBe(405);
-  });
-
-  it('POST manual：合法凭据 → 提交处理并返回成功', async () => {
-    const { routes, manualSubmits } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_MANUAL_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' }, '{"appId":"102120114","appSecret":"s3cr3t"}'),
-      res,
-    );
-
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ ok: true, message: '凭据已保存，插件将自动重载' });
+  it('manual：合法凭据 → 提交处理并返回成功', async () => {
+    const { call, manualSubmits } = createHarness();
+    const result = await call(BIND_METHODS.manual, { appId: '102120114', appSecret: 's3cr3t' });
+    expect(result).toEqual({ ok: true, value: { ok: true, message: '凭据已保存，插件将自动重载' } });
     expect(manualSubmits).toEqual([{ appId: '102120114', appSecret: 's3cr3t' }]);
   });
 
-  it('POST manual：缺失字段 → 400', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_MANUAL_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"appId":"102120114"}'),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
+  it('manual：缺失/超长字段 → invalid-credentials，不触达提交处理', async () => {
+    const { call, manualSubmits } = createHarness();
+    expect(await call(BIND_METHODS.manual, { appId: '102120114' })).toMatchObject({ ok: false, error: { code: 'bind/invalid-credentials' } });
+    expect(await call(BIND_METHODS.manual, { appId: 'a'.repeat(5000), appSecret: 's' })).toMatchObject({ ok: false, error: { code: 'bind/invalid-credentials' } });
+    expect(manualSubmits).toEqual([]);
   });
 
-  it('POST manual：空 body → 400', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_MANUAL_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, ''), res);
-    expect(res.statusCode).toBe(400);
+  it('manual：persisted=false → persist-failed + 错误信息', async () => {
+    const { call } = createHarness({ onManualCredentials: () => ({ persisted: false, error: '写入失败' }) });
+    expect(await call(BIND_METHODS.manual, { appId: 'a', appSecret: 'b' })).toMatchObject({ ok: false, error: { code: 'bind/persist-failed', message: '写入失败' } });
   });
 
-  it('POST manual：persisted=false → 500 + 错误信息', async () => {
-    const { routes } = createHarness({
-      onManualCredentials: () => ({ persisted: false, error: '写入失败' }),
-    });
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_MANUAL_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"appId":"a","appSecret":"b"}'),
-      res,
-    );
-    expect(res.statusCode).toBe(500);
-    expect(json(res)).toEqual({ ok: false, error: '写入失败' });
+  it('unbind（bound 态）：调用解绑处理并返回成功', async () => {
+    const onUnbind = vi.fn(() => ({ persisted: true }));
+    const { call } = createHarness({ boundAppId: () => '102120114', onUnbind });
+    expect(await call(BIND_METHODS.unbind)).toEqual({ ok: true, value: { ok: true, message: '已解绑，插件将重载并重新进入绑定流程' } });
+    expect(onUnbind).toHaveBeenCalledOnce();
   });
 
-  it('GET manual：405', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_MANUAL_PATH), fakeReq('GET', { host: 'x' }), res);
-    expect(res.statusCode).toBe(405);
+  it('unbind（未绑定）：not-bound，不触达解绑处理', async () => {
+    const onUnbind = vi.fn(() => ({ persisted: true }));
+    const { call } = createHarness({ onUnbind });
+    expect(await call(BIND_METHODS.unbind)).toMatchObject({ ok: false, error: { code: 'bind/not-bound', message: '当前未绑定' } });
+    expect(onUnbind).not.toHaveBeenCalled();
   });
 
-  it('POST unbind（bound 态）：调用解绑处理并返回成功', async () => {
-    const { routes } = createHarness({
-      boundAppId: () => '102120114',
-      onUnbind: () => ({ persisted: true }),
-    });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ ok: true, message: '已解绑，插件将重载并重新进入绑定流程' });
-  });
-
-  it('POST unbind（未绑定）：409，不触达解绑处理', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
-    expect(res.statusCode).toBe(409);
-    expect(json(res)).toEqual({ ok: false, error: '当前未绑定' });
-  });
-
-  it('GET unbind：405', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('GET', { host: 'x' }), res);
-    expect(res.statusCode).toBe(405);
-  });
-
-  it('POST unbind（默认实现）：删除 patch 凭据并清除进程 env（否则 HMR 后仍读到旧凭据，状态停留 bound）', async () => {
+  it('unbind（默认实现）：删除 patch 凭据并清除进程 env（否则 HMR 后仍读到旧凭据，状态停留 bound）', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'im-qqbot-unbind-'));
     const patchPath = join(dir, 'cordis.patch.yml');
     writeFileSync(patchPath, [
@@ -269,19 +130,14 @@ describe('bind-routes', () => {
       '',
     ].join('\n'), 'utf8');
     profileDirState.dir = dir;
-    // 扫码绑定成功时会写入进程 env：模拟该残留
     const savedAppId = process.env.QQBOT_APPID;
     const savedSecret = process.env.QQBOT_SECRET;
     process.env.QQBOT_APPID = '102120114';
     process.env.QQBOT_SECRET = 's3cr3t';
 
     try {
-      const { routes } = createHarness({ boundAppId: () => '102120114' });
-      const res = fakeRes();
-      await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
-
-      expect(res.statusCode).toBe(200);
-      expect(json(res)).toMatchObject({ ok: true });
+      const { call } = createHarness({ boundAppId: () => '102120114' });
+      expect(await call(BIND_METHODS.unbind)).toMatchObject({ ok: true });
       // 进程 env 凭据被清除（HMR 重载后新 fiber 不再回退读到旧凭据）
       expect(process.env.QQBOT_APPID).toBeUndefined();
       expect(process.env.QQBOT_SECRET).toBeUndefined();
@@ -291,19 +147,16 @@ describe('bind-routes', () => {
       expect(content).not.toContain('appSecret');
       expect(content).toContain('requireMention: true');
     } finally {
-      profileDirState.dir = undefined;
       if (savedAppId === undefined) delete process.env.QQBOT_APPID;
       else process.env.QQBOT_APPID = savedAppId;
       if (savedSecret === undefined) delete process.env.QQBOT_SECRET;
       else process.env.QQBOT_SECRET = savedSecret;
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('POST unbind（幂等重入）：patch 已无凭据时仍写回文件（触发宿主 HMR，bound fiber 才会卸载）', async () => {
+  it('unbind（幂等重入）：patch 已无凭据时仍写回文件（触发宿主 HMR，bound fiber 才会卸载）', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'im-qqbot-unbind-idem-'));
     const patchPath = join(dir, 'cordis.patch.yml');
-    // 凭据已被上一次解绑删除，但 fiber 未重载（无 HMR）的场景
     writeFileSync(patchPath, [
       '- id: im-qqbot',
       '  config:',
@@ -314,11 +167,8 @@ describe('bind-routes', () => {
     const before = readFileSync(patchPath, 'utf8');
 
     try {
-      const { routes } = createHarness({ boundAppId: () => '102120114' });
-      const res = fakeRes();
-      await invoke(routes.get(BIND_UNBIND_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }), res);
-
-      expect(res.statusCode).toBe(200);
+      const { call } = createHarness({ boundAppId: () => '102120114' });
+      expect(await call(BIND_METHODS.unbind)).toMatchObject({ ok: true });
       // 文件被重写（mtime 更新触发宿主 HMR 重载），内容仍为合法 YAML
       expect(readFileSync(patchPath, 'utf8')).toEqual(before);
     } finally {
@@ -327,110 +177,107 @@ describe('bind-routes', () => {
     }
   });
 
-  afterEach(() => {
-    if (profileDirState.dir !== undefined) {
-      rmSync(profileDirState.dir, { recursive: true, force: true });
-      profileDirState.dir = undefined;
-    }
-  });
-
-  it('GET config：回显生效配置且剔除 appSecret 与已退役配置', async () => {
-    const { routes } = createHarness({
+  it('config.get：回显生效配置且剔除 appSecret 与已退役配置', async () => {
+    const { call } = createHarness({
       currentConfig: () => ({ appId: '102120114', appSecret: 'SECRET', requireMention: true, cwd: '/tmp/w', memory: { qdrantUrl: 'http://retired.example' } }),
     });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toMatchObject({ config: { appId: '102120114', requireMention: true, cwd: '/tmp/w', accessRevision: expect.any(String) } });
-    expect(res.body).not.toMatch(/SECRET|retired.example/);
-  });
-
-  it.each([
-    [BIND_CONFIG_PATH, { requireMention: false }],
-    [BIND_MANUAL_PATH, { appId: 'stale-app', appSecret: 'test-secret' }],
-  ])('rejects a pending POST to %s after the route is disposed', async (path, body) => {
-    const onUpdateConfig = vi.fn(() => true);
-    const { routes, dispose, manualSubmits } = createHarness({ onUpdateConfig });
-    const req = Object.assign(new PassThrough(), { method: 'POST', headers: { host: 'localhost' } });
-    const res = fakeRes();
-    const response = invoke(routes.get(path), req as unknown as IncomingMessage, res);
-    dispose();
-    req.end(JSON.stringify(body));
-    await response;
-
-    expect(res.statusCode).toBe(503);
-    expect(onUpdateConfig).not.toHaveBeenCalled();
-    expect(manualSubmits).toEqual([]);
+    const result = await call(BIND_METHODS.configGet);
+    expect(result).toMatchObject({ ok: true, value: { config: { appId: '102120114', requireMention: true, cwd: '/tmp/w', accessRevision: expect.any(String) } } });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET|retired\.example/);
   });
 
   it('rejects a previous account revision after credentials change even when the access settings match', async () => {
     profileDirState.dir = mkdtempSync(join(tmpdir(), 'qq-access-rebind-'));
     const initial = readProfileAccess(undefined);
     expect(updateProfileConfig({ access: initial }, profileDirState.dir)).toBe(true);
-    const oldRoutes = createHarness({
+    const { call: oldCall } = createHarness({
       boundAppId: () => 'old-app',
       currentConfig: () => ({ appId: '__FROM_ENV__', appSecret: 'old-secret', access: initial }),
-    }).routes;
-    const read = async (routes: Map<string, WebRoute>) => {
-      const res = fakeRes();
-      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: 'localhost' }), res);
-      expect(res.statusCode).toBe(200);
-      expect(res.body).not.toMatch(/old-secret|new-secret/);
-      return JSON.parse(res.body).config;
+    });
+    const read = async (callFn: typeof oldCall) => {
+      const result = await callFn(BIND_METHODS.configGet);
+      expect(result.ok).toBe(true);
+      const config = (result as { value: { config: Record<string, unknown> } }).value.config;
+      expect(JSON.stringify(config)).not.toMatch(/old-secret|new-secret/);
+      return config;
     };
-    const old = await read(oldRoutes);
+    const old = await read(oldCall);
     expect(old.appId).toBe('old-app');
     expect(persistCredentialsToProfile({ appId: 'new-app', appSecret: 'new-secret' }, profileDirState.dir)).toBe(true);
-    const staleSave = fakeRes();
-    await invoke(oldRoutes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+    const staleSave = await oldCall(BIND_METHODS.configSet, {
       access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
-    })), staleSave);
-    expect(staleSave.statusCode).toBe(409);
+    });
+    expect(staleSave).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.configConflict } });
     expect(readProfileAccess(initial, profileDirState.dir)).toEqual(initial);
 
-    const { routes } = createHarness({
+    const { call } = createHarness({
       boundAppId: () => 'new-app',
       currentConfig: () => ({ appId: 'new-app', appSecret: 'new-secret', access: initial }),
     });
-    const fresh = await read(routes);
+    const fresh = await read(call);
     expect(fresh.appId).toBe('new-app');
     expect(fresh.accessRevision).not.toBe(old.accessRevision);
-    const staleNewRoute = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+    const staleNewRoute = await call(BIND_METHODS.configSet, {
       access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
-    })), staleNewRoute);
-    expect(staleNewRoute.statusCode).toBe(409);
-    const freshSave = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+    });
+    expect(staleNewRoute).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.configConflict } });
+    const freshSave = await call(BIND_METHODS.configSet, {
       access: { ...fresh.access, commandMode: 'disabled' }, accessRevision: fresh.accessRevision,
-    })), freshSave);
-    expect(freshSave.statusCode).toBe(200);
-    expect(readProfileAccess(initial, profileDirState.dir).commandMode).toBe('disabled');
+    });
+    expect(freshSave.ok).toBe(true);
+    expect((readProfileAccess(initial, profileDirState.dir) as { commandMode?: string }).commandMode).toBe('disabled');
   });
 
-  it('POST config：白名单内合法值通过并触发合并写入', async () => {
-    const { routes } = createHarness({ onUpdateConfig: () => true });
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
-        JSON.stringify({ requireMention: false, accessRevision: accessRevision(readProfileAccess(undefined)),
-          access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] } })),
-      res,
-    );
-    expect(res.statusCode).toBe(200);
-    expect(json(res)).toEqual({ ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
-  });
-
-  it.each(['open', 'allowlist', 'disabled'])('saves command mode %s through the existing config route', async commandMode => {
+  it.each([undefined, '', 123, 'old-app', null])('rejects config writes with an invalid or stale expected account: %s', async expectedAppId => {
     const onUpdateConfig = vi.fn(() => true);
-    const { routes } = createHarness({ onUpdateConfig });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({
+    const handler = createBindRpcHandler(null, { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }, {
+      boundAppId: () => 'new-app', onUpdateConfig,
+    });
+    const result = await handler(BIND_METHODS.configSet, { expectedAppId, model: 'old-model' }, signal());
+    expect(result).toMatchObject({ ok: false });
+    expect(onUpdateConfig).not.toHaveBeenCalled();
+  });
+
+  it('checks account identity for non-access writes and excludes it from persisted settings', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ boundAppId: () => 'new-app', onUpdateConfig });
+    expect(await call(BIND_METHODS.configSet, { expectedAppId: 'old-app', model: 'old-model' })).toMatchObject({
+      ok: false, error: { code: 'config/account-changed' },
+    });
+    expect(onUpdateConfig).not.toHaveBeenCalled();
+    expect(await call(BIND_METHODS.configSet, { expectedAppId: 'new-app', model: 'new-model' })).toMatchObject({ ok: true });
+    expect(onUpdateConfig).toHaveBeenCalledExactlyOnceWith({ model: 'new-model' });
+  });
+
+  it('rejects non-access writes through an old fiber after the persisted account changes', async () => {
+    profileDirState.dir = mkdtempSync(join(tmpdir(), 'qq-config-account-'));
+    expect(persistCredentialsToProfile({ appId: 'old-app', appSecret: 'old-secret' }, profileDirState.dir)).toBe(true);
+    const { call } = createHarness({ boundAppId: () => 'old-app' });
+    expect(persistCredentialsToProfile({ appId: 'new-app', appSecret: 'new-secret' }, profileDirState.dir)).toBe(true);
+    const patchPath = join(profileDirState.dir, 'cordis.patch.yml');
+    const before = readFileSync(patchPath, 'utf8');
+    expect(await call(BIND_METHODS.configSet, { expectedAppId: 'old-app', model: 'stale-model' })).toMatchObject({ ok: false });
+    expect(readFileSync(patchPath, 'utf8')).toBe(before);
+  });
+
+  it('config.set：白名单内合法值通过并触发合并写入', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ onUpdateConfig });
+    const result = await call(BIND_METHODS.configSet, {
+      requireMention: false, accessRevision: accessRevision(readProfileAccess(undefined)),
+      access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] },
+    });
+    expect(result).toEqual({ ok: true, value: { ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' } });
+  });
+
+  it.each(['open', 'allowlist', 'disabled'])('saves command mode %s through the existing config method', async commandMode => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ onUpdateConfig });
+    const result = await call(BIND_METHODS.configSet, {
       accessRevision: accessRevision(readProfileAccess(undefined)),
       access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: ['group'], commandMode },
-    })), res);
-    expect(res.statusCode).toBe(200);
+    });
+    expect(result.ok).toBe(true);
     expect(onUpdateConfig).toHaveBeenCalledWith(expect.objectContaining({ access: expect.objectContaining({ commandMode, groupAllow: ['group'] }) }));
   });
 
@@ -439,128 +286,66 @@ describe('bind-routes', () => {
     const initial = readProfileAccess(undefined);
     initial[list] = ['revoked-peer'];
     updateProfileConfig({ access: initial }, profileDirState.dir);
-    const { routes } = createHarness({ currentConfig: () => ({ access: initial }) });
+    const { call } = createHarness({ currentConfig: () => ({ access: initial }) });
     const read = async () => {
-      const res = fakeRes();
-      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: 'localhost' }), res);
-      return JSON.parse(res.body).config;
+      const result = await call(BIND_METHODS.configGet);
+      return (result as { value: { config: Record<string, unknown> & { access: Record<string, unknown>; accessRevision: string } } }).value.config;
     };
     const old = await read();
     updateProfileConfig({ access: { ...initial, [list]: [] } }, profileDirState.dir);
     const fresh = await read();
-    expect(fresh.access[list]).toEqual([]);
-    const staleSave = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+    expect((fresh.access as Record<string, unknown>)[list]).toEqual([]);
+    const staleSave = await call(BIND_METHODS.configSet, {
       access: { ...old.access, commandMode: 'disabled' }, accessRevision: old.accessRevision,
-    })), staleSave);
-    expect(staleSave.statusCode).toBe(409);
-    expect(readProfileAccess(initial, profileDirState.dir)[list]).toEqual([]);
-    const save = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({
+    });
+    expect(staleSave).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.configConflict } });
+    expect((readProfileAccess(initial, profileDirState.dir) as Record<string, unknown>)[list]).toEqual([]);
+    const save = await call(BIND_METHODS.configSet, {
       access: { ...fresh.access, commandMode: 'disabled' }, accessRevision: fresh.accessRevision,
-    })), save);
-    expect(save.statusCode).toBe(200);
+    });
+    expect(save.ok).toBe(true);
     expect(readProfileAccess(initial, profileDirState.dir)).toMatchObject({ [list]: [], commandMode: 'disabled' });
   });
 
   it('rejects access writes without a revision instead of trusting an old browser', async () => {
     const onUpdateConfig = vi.fn(() => true);
-    const { routes } = createHarness({ onUpdateConfig });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: 'localhost' }, JSON.stringify({ access: readProfileAccess(undefined) })), res);
-    expect(res.statusCode).toBe(409);
+    const { call } = createHarness({ onUpdateConfig });
+    expect(await call(BIND_METHODS.configSet, { access: readProfileAccess(undefined) })).toMatchObject({ ok: false, error: { code: RPC_ERROR_CODES.configConflict } });
     expect(onUpdateConfig).not.toHaveBeenCalled();
   });
 
   it('rejects unknown command modes before writing the profile', async () => {
     const onUpdateConfig = vi.fn(() => true);
-    const { routes } = createHarness({ onUpdateConfig });
-    const res = fakeRes();
-    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({
+    const { call } = createHarness({ onUpdateConfig });
+    expect(await call(BIND_METHODS.configSet, {
       access: { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [], commandMode: 'unexpected' },
-    })), res);
-    expect(res.statusCode).toBe(400);
+    })).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
     expect(onUpdateConfig).not.toHaveBeenCalled();
   });
 
-  it('POST config：凭据字段被拒绝并引导绑定功能', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"appSecret":"xxx"}'),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
-    expect(json(res)).toMatchObject({ ok: false, error: expect.stringContaining('凭据') });
+  it('config.set：凭据字段被拒绝并引导绑定功能', async () => {
+    const { call } = createHarness();
+    const result = await call(BIND_METHODS.configSet, { appSecret: 'xxx' });
+    expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('凭据') } });
   });
 
-  it('POST config：cwd 只读字段被拒绝', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"cwd":"/etc"}'),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
-    expect(json(res)).toMatchObject({ ok: false, error: expect.stringContaining('只读') });
+  it('config.set：cwd 只读字段被拒绝', async () => {
+    const { call } = createHarness();
+    const result = await call(BIND_METHODS.configSet, { cwd: '/etc' });
+    expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('只读') } });
   });
 
-  it('POST config：未知/超时类字段不在白名单被拒绝', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"maxQueue":50}'),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
+  it('config.set：未知/类型错误字段被 Schema 拒绝', async () => {
+    const { call } = createHarness();
+    expect(await call(BIND_METHODS.configSet, { maxQueue: 50 })).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
+    expect(await call(BIND_METHODS.configSet, { requireMention: 'yes' })).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('布尔') } });
   });
 
-  it('POST config：类型错误被 Schema 拒绝', async () => {
-    const { routes } = createHarness();
-    const res = fakeRes();
-    await invoke(
-      routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"requireMention":"yes"}'),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
-    expect(json(res)).toMatchObject({ ok: false, error: expect.stringContaining('布尔') });
-  });
-
-  it('跨站 Origin：403（state 与 manual 均拦截）', async () => {
-    const { routes } = createHarness();
-    const res1 = fakeRes();
-    await invoke(
-      routes.get(BIND_STATE_PATH),
-      fakeReq('GET', { host: '127.0.0.1:3080', origin: 'https://evil.example.com' }),
-      res1,
-    );
-    expect(res1.statusCode).toBe(403);
-
-    const res2 = fakeRes();
-    await invoke(
-      routes.get(BIND_MANUAL_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080', origin: 'https://evil.example.com' }, '{"appId":"a","appSecret":"b"}'),
-      res2,
-    );
-    expect(res2.statusCode).toBe(403);
-  });
-
-  it('同源 Origin / 无 Origin（Desktop IPC 桥）：放行', async () => {
-    const { routes } = createHarness();
-    const resSame = fakeRes();
-    await invoke(
-      routes.get(BIND_STATE_PATH),
-      fakeReq('GET', { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' }),
-      resSame,
-    );
-    expect(resSame.statusCode).toBe(200);
-
-    const resNone = fakeRes();
-    await invoke(routes.get(BIND_STATE_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), resNone);
-    expect(resNone.statusCode).toBe(200);
+  it('config.set：messageHandlingMode 合法值通过，非法值拒绝', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ onUpdateConfig });
+    expect(await call(BIND_METHODS.configSet, { messageHandlingMode: 'interrupt' })).toMatchObject({ ok: true });
+    expect(onUpdateConfig).toHaveBeenCalledWith({ messageHandlingMode: 'interrupt' });
+    expect(await call(BIND_METHODS.configSet, { messageHandlingMode: 'bogus' })).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
   });
 });

@@ -11,102 +11,28 @@
  */
 import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
-import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
 
-import { fetchJson, HttpError } from './http.ts';
+import { rpcCall, RpcError } from './rpc.ts';
+import { BIND_METHODS, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
+import type { MessageHandlingMode } from '../config.ts';
 import { SlashCommandList } from './slash-command-list.ts';
-import { COMMANDS_PATH, type SlashCommandDescriptor } from '../shared/command-protocol.ts';
+import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
+import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
-
-/** 样式注入标记（幂等） */
-const STYLE_ID = 'im-qqbot-config-panel-styles';
-
-/** QQ settings layout; control appearance belongs to the public host primitives. */
-function useConfigPanelStyles(): void {
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const existing = document.getElementById(STYLE_ID);
-    const retain = (element: HTMLElement): (() => void) => {
-      element.dataset.users = String(Number(element.dataset.users ?? 0) + 1);
-      return () => {
-        const users = Number(element.dataset.users ?? 1) - 1;
-        if (users === 0) element.remove();
-        else element.dataset.users = String(users);
-      };
-    };
-    if (existing !== null) return retain(existing);
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-.imqb2-form { display: flex; flex-direction: column; width: 100%; min-width: 0; color: var(--dsw-alias-label-primary); }
-.imqb2-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
-.imqb2-group-title {
-  padding: 14px 0 2px; font-size: 12px; font-weight: 600; line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
-.imqb2-field { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; }
-.imqb2-field + .imqb2-field { border-top: 0.5px solid var(--dsw-alias-border-l2); }
-.imqb2-head { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-.imqb2-label {
-  flex: 1; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.5;
-  color: var(--dsw-alias-label-primary);
-}
-.imqb2-help { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
-.imqb2-hint { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-.imqb2-textarea { box-sizing: border-box; width: 100%; min-height: 68px; padding: 8px 12px; resize: vertical; border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); font: inherit; color: var(--dsw-alias-label-primary); line-height: 1.5; }
-.imqb2-textarea:focus-visible { outline: 2px solid var(--dsw-alias-label-secondary); outline-offset: 2px; }
-/* Preserve the QQ settings draft and readback feedback in the sticky footer. */
-.imqb2-footer {
-  position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center;
-  flex-wrap: wrap; gap: 8px; margin-top: 16px; padding: 12px 0;
-  border-top: 0.5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-1);
-}
-.imqb2-footer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.imqb2-feedback { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
-.imqb2-feedback p { flex: 1; min-width: 0; }
-.imqb2-form .imqc-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.imqb2-form .imqc-hint { color: var(--dsw-alias-label-secondary); font-size: 12px; }
-.imqb2-form .imqc-error { color: var(--dsw-alias-state-error-primary); }
-.imqb2-form .imqc-cmdList { margin: 12px 0; }
-.imqb2-form .imqc-cmdContent { padding: 4px 0 4px 22px; font-size: 13px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
-.imqb2-form .imqc-cmdGroup + .imqc-cmdGroup { margin-top: 16px; }
-.imqb2-form .imqc-cmdGroup > strong { font-size: 12px; font-weight: 500; color: var(--dsw-alias-label-secondary); }
-.imqb2-form .imqc-cmdRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; overflow-wrap: anywhere; }
-.imqb2-form .imqc-cmdRow code { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 12px; }
-.imqb2-details { margin-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
-.imqb2-summary { padding: 16px 0; font-size: 13px; font-weight: 500; cursor: pointer; }
-.imqb2-summary::marker { color: var(--dsw-alias-label-tertiary); }
-.imqb2-summary:focus-visible { outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color); outline-offset: 2px; border-radius: var(--dsw-radius-sm); }
-.imqb2-directory-feedback { display: flex; align-items: flex-start; gap: 8px; }
-.imqb2-directory-feedback p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-@media (max-width: 480px) {
-  .imqb2-head:has([role=tablist]) { align-items: stretch; flex-direction: column; }
-  .imqb2-selector-head { align-items: stretch; flex-direction: column; }
-  .imqb2-note { flex-basis: 100%; }
-}
-.imqb2-note { flex: 1; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-.imqb2-note--error { color: var(--dsw-alias-state-error-primary); }
-.imqb2-note--ok { color: var(--dsw-alias-label-secondary); }
-/* cwd 只读行 */
-.imqb2-readonly { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; margin: 0; }
-    `;
-    document.head.appendChild(style);
-    return retain(style);
-  }, []);
-}
+import { useConfigPanelStyles } from './styles.ts';
 
 /** 访问模式分段选择行 */
 function SegmentedRow({ label, help, value, options, onChange, disabled = false }: {
   label: string; help?: string; value: AccessMode;
   options: ReadonlyArray<{ value: AccessMode; label: string }>; onChange: (next: AccessMode) => void; disabled?: boolean;
 }): ReactNode {
-  return createElement('div', { className: 'imqb2-field' },
-    createElement('div', { className: 'imqb2-head' },
-      createElement('span', { className: 'imqb2-label' }, label),
+  return createElement('div', { className: 'imqb-cfg-field' },
+    createElement('div', { className: 'imqb-cfg-head' },
+      createElement('span', { className: 'imqb-cfg-label' }, label),
       createElement(SegmentedControl<AccessMode>, { id: `imqq-access-${label}`, value, options, onChange, label, disabled }),
     ),
-    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+    help === undefined ? null : createElement('p', { className: 'imqb-cfg-hint' }, help),
   );
 }
 
@@ -116,6 +42,12 @@ const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
   { value: 'disabled', label: '关闭' },
+];
+
+/** 会话忙时新消息的处理方式（默认由 ConfigSchema 与表单共同兜底为 queue） */
+const MESSAGE_HANDLING_OPTIONS: ReadonlyArray<{ value: MessageHandlingMode; label: string }> = [
+  { value: 'queue', label: '排队' },
+  { value: 'interrupt', label: '插话' },
 ];
 
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
@@ -174,8 +106,7 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const { config } = await fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH,
-        { cache: 'no-store', signal }, Math.min(1000, remaining));
+      const { config } = await rpcCall<{ config: ConfigWire }>(BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, Math.min(1000, remaining), signal);
       if (matchesSavedConfig(config, expected)) return config;
     } catch (_error) {
       // The route may disappear while the saved plugin is reloading.
@@ -185,21 +116,28 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
   return undefined;
 }
 
-export interface ConfigPanelProps { bindPhase?: string }
+export interface ConfigPanelProps {
+  bindPhase?: string;
+  appId?: string | null;
+}
 
 /** Settings editor with recoverable requests and a draft protected from binding refreshes. */
-export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
+export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactNode {
   useConfigPanelStyles();
   const [commands, setCommands] = useState<SlashCommandDescriptor[]>([]);
   const [commandsError, setCommandsError] = useState<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     if (bindPhase !== 'bound') return;
-    void fetchJson<{ commands: SlashCommandDescriptor[] }>(COMMANDS_PATH, { signal: controller.signal })
-      .then(result => { setCommands(result.commands); setCommandsError(null); })
+    void rpcCall<{ commands: SlashCommandDescriptor[] }>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.commands, {}, 10_000, controller.signal)
+      .then(result => {
+        if (controller.signal.aborted) return;
+        setCommands(result.commands);
+        setCommandsError(null);
+      })
       .catch((error: unknown) => { if (!controller.signal.aborted) setCommandsError(error instanceof Error ? error.message : String(error)); });
     return () => controller.abort();
-  }, [bindPhase]);
+  }, [bindPhase, appId]);
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const draftRef = useRef<ConfigDraft | null>(null);
   const mounted = useRef(true);
@@ -226,11 +164,20 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
   useEffect(() => {
     const controller = new AbortController();
     let stopped = false;
+    let waitingForBinding = false;
     setLoading(true);
     setLoadError(null);
-    void fetchJson<{ config: ConfigWire }>(BIND_CONFIG_PATH, { cache: 'no-store', signal: controller.signal })
+    void rpcCall<{ config: ConfigWire }>(BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, 10_000, controller.signal)
       .then(({ config }) => {
         if (stopped || saveController.current !== null) return;
+        if (appId !== undefined && appId !== (config.appId || null)) {
+          if (appId === null && bindPhase !== 'bound') {
+            // 扫码落盘可能先于绑定轮询；保留加载态，由绑定状态更新触发重读。
+            waitingForBinding = true;
+            return;
+          }
+          throw new RpcError(RPC_ERROR_CODES.accountChanged, 'QQ 账号已变化，请等待绑定状态更新后刷新配置。');
+        }
         const expected = pendingConfirmation.current;
         const confirmed = expected !== null && matchesSavedConfig(config, expected);
         if (confirmed || expected?.appId !== config.appId) pendingConfirmation.current = null;
@@ -251,9 +198,9 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
       .catch((error: unknown) => {
         if (!stopped) setLoadError(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => { if (!stopped) setLoading(false); });
+      .finally(() => { if (!stopped && !waitingForBinding) setLoading(false); });
     return () => { stopped = true; controller.abort(); };
-  }, [bindPhase, reload, replaceDraft]);
+  }, [bindPhase, appId, reload, replaceDraft]);
 
   const patch = useCallback(<K extends keyof ConfigWire>(key: K, value: ConfigWire[K]): void => {
     const current = draftRef.current;
@@ -277,10 +224,8 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
     saveController.current = controller;
     setBusy(true);
     setResult(null);
-    void fetchJson<{ ok: boolean; message?: string; error?: string }>(BIND_CONFIG_PATH, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...changed, ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }) }), signal: controller.signal,
-    })
+    void rpcCall<{ ok: boolean; message?: string; error?: string }>(BIND_RPC_ENDPOINT, BIND_METHODS.configSet,
+      { ...changed, expectedAppId: current.baseline.appId ?? null, ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }) }, 10_000, controller.signal)
       .then(async (body) => {
         if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
         // The write is confirmed. A read from the old fiber during HMR must not undo it.
@@ -300,7 +245,7 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
         }
       })
       .catch((error: unknown) => {
-        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: error instanceof HttpError && error.status === 409
+        if (mounted.current && !controller.signal.aborted) setResult({ kind: 'failed', message: error instanceof RpcError && (error.code === RPC_ERROR_CODES.configConflict || error.code === RPC_ERROR_CODES.accountChanged)
           ? `${error.message}草稿已保留，请先刷新配置。`
           : `保存结果未确认：${error instanceof Error ? error.message : String(error)}。草稿已保留，可重试或刷新配置核对。` });
       })
@@ -313,13 +258,13 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
   }, [busy, replaceDraft]);
 
   const retry = (): void => { setReload((value) => value + 1); };
-  const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb2-feedback', role: 'alert' },
-    createElement('p', { className: 'imqb2-note imqb2-note--error' }, `配置加载失败：${loadError}`),
+  const loadFeedback = loadError === null ? null : createElement('div', { className: 'imqb-cfg-feedback', role: 'alert' },
+    createElement('p', { className: 'imqb-cfg-note imqb-cfg-note--error' }, `配置加载失败：${loadError}`),
     createElement(Button, { variant: 'ghost', size: 'sm', onClick: retry, disabled: loading || busy }, loading ? '重试中…' : '重试'),
   );
   if (draft === null) {
     return createElement('div', { 'aria-busy': loading }, loadFeedback,
-      loading ? createElement('p', { className: 'imqb2-hint', role: 'status', style: { padding: '12px 0' } }, '正在加载配置…') : null,
+      loading ? createElement('p', { className: 'imqb-cfg-hint', role: 'status', style: { padding: '12px 0' } }, '正在加载配置…') : null,
     );
   }
 
@@ -330,10 +275,10 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
     ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
     : '没有未保存的修改。');
 
-  return createElement('form', { className: 'imqb2-form', onSubmit: submit, 'aria-busy': busy },
+  return createElement('form', { className: 'imqb-cfg-form', onSubmit: submit, 'aria-busy': busy },
     loadFeedback,
-    createElement('fieldset', { className: 'imqb2-fields', disabled: busy },
-      createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
+    createElement('fieldset', { className: 'imqb-cfg-fields', disabled: busy },
+      createElement('div', { className: 'imqb-cfg-group-title' }, '服务范围'),
       createElement(SegmentedRow, { disabled: busy,
         label: '私聊', value: access.c2cMode, options: MODE_OPTIONS,
         onChange: (value) => { patch('access', { ...access, c2cMode: value }); },
@@ -353,38 +298,52 @@ export function ConfigPanel({ bindPhase }: ConfigPanelProps = {}): ReactNode {
         purpose: 'owner', title: '命令白名单', enabled: bindPhase === 'bound', onChange: retry,
         hint: '名单按发送者 OpenID 校验，适用于获准接入的群聊和私聊。保存模式与管理名单分别生效。',
       }) : null,
-      commandsError ? createElement('p', { className: 'imqc-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
+      commandsError ? createElement('p', { className: 'imqb-cmd-error', role: 'alert' }, `命令清单加载失败：${commandsError}`) : null,
       createElement(SlashCommandList, { commands }),
-      createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
+      createElement('div', { className: 'imqb-cfg-group-title' }, '基础设置'),
       ...([
         ['requireMention', '群聊仅回复 @机器人的消息'],
         ['streaming', '流式输出'],
         ['showToolResults', '显示工具调用结果'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
-        createElement('div', { className: 'imqb2-head' },
-          createElement('span', { className: 'imqb2-label' }, label),
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb-cfg-field', key },
+        createElement('div', { className: 'imqb-cfg-head' },
+          createElement('span', { className: 'imqb-cfg-label' }, label),
           createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
             onChange: (value: boolean) => patch(key, value) })))),
-      createElement('div', { className: 'imqb2-group-title' }, '模型与提示词'),
+      createElement('div', { className: 'imqb-cfg-field' },
+        createElement('div', { className: 'imqb-cfg-head' },
+          createElement('span', { className: 'imqb-cfg-label' }, '消息处理方式'),
+          createElement(SegmentedControl<MessageHandlingMode>, {
+            id: 'imqq-message-handling',
+            value: form.messageHandlingMode ?? 'queue',
+            options: MESSAGE_HANDLING_OPTIONS,
+            onChange: (value: MessageHandlingMode) => patch('messageHandlingMode', value),
+            label: '消息处理方式',
+            disabled: busy,
+          }),
+        ),
+        createElement('p', { className: 'imqb-cfg-hint' }, '任务进行中新消息的处理方式：排队在当前任务结束后处理，插话立即补充到当前任务。切换需保存并重载插件，会中断进行中的任务。'),
+      ),
+      createElement('div', { className: 'imqb-cfg-group-title' }, '模型与提示词'),
       ...([
         ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
-        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb-cfg-field', key },
+        createElement('label', { className: 'imqb-cfg-label', htmlFor: `imqq-${key}` }, label),
         createElement(Input, { id: `imqq-${key}`, value: form[key] ?? '', placeholder: '留空继承 DSH 默认',
           onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch(key, event.target.value) }))),
       ...([
         ['groupPrompt', '群聊补充提示词'], ['directPrompt', '私聊补充提示词'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb2-field', key },
-        createElement('label', { className: 'imqb2-label', htmlFor: `imqq-${key}` }, label),
-        createElement('textarea', { id: `imqq-${key}`, className: 'imqb2-textarea', value: form[key] ?? '', rows: 3,
+      ] as const).map(([key, label]) => createElement('div', { className: 'imqb-cfg-field', key },
+        createElement('label', { className: 'imqb-cfg-label', htmlFor: `imqq-${key}` }, label),
+        createElement('textarea', { id: `imqq-${key}`, className: 'imqb-cfg-textarea', value: form[key] ?? '', rows: 3,
           onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => patch(key, event.target.value) }))),
-      form.cwd === undefined ? null : createElement('div', { className: 'imqb2-field' },
-        createElement('span', { className: 'imqb2-label' }, 'Agent 工作目录（只读）'),
-        createElement('p', { className: 'imqb2-readonly' }, form.cwd)),
+      form.cwd === undefined ? null : createElement('div', { className: 'imqb-cfg-field' },
+        createElement('span', { className: 'imqb-cfg-label' }, 'Agent 工作目录（只读）'),
+        createElement('p', { className: 'imqb-cfg-readonly' }, form.cwd)),
     ),
-    createElement('div', { className: 'imqb2-footer' },
-      createElement('p', { className: `imqb2-note${result === null ? '' : result.kind === 'failed' ? ' imqb2-note--error' : ' imqb2-note--ok'}`, role: result?.kind === 'failed' ? 'alert' : 'status', 'aria-live': 'polite' }, message),
-      createElement('div', { className: 'imqb2-footer-actions' },
+    createElement('div', { className: 'imqb-cfg-footer' },
+      createElement('p', { className: `imqb-cfg-note${result === null ? '' : result.kind === 'failed' ? ' imqb-cfg-note--error' : ' imqb-cfg-note--ok'}`, role: result?.kind === 'failed' ? 'alert' : 'status', 'aria-live': 'polite' }, message),
+      createElement('div', { className: 'imqb-cfg-footer-actions' },
         pendingConfirmation.current !== null || result?.kind === 'failed' ? createElement(Button, {
           variant: 'ghost', size: 'sm', disabled: busy || loading, onClick: retry,
         }, loading ? '刷新中…' : '刷新配置') : null,

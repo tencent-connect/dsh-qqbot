@@ -349,3 +349,60 @@ describe('attachSessionToWorkspace', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 });
+
+describe('归档判定与恢复', () => {
+  it('archivedSessionIds 命中 → isSessionArchived true；未命中 → false', () => {
+    const registry = { create: vi.fn(), archivedSessionIds: ['sess-a'] };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }));
+
+    expect(adapter.isSessionArchived('sess-a')).toBe(true);
+    expect(adapter.isSessionArchived('sess-b')).toBe(false);
+    expect(adapter.capabilities).toContain('workspaceRegistry.archivedSessionIds(可用)');
+  });
+
+  it('每次现读集合：宿主取消归档后立刻反映为未归档', () => {
+    const archived: string[] = ['sess-a'];
+    const registry = { create: vi.fn(), get archivedSessionIds() { return archived; } };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }));
+
+    expect(adapter.isSessionArchived('sess-a')).toBe(true);
+    archived.length = 0;
+    expect(adapter.isSessionArchived('sess-a')).toBe(false);
+  });
+
+  it('未挂载 workspaceRegistry（headless）→ 按未归档处理', () => {
+    const adapter = createHostAdapter(makeCtx({}));
+
+    expect(adapter.isSessionArchived('sess-a')).toBe(false);
+    expect(adapter.capabilities).toContain('workspaceRegistry.archivedSessionIds(不可用，无法判定会话归档)');
+  });
+
+  it('unarchiveSession：宿主提供则调用并返回 true', async () => {
+    const unarchiveSession = vi.fn().mockResolvedValue(undefined);
+    const registry = { create: vi.fn(), archivedSessionIds: [], unarchiveSession };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }));
+
+    expect(await adapter.unarchiveSession('sess-a')).toBe(true);
+    expect(unarchiveSession).toHaveBeenCalledWith('sess-a');
+  });
+
+  it('unarchiveSession：能力缺失返回 false（调用方据此提示用户）', async () => {
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: { create: vi.fn(), archivedSessionIds: [] } }));
+
+    expect(await adapter.unarchiveSession('sess-a')).toBe(false);
+    expect(adapter.capabilities).toContain('workspaceRegistry.unarchiveSession(不可用，归档只能提示用户手动取消)');
+  });
+
+  it('unarchiveSession：宿主抛错时返回 false 并 warn，不上抛', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const registry = {
+      create: vi.fn(),
+      archivedSessionIds: [],
+      unarchiveSession: vi.fn().mockRejectedValue(new Error('EIO')),
+    };
+    const adapter = createHostAdapter(makeCtx({ workspaceRegistry: registry }), logger);
+
+    expect(await adapter.unarchiveSession('sess-a')).toBe(false);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+});

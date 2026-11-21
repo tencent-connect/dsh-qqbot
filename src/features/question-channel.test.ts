@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import {
   QuestionChannel,
+  type QuestionChannelHost,
   type UserQuestion,
   type UserQuestionRequest,
   type UserQuestionResult,
@@ -344,25 +345,39 @@ describe('QuestionChannel.cancelPending', () => {
   });
 });
 
-describe('QuestionChannel.install routing', () => {
+describe('QuestionChannel.install routing (user-questions/request waterfall)', () => {
+  function createWaterfallHost() {
+    let handler: ((req: unknown, next: () => Promise<UserQuestionResult>) => unknown) | undefined;
+    const host: QuestionChannelHost = {
+      on: (_event, h) => {
+        handler = h;
+        return () => { handler = undefined; };
+      },
+    };
+    const call = (request: UserQuestionRequest, next: () => Promise<UserQuestionResult>): Promise<UserQuestionResult> => {
+      if (handler === undefined) throw new Error('waterfall listener not installed');
+      return handler(request, next) as Promise<UserQuestionResult>;
+    };
+    return { host, call };
+  }
+
   it('routes QQ sessions to QQ channel and delegates others', async () => {
     const sent: SentMessage[] = [];
     const record = makeRecord(sessionKey('c2c', 'u9'));
-    (record as { sessionId?: string }).sessionId = 'sess-qq';
     const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
     const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    let origCalled = 0;
-    const uq = { ask: vi.fn(async () => { origCalled += 1; return { answers: [] }; }) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
 
-    await uq.ask({ questions: [q2('x')], agent: { id: 'sess-web' } });
-    expect(origCalled).toBe(1);
+    const next = vi.fn(async () => ({ answers: [] }));
+    await call({ questions: [q2('x')], agent: { id: 'sess-web' } }, next);
+    expect(next).toHaveBeenCalledTimes(1);
 
-    const p = uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
-    await new Promise((r) => setTimeout(r, 10));
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => new Promise<UserQuestionResult>(() => {}));
+    await sleep(10);
     expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
-    expect(origCalled).toBe(1); // QQ 路径未触碰原实现
+    expect(next).toHaveBeenCalledTimes(1); // QQ 路径未触碰宿主 answerer
   });
 
   it('sends the first question to the resolved turn target, follow-ups reply to the answer', async () => {
@@ -374,10 +389,10 @@ describe('QuestionChannel.install routing', () => {
       manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
       { targetFor: () => pushed },
     );
-    const uq = { ask: vi.fn(async () => ({ answers: [] })) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
 
-    const p = uq.ask({ questions: [q2('a'), q2('b')], agent: { id: 'sess-qq' } });
+    const p = call({ questions: [q2('a'), q2('b')], agent: { id: 'sess-qq' } }, () => new Promise<UserQuestionResult>(() => {}));
     await sleep(10);
     expect(sender.sendMarkdown.mock.calls[0]![0]).toEqual(pushed);
 
@@ -397,33 +412,130 @@ describe('QuestionChannel.install routing', () => {
       manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger(),
       { targetFor: () => undefined },
     );
-    const orig = vi.fn(async () => ({ answers: [] }));
-    const uq = { ask: orig };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
 
-    await uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
+    const next = vi.fn(async () => ({ answers: [] }));
+    await call({ questions: [q2()], agent: { id: 'sess-qq' } }, next);
 
-    expect(orig).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledTimes(1);
     expect(sender.sendMarkdown).not.toHaveBeenCalled();
   });
 
-  it('uninstall restores the original ask', async () => {
-    const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
-      ask: async () => ({ answers: [] }),
-    };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.__qqQuestionPatched).toBe(true);
-    ch.uninstall();
-    expect(uq.__qqQuestionPatched).toBeUndefined();
+  it('host answerer wins the race: QQ pending is withdrawn', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    let settleNative: (value: UserQuestionResult) => void = () => {};
+    const native = new Promise<UserQuestionResult>((resolve) => { settleNative = resolve; });
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => native);
+    await sleep(10);
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true); // pending 已建立（发送成功）
+
+    settleNative({ answers: [] });
+    expect(await p).toEqual({ answers: [] });
+    // QQ pending 被撤：迟到的作答不再推进
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(false);
   });
 
-  it('disables gracefully when the userQuestions service is missing', () => {
-    const sent: SentMessage[] = [];
+  it('QQ wins the race: the question lifetime ends, the turn signal survives', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const turn = new AbortController();
+    const request: UserQuestionRequest = { questions: [q2()], agent: { id: 'sess-qq' }, signal: turn.signal };
+    const p = call(request, () => new Promise<UserQuestionResult>(() => {}));
+    await sleep(10);
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
+    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+    // 问题私有生命周期结束（宿主 answerer 据此撤卡片），turn 不被误伤
+    expect(request.signal.aborted).toBe(true);
+    expect(turn.signal.aborted).toBe(false);
+  });
+
+  it('NO_PROVIDER from the host is expected: the QQ answer wins', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
     const logger = createLogger();
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, logger);
-    ch.install({ get: () => undefined });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, logger);
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const noProvider = Object.assign(new Error('no user-questions answerer accepted the request'), { code: 'NO_PROVIDER' });
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => Promise.reject(noProvider));
+    await sleep(10);
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
+    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+    // 预期态不告警
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('host errors are logged while the question stays answerable on QQ', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const logger = createLogger();
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, logger);
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const boom = Object.assign(new Error('web answerer exploded'), { code: 'PROVIDER_ERROR' });
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => Promise.reject(boom));
+    await sleep(10);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
+    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+  });
+
+  it('both surfaces fail: the earlier host error is surfaced, no double hang', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    // QQ 投递失败（sendMarkdown 恒抛）+ 宿主无 answerer → 透传 NO_PROVIDER
+    const sender = createSender([]);
+    sender.sendMarkdown.mockImplementation(async () => { throw new Error('qq send failed'); });
+    const ch = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const noProvider = Object.assign(new Error('no user-questions answerer accepted the request'), { code: 'NO_PROVIDER' });
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => Promise.reject(noProvider));
+    await expect(p).rejects.toMatchObject({ code: 'NO_PROVIDER' });
+  });
+
+  it('an already-aborted turn rejects before any QQ delivery', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const sender = createSender([]);
+    const ch = new QuestionChannel(manager, sender, { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const turn = new AbortController();
+    turn.abort();
+    await expect(call(
+      { questions: [q2()], agent: { id: 'sess-qq' }, signal: turn.signal },
+      () => new Promise<UserQuestionResult>(() => {}),
+    )).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    expect(sender.sendMarkdown).not.toHaveBeenCalled();
+  });
+
+  it('uninstall removes the listener and rejects pending questions', async () => {
+    const record = makeRecord(sessionKey('c2c', 'u9'));
+    const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
+    const ch = new QuestionChannel(manager, createSender([]), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+    const { host, call } = createWaterfallHost();
+    ch.install(host);
+
+    const p = call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => new Promise<UserQuestionResult>(() => {}));
+    await sleep(10);
+    ch.uninstall();
+    await expect(p).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+    expect(() => call({ questions: [q2()], agent: { id: 'sess-qq' } }, () => new Promise<UserQuestionResult>(() => {})))
+      .toThrow('waterfall listener not installed');
   });
 });

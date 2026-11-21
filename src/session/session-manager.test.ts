@@ -38,6 +38,12 @@ const notFound = (id: string): Error =>
 /** 非「不存在」类失败：日志损坏 / 后端 IO / 同 id 未释放等 */
 const corrupt = (id: string): Error => new Error(`EIO: corrupt session log for "${id}"`);
 
+/** 宿主写句柄被占用（SessionAlreadyOwnedError 的形态） */
+const owned = (id: string): Error => Object.assign(
+  new Error(`session "${id}" is already owned by an active write handle`),
+  { name: 'SessionAlreadyOwnedError' },
+);
+
 /**
  * 宿主 persistence 替身。
  *
@@ -73,6 +79,7 @@ function fakeAgent(id: string): DshAgent {
     session: { id, snapshotEvents: () => [] },
     cancel: vi.fn(),
     followup: vi.fn(),
+    steer: vi.fn(),
     whenIdle: vi.fn(async () => {}),
     runMaintenance: vi.fn(async (task: (signal: AbortSignal) => Promise<unknown>) => task(new AbortController().signal)),
   } as unknown as DshAgent;
@@ -131,6 +138,7 @@ function createManagerWithCtx(
   registry: Pick<DshAgentRegistry, 'get' | 'resume' | 'create'>,
   ctx: Context,
   logger: Logger = createLogger(),
+  sessionIdleTimeout = 0,
 ) {
   const config = ConfigSchema({
     appId: APP_ID,
@@ -138,7 +146,7 @@ function createManagerWithCtx(
     provider: 'p',
     model: 'm',
     cwd: join(env.home, 'workspace'),
-    sessionIdleTimeout: 0,
+    sessionIdleTimeout,
   } as ImQQBotConfig);
   const manager = new SessionManager(ctx, registry as DshAgentRegistry, config, logger);
   managers.push(manager);
@@ -580,5 +588,246 @@ describe('QQ prompt 注册生命周期（per-agent 安装 / 释放 / live 复用
     // 失败不入表：同 agent 再次触发安装时重试（此处模拟再次 remove→复用）
     expect(manager.remove('c2c', PEER)).resolves.toBeUndefined();
     expect(created[0].sections.size).toBe(0);
+  });
+});
+
+describe('getOrCreate — 归档会话', () => {
+  /** 带归档集合的 ctx；archived 用可变数组，模拟宿主 UI 随时归档/取消归档 */
+  function archivedCtx(archived: string[]): Context {
+    return {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') return { stat: async () => ({ header: {} }) };
+        if (name === 'workspaceRegistry') return { create: async () => ({}), archivedSessionIds: archived };
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+  }
+
+  it('已归档：不 resume、不 create，抛 session-archived 交给入站层提示', async () => {
+    // 归档门禁在 agent/pre-step 就拒绝，followup 不会跑出任何回合；
+    // 与其让用户等一个永远不来的回复，不如在投递前就失败。
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const { registry } = createRegistry(async () => { throw new Error('should not resume'); });
+    const manager = createManagerWithCtx(registry, archivedCtx([sessionId]));
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .rejects.toMatchObject({ code: 'session-archived' });
+    expect(registry.resume).not.toHaveBeenCalled();
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('已开着的会话被归档后再发消息：同样拦在投递前', async () => {
+    const archived: string[] = [];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archivedCtx(archived));
+
+    const record = await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+    archived.push(record.sessionId);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .rejects.toMatchObject({ code: 'session-archived' });
+  });
+
+  it('未归档时照常恢复（存档的是别的会话不影响）', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archivedCtx(['session-other']));
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .resolves.toMatchObject({ sessionId: 'session-live' });
+  });
+});
+
+describe('shouldNotifyFailure — 失败提示去重', () => {
+  it('同一原因在窗口内只提示一次，换了原因会重新提示', () => {
+    const manager = createManager(createRegistry(async () => fakeHandle('s')).registry);
+
+    expect(manager.shouldNotifyFailure('c2c', PEER, 'session-archived')).toBe(true);
+    expect(manager.shouldNotifyFailure('c2c', PEER, 'session-archived')).toBe(false);
+    expect(manager.shouldNotifyFailure('c2c', PEER, 'session-busy')).toBe(true);
+  });
+
+  it('窗口过后同一原因会再次提示', () => {
+    const manager = createManager(createRegistry(async () => fakeHandle('s')).registry);
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      expect(manager.shouldNotifyFailure('c2c', PEER, 'other')).toBe(true);
+      now.mockReturnValue(1_000_000 + 14_999);
+      expect(manager.shouldNotifyFailure('c2c', PEER, 'other')).toBe(false);
+      now.mockReturnValue(1_000_000 + 15_000);
+      expect(manager.shouldNotifyFailure('c2c', PEER, 'other')).toBe(true);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('不同会话互不影响', () => {
+    const manager = createManager(createRegistry(async () => fakeHandle('s')).registry);
+
+    expect(manager.shouldNotifyFailure('c2c', PEER, 'other')).toBe(true);
+    expect(manager.shouldNotifyFailure('group', 'another', 'other')).toBe(true);
+  });
+});
+
+describe('unarchive — QQ 侧取消归档', () => {
+  /** 带可写归档集合的 ctx；unarchiveSession 由用例决定是否提供 */
+  function archiveCtx(
+    archived: string[],
+    unarchiveSession?: (id: string) => Promise<void>,
+  ): Context {
+    return {
+      get: (name: string) => {
+        if (name === 'sessionPersistence') return { stat: async () => ({ header: {} }) };
+        if (name === 'workspaceRegistry') return { create: async () => ({}), archivedSessionIds: archived, unarchiveSession };
+        return undefined;
+      },
+      on: vi.fn(),
+    } as unknown as Context;
+  }
+
+  it('恢复成功后原会话可以继续用（不换 sessionId）', async () => {
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const archived = [sessionId];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx(archived, async (id) => {
+      const at = archived.indexOf(id);
+      if (at >= 0) archived.splice(at, 1);
+    }));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('ok');
+    expect(archived).toEqual([]);
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .resolves.toMatchObject({ sessionId });
+  });
+
+  it('本来没归档 → not-archived，不调用宿主', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const unarchiveSession = vi.fn();
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([], unarchiveSession));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('not-archived');
+    expect(unarchiveSession).not.toHaveBeenCalled();
+  });
+
+  it('还没有会话 → no-session', async () => {
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx([], vi.fn()));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('no-session');
+  });
+
+  it('宿主恢复失败 → failed，归档状态原样保留', async () => {
+    const sessionId = 'session-archived';
+    new PrefsStore().setSessionId(KEY, sessionId);
+    const archived = [sessionId];
+    const { registry } = createRegistry(async ({ resumeSessionId }) => fakeHandle(resumeSessionId));
+    const manager = createManagerWithCtx(registry, archiveCtx(archived, async () => { throw new Error('EIO'); }));
+
+    await expect(manager.unarchive('c2c', PEER)).resolves.toBe('failed');
+    expect(archived).toContain(sessionId);
+  });
+});
+
+describe('getOrCreate — 写句柄占用（SessionAlreadyOwnedError）', () => {
+  it('瞬时占用：短暂重试后恢复成功', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    let calls = 0;
+    const { registry } = createRegistry(async ({ resumeSessionId }) => {
+      calls += 1;
+      if (calls === 1) throw owned(resumeSessionId);
+      return fakeHandle(resumeSessionId);
+    });
+    const manager = createManager(registry);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .resolves.toMatchObject({ sessionId: 'session-live' });
+    expect(calls).toBe(2);
+  });
+
+  it('一直占用：重试用尽抛 session-busy，且不重建已存在的会话', async () => {
+    // 会话确实在盘上（stat 命中），重建会产生同 id 双写；必须拒绝
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw owned(resumeSessionId); });
+    const manager = createManager(registry);
+
+    await expect(manager.getOrCreate('c2c', PEER, PEER, REPLY))
+      .rejects.toMatchObject({ code: 'session-busy' });
+    expect(registry.resume).toHaveBeenCalledTimes(4); // 首次 + 3 次重试
+    expect(registry.create).not.toHaveBeenCalled();
+  });
+
+  it('占用期间 /compact 给出明确结果，不抛给命令层', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-live');
+    const { registry } = createRegistry(async ({ resumeSessionId }) => { throw owned(resumeSessionId); });
+    const manager = createManager(registry);
+
+    await expect(manager.compact('c2c', PEER, { senderId: PEER, replyTarget: REPLY }))
+      .resolves.toMatchObject({ ok: false, reason: 'in-use' });
+  });
+
+  it('/new 换成新会话后，不被旧会话的释放拖住', async () => {
+    new PrefsStore().setSessionId(KEY, 'session-old');
+    let releaseDispose!: () => void;
+    const disposed = new Promise<void>((resolve) => { releaseDispose = resolve; });
+    const oldHandle = { agent: fakeAgent('session-old'), dispose: vi.fn(() => disposed) };
+    let calls = 0;
+    const { registry } = createRegistry(async ({ resumeSessionId }) => {
+      calls += 1;
+      return calls === 1 ? oldHandle : fakeHandle(resumeSessionId);
+    });
+    const manager = createManager(registry);
+    await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+
+    // /new：prefs 换新 id、旧记录摘除，但写句柄还没释放完
+    void manager.remove('c2c', PEER);
+    await Promise.resolve();
+
+    // 目标已是新会话：不该等旧句柄释放（否则用户的 /new 逃生口会被拖住）
+    const outcome = await Promise.race([
+      manager.getOrCreate('c2c', PEER, PEER, REPLY),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 500)),
+    ]);
+    expect(outcome).not.toBe('timeout');
+    expect(outcome).toMatchObject({ sessionId: expect.not.stringMatching(/^session-old$/) });
+    releaseDispose();
+  });
+
+  it('空闲回收释放句柄期间到达的消息会等待释放，不撞写句柄冲突', async () => {
+    vi.useFakeTimers();
+    try {
+      new PrefsStore().setSessionId(KEY, 'session-live');
+      let releaseDispose!: () => void;
+      const disposed = new Promise<void>((resolve) => { releaseDispose = resolve; });
+      let resumeCalls = 0;
+      const firstHandle = { agent: fakeAgent('session-live'), dispose: vi.fn(() => disposed) };
+      const { registry } = createRegistry(async ({ resumeSessionId }) => {
+        resumeCalls += 1;
+        return resumeCalls === 1 ? firstHandle : fakeHandle(resumeSessionId);
+      });
+      // 闲置超时 1ms：推进 60s 即触发 IdleEvictor 的检查周期
+      const manager = createManagerWithCtx(registry, absentCtx(), createLogger(), 1);
+      await manager.getOrCreate('c2c', PEER, PEER, REPLY);
+      expect(resumeCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(firstHandle.dispose).toHaveBeenCalledTimes(1);
+
+      // 释放尚未完成：消息必须停在 releasing 上，不能立刻 resume
+      const pending = manager.getOrCreate('c2c', PEER, PEER, REPLY);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(resumeCalls).toBe(1);
+
+      releaseDispose();
+      await expect(pending).resolves.toMatchObject({ sessionId: 'session-live' });
+      expect(resumeCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

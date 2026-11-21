@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
+import { extractTurnError, parseEvent, parseStreamFrame, type RawSessionEvent } from './events.ts';
 
 /** 构造 agent/assistant-stream 的 payload（帧字段按宿主 AssistantStreamFrame 形态） */
 function payload(frame: unknown, agentId = 'sess-qq'): unknown {
@@ -78,5 +78,51 @@ describe('parseEvent: deliverables/presented', () => {
     ['文件项为 null', { turn: 1, callId: 'c', files: [null] }],
   ])('非法事件返回 undefined：%s', (_name, data) => {
     expect(parseEvent(presented(data))).toBeUndefined();
+  });
+});
+
+describe('parseEvent: tool/result', () => {
+  const result = (data: unknown): RawSessionEvent => ({ type: 'tool/result', data: data as Record<string, unknown> });
+
+  it('解析 callId 与 message.isError', () => {
+    const raw = result({
+      turn: 1,
+      step: 1,
+      message: { source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'text', text: 'ok' }], isError: true },
+    });
+
+    expect(parseEvent(raw)).toEqual({
+      type: 'tool/result',
+      callId: 'call-1',
+      isError: true,
+      error: undefined,
+      raw: raw.data,
+    });
+  });
+
+  it('isError 缺省为 false', () => {
+    const event = parseEvent(result({ message: { source: { callId: 'c' }, content: [] } }));
+
+    expect(event?.type === 'tool/result' && event.isError).toBe(false);
+  });
+
+  it('缺 callId 返回 undefined', () => {
+    expect(parseEvent(result({ message: { content: [] } }))).toBeUndefined();
+  });
+});
+
+describe('extractTurnError', () => {
+  it('error：提取 code / message', () => {
+    expect(extractTurnError({ kind: 'error', error: { code: 'E_BROKEN', message: 'boom' } }))
+      .toEqual({ code: 'E_BROKEN', message: 'boom' });
+  });
+
+  it('blocked：归为 TURN_BLOCKED（归档门禁以此收尾，本轮没有 user/message）', () => {
+    expect(extractTurnError({ kind: 'blocked' })?.code).toBe('TURN_BLOCKED');
+  });
+
+  it('正常结束不算失败', () => {
+    expect(extractTurnError({ kind: 'completed' })).toBeUndefined();
+    expect(extractTurnError({ kind: 'interrupted' })).toBeUndefined();
   });
 });

@@ -23,7 +23,9 @@ import { buildUserAgent } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
-import { registerAccountRoutes } from '../runtime/account-routes.ts';
+import { createAccountRpcHandler } from '../runtime/account-routes.ts';
+import { registerPluginRpc } from '../rpc-carrier.ts';
+import { ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
@@ -55,7 +57,7 @@ export async function bootstrapGateway(
   const manager = new SessionManager(ctx, agents, config, logger);
 
   manager.accountAccess = new AccountAccessService(config, logger);
-  registerAccountRoutes(ctx, manager.accountAccess, () => describeCommands({manager, config, logger}));
+  registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(manager.accountAccess, () => describeCommands({manager, config, logger})));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs) });
   const turnTracker = createTurnTracker(manager, config, logger, qqInputs);
@@ -142,10 +144,10 @@ export async function bootstrapGateway(
       if (parsed !== undefined) outbound.routeStreamFrame(parsed.agentId, parsed.delta);
     }, { global: true });
 
-  // ── 问答通道（ask_user_question → QQ 文本 + 按钮） ──
+  // ── 问答通道（ask_user_question → QQ 文本 + 按钮，waterfall answerer）──
   const questionChannel = new QuestionChannel(manager, sender, config, logger, turnTracker);
   manager.questionChannel = questionChannel;
-  questionChannel.install(ctx);
+  questionChannel.install(ctx as unknown as Parameters<typeof questionChannel.install>[0]);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
   const approvalChannel = new ApprovalChannel(manager, sender, config, logger, turnTracker);
@@ -210,6 +212,7 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        questionChannel.uninstall();
         await manager.disposeAll();
         bot.stop();
       };

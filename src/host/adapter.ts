@@ -79,6 +79,21 @@ export interface HostAdapter {
    * 只读 header 元数据，不读事件日志；服务不可用返回空数组。
    */
   listStoredSessions(): Promise<StoredSessionSummary[]>;
+  /**
+   * 会话是否被宿主归档。
+   *
+   * 归档会话在 `agent/pre-step` 就被 archived-session-gate 拒绝：turn 以
+   * `blocked` 收场，且本轮消息被丢弃。同步只读 workspaceRegistry 的归档集合，
+   * 每次现读（归档是宿主 UI 随时可写的状态）；无 registry 视为未归档。
+   */
+  isSessionArchived(sessionId: string): boolean;
+  /**
+   * 把会话从宿主的归档集合恢复。
+   *
+   * @returns 宿主提供并成功执行返回 true；能力缺失或执行失败返回 false
+   *（调用方据此提示用户手动取消归档，绝不把失败当成已恢复）。
+   */
+  unarchiveSession(sessionId: string): Promise<boolean>;
   /** 探测结果摘要（启动契约检查用） */
   readonly capabilities: string[];
 }
@@ -142,6 +157,10 @@ export interface WorkspaceLike {
 export interface WorkspaceRegistryLike {
   /** 获取目录对应的现有工作区；不存在时创建（幂等；路径须已存在且为目录） */
   create(path: string, title?: string): Promise<WorkspaceLike>;
+  /** 全局归档会话 id（getter；缺失表示当前宿主无法判定归档） */
+  readonly archivedSessionIds?: readonly string[];
+  /** 把会话从归档集合恢复；缺失表示宿主未提供该能力 */
+  unarchiveSession?: (sessionId: string) => Promise<void>;
 }
 
 /** 插件创建的工作区显示名；仅在该 cwd 尚无工作区时生效（幂等 create 不改既有 title） */
@@ -213,6 +232,21 @@ function listCapableRegistry(ctx: Context): WorkspaceListLike | undefined {
   return typeof registry?.list === 'function' ? registry : undefined;
 }
 
+/**
+ * 取出可判定/恢复归档的 registry。
+ *
+ * 与 {@link workspaceRegistry} 分开取：归档只读 `archivedSessionIds` getter，
+ * 不依赖建工作区用的 `create`。两个能力都可能缺失（headless、宿主演进），
+ * 缺哪个就在对应方法里降级，绝不抛出。
+ */
+function archiveRegistry(ctx: Context): WorkspaceRegistryLike | undefined {
+  const registry = safeGet(ctx, 'workspaceRegistry') as WorkspaceRegistryLike | undefined;
+  if (registry === undefined) return undefined;
+  return Array.isArray(registry.archivedSessionIds) || typeof registry.unarchiveSession === 'function'
+    ? registry
+    : undefined;
+}
+
 /** 模块级函数的动态 import 结果缓存（spec 变量路径绕开本地依赖类型检查） */
 const moduleCache = new Map<string, Record<string, unknown> | undefined>();
 
@@ -245,6 +279,12 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
   capabilities.push(listCapableRegistry(ctx)
     ? 'workspaceRegistry.list(可用)'
     : 'workspaceRegistry.list(不可用，/sessions 分组列表降级)');
+  capabilities.push(archiveRegistry(ctx)?.archivedSessionIds !== undefined
+    ? 'workspaceRegistry.archivedSessionIds(可用)'
+    : 'workspaceRegistry.archivedSessionIds(不可用，无法判定会话归档)');
+  capabilities.push(typeof archiveRegistry(ctx)?.unarchiveSession === 'function'
+    ? 'workspaceRegistry.unarchiveSession(可用)'
+    : 'workspaceRegistry.unarchiveSession(不可用，归档只能提示用户手动取消)');
 
   let resolveFn: ((agent: { ctx: unknown }, name: string) => unknown | undefined) | undefined;
   const presets = safeGet(ctx, 'agentPresets') as
@@ -303,6 +343,27 @@ export function createHostAdapter(ctx: Context, logger?: AdapterLogger): HostAda
       const persistence = statCapablePersistence(ctx);
       if (!persistence) return undefined;
       return (await persistence.stat(sessionId)) !== undefined;
+    },
+
+    isSessionArchived(sessionId) {
+      const registry = archiveRegistry(ctx);
+      if (registry === undefined) return false;
+      // 每次现读：归档是宿主 UI 随时可写的状态，缓存会让判定滞后一个回合
+      const archived = registry.archivedSessionIds;
+      return Array.isArray(archived) && archived.includes(sessionId);
+    },
+
+    async unarchiveSession(sessionId) {
+      const registry = archiveRegistry(ctx);
+      if (typeof registry?.unarchiveSession !== 'function') return false;
+      try {
+        await registry.unarchiveSession(sessionId);
+        return true;
+      } catch (err) {
+        // 恢复失败只影响"自动救回"，不影响提示用户；绝不上抛
+        logger?.warn?.(`host adapter: unarchive failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
     },
 
     async attachSessionToWorkspace(sessionId, cwd) {

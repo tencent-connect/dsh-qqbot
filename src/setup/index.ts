@@ -15,7 +15,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 import { BindingService } from './binding-service.ts';
-import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
+import { createBindRpcHandler } from './bind-routes.ts';
+import { registerPluginRpc } from '../rpc-carrier.ts';
+import { BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
@@ -79,28 +81,17 @@ export async function ensureCredentials(
     service.attach(createBrowserPresenter(logger));
   }
 
-  // 端内绑定页路由：webServer 可选注入。
-  // cordis 访问守卫要求服务经 inject 声明后方可访问；deps 未就绪时
-  // 回调不运行但插件照常加载（CLI profile），服务就绪/替换时回调
-  // 重跑（自动清理旧路由、注册新路由），与 webserver 的注入生命周期对齐。
-  (ctx as unknown as {
-    inject(deps: readonly string[], callback: (scoped: Context) => void): unknown;
-  }).inject(['webServer'], (scoped) => {
-    const webServer = (scoped as unknown as { webServer?: unknown }).webServer as WebServerLike | undefined;
-    if (webServer === undefined || typeof webServer.register !== 'function') return;
-    const disposeRoutes = registerBindRoutes(webServer, service, logger, {
-      // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
-      onManualCredentials: (credentials) => {
-        service.dispose();
-        return persistCredentials(credentials, logger);
-      },
-      currentConfig: () => options.config,
-    });
-    // 回调作用域（服务卸载/替换、插件卸载）连带注销路由
-    (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
-      return disposeRoutes;
-    }, 'im-qqbot.bind-routes');
-  });
+  // 端内绑定 RPC：经宿主 Connection 共享通道注册（来源围栏与认证由宿主
+  // 施加）。connection 服务缺席时静默跳过（CLI profile 照常加载），
+  // 就绪/替换时子 fiber 生命周期自动重挂。
+  registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(service, logger, {
+    // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
+    onManualCredentials: (credentials) => {
+      service.dispose();
+      return persistCredentials(credentials, logger);
+    },
+    currentConfig: () => options.config,
+  }));
 
   return service.start();
 }
@@ -112,20 +103,11 @@ export async function ensureCredentials(
  * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
  */
 export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
-  (ctx as unknown as {
-    inject(deps: readonly string[], callback: (scoped: Context) => void): unknown;
-  }).inject(['webServer'], (scoped) => {
-    const webServer = (scoped as unknown as { webServer?: unknown }).webServer as WebServerLike | undefined;
-    if (webServer === undefined || typeof webServer.register !== 'function') return;
-    const disposeRoutes = registerBindRoutes(webServer, null, logger, {
-      boundAppId: () => appId,
-      onManualCredentials: (credentials) => persistCredentials(credentials, logger),
-      currentConfig: () => config,
-    });
-    (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
-      return disposeRoutes;
-    }, 'im-qqbot.bind-routes');
-  });
+  registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(null, logger, {
+    boundAppId: () => appId,
+    onManualCredentials: (credentials) => persistCredentials(credentials, logger),
+    currentConfig: () => config,
+  }));
 }
 
 /** 手动凭据持久化（失败时返回可展示的错误） */

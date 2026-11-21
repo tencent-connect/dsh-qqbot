@@ -32,7 +32,10 @@ export interface DshAgent {
     snapshotEvents(): readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;
+  /** 排队一个独立回合并唤醒 driver（宿主 `next-turn` 边界） */
   followup(message: unknown): void;
+  /** 向最近的下一步补充输入并唤醒 driver（宿主 `next-step` 边界，插话语义） */
+  steer(message: unknown): void;
   whenIdle(): Promise<void>;
   /** 运行一个非 turn 维护任务（compact 等需要 idle 时串行执行的操作） */
   runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;
@@ -53,10 +56,21 @@ export interface CompactionServiceLike {
   ): Promise<CompactionResultLike | null>;
 }
 
+/** 取消归档结果 */
+export type UnarchiveOutcome =
+  /** 确实从归档里恢复了 */
+  | 'ok'
+  /** 本来就没归档（无需处理） */
+  | 'not-archived'
+  /** 还没有任何会话（直接发消息即可） */
+  | 'no-session'
+  /** 宿主未提供该能力，或恢复调用失败 */
+  | 'failed';
+
 /** compact 操作结果 */
 export interface CompactOutcome {
   ok: boolean;
-  reason?: 'no-session' | 'busy' | 'unavailable' | 'failed';
+  reason?: 'no-session' | 'busy' | 'unavailable' | 'archived' | 'in-use' | 'failed';
   shadowed?: number;
   tokens?: number;
   message?: string;

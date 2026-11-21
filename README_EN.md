@@ -105,12 +105,17 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
 | `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min; `<=0` disables eviction |
-| `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current LLM call |
-| `maxQueue` | number | `20` | Max concurrent queue length |
+| `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current turn; `<=0` disables it |
+| `maxQueue` | number | `20` | Max concurrent queue length (merge-buffer cap in queue mode) |
+| `messageHandlingMode` | `queue`/`interrupt` | `queue` | How new messages are handled while a task is running |
 | `historyLimit` | number | `10` | Group history buffer size |
 | `askTimeoutMs` | number | `300000` | Question timeout (ms), default 5 min (ask_user_question) |
 | `showToolResults` | boolean | `false` | Show successful tool-call results (errors always shown) |
 | `debug` | boolean | `false` | Debug mode |
+
+### Message handling mode (messageHandlingMode)
+
+Defaults to **queue** (new messages are handled after the current task finishes); switch to **interrupt** to inject new messages into the running task immediately instead of queuing. Switching requires saving and reloading the plugin, which interrupts any running task.
 
 ### Access control (access)
 
@@ -171,6 +176,7 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 |------|------|
 | `/new` (aliases `/reset` `/clear`) | Start a new session (clear context) |
 | `/compact` | Compact session history (replace old records with a summary) |
+| `/unarchive` (alias `/restore`) | Unarchive the current session (archived sessions process no messages) |
 | `/model` | View or switch model |
 | `/preset` | View or switch agent preset (applies to new sessions) |
 | `/sessions` | Browse sessions grouped by workspace (rows show session titles); switch by index or start a new session in a workspace; sessions owned by another QQ user/group are locked |
@@ -181,52 +187,6 @@ Turns triggered by QQ inbound always reply passively; service turns (e.g. schedu
 | `/bot-status` | View current session status |
 | `/pwd` | Show the current location (workspace - session, same format as the reply header) |
 | `/bot-help` | View all commands |
-
-## Core Modules
-
-```
-src/
-├── index.ts                    # Cordis plugin entry (async apply)
-├── config.ts                   # Config schema
-├── types.ts                    # Global types
-├── setup.ts                    # Credential binding (QR)
-├── gateway/                    # Gateway assembly
-│   ├── bootstrap.ts            # Startup wiring (session/event listeners, etc.)
-│   └── middleware-setup.ts     # Middleware chain config
-├── transport/                  # Transport layer
-│   ├── inbound.ts              # QQ inbound message → agent.followup()
-│   ├── outbound.ts             # session/event → QQ sendMarkdown
-│   ├── outbound-buffer.ts      # Streaming buffer
-│   ├── streaming-writer.ts     # Streaming writer
-│   ├── reply-target.ts         # Reply target resolution
-│   ├── msgid-cache.ts          # Passive reply msgid cache
-│   ├── reply-limiter.ts        # Passive reply rate limiter
-│   ├── tool-presenter.ts       # Tool-call presentation
-│   └── chunker.ts              # Markdown chunking
-├── session/                    # Session management
-│   ├── session-manager.ts      # QQ peer → Agent mapping
-│   └── idle-evictor.ts         # Idle eviction
-├── model/                      # Model routing
-│   ├── model-resolver.ts       # Route resolution
-│   ├── prefs-store.ts          # Per-peer preference persistence
-│   └── settings-reader.ts      # settings.yaml read-only
-├── features/                   # Interaction features
-│   ├── question-channel.ts     # ask_user_question Q&A channel
-│   ├── approval-channel.ts     # approval confirmation channel
-│   └── answer-parser.ts        # Answer parsing
-├── media/                      # Media
-│   ├── vision-tool.ts          # Image vision understanding
-│   ├── send-file-tool.ts       # Send local files
-│   └── media-cleaner.ts        # Media TTL cleanup
-├── middleware/                 # Middleware
-│   ├── question-answer.ts      # Q&A answer handling
-│   └── attachment.ts           # Attachment handling
-├── shared/                     # Shared utilities
-│   ├── utils.ts                # Common helpers
-│   ├── scope.ts                # scope/peer extraction
-│   └── send-helper.ts          # Chunked send
-└── commands/                   # Slash commands
-```
 
 ## Session Routing
 

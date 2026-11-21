@@ -45,6 +45,8 @@ export interface ToolCallEvent {
 export interface ToolResultEvent {
   type: 'tool/result';
   callId: string;
+  /** 结果消息自带的失败标记（error 之外的另一条错误路径） */
+  isError: boolean;
   error?: { name: string; code: string };
   /** 原始 data 透传给 presenter 做结构化展示 */
   raw: Record<string, unknown>;
@@ -107,10 +109,19 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'tool/result': {
-      const data = raw.data as { message?: { source?: { callId?: string } }; error?: { name: string; code: string } };
+      const data = raw.data as {
+        message?: { source?: { callId?: string }; isError?: boolean };
+        error?: { name: string; code: string };
+      };
       const callId = data.message?.source?.callId;
       if (!callId) return undefined;
-      return { type: 'tool/result', callId, error: data.error, raw: raw.data };
+      return {
+        type: 'tool/result',
+        callId,
+        isError: data.message?.isError === true,
+        error: data.error,
+        raw: raw.data,
+      };
     }
 
     case 'turn/end': {
@@ -142,8 +153,15 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
  * 从 turn/end reason 提取错误信息
  *
  * 兼容三种形态：error（新格式）、failure（旧格式）、顶层 message/code（最旧格式）。
+ *
+ * `blocked` 也要提取：宿主的 archived-session-gate 在 `agent/pre-step` 拒绝时
+ * 以 `blocked` 收尾（典型是会话已归档），这一轮既没有 `user/message` 也没有
+ * `error`，不在这里认领就完全不会出声。
  */
 export function extractTurnError(reason: TurnEndReason): { code: string; message: string } | undefined {
+  if (reason.kind === 'blocked') {
+    return { code: 'TURN_BLOCKED', message: '本轮处理被阻止，未完成。' };
+  }
   if (reason.kind !== 'error') return undefined;
 
   const detail = reason.error ?? reason.failure;

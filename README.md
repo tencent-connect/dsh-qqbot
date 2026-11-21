@@ -105,12 +105,17 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
 | `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟；`<=0` 表示不回收 |
-| `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
-| `maxQueue` | number | `20` | 并发队列最大长度 |
+| `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 turn；`<=0` 表示不超时 |
+| `maxQueue` | number | `20` | 并发队列最大长度（queue 模式忙时缓冲合并上限） |
+| `messageHandlingMode` | `queue`/`interrupt` | `queue` | 消息处理方式：排队／插话 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |
+
+### 消息处理方式（messageHandlingMode）
+
+默认「排队」：当前任务结束后再处理新消息；切到「插话」后，任务进行中的新消息会立即补充到当前任务，不再排队。切换需保存并重载插件，会中断进行中的任务。
 
 ### 访问控制（access）
 
@@ -171,6 +176,7 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 |------|------|
 | `/new`（别名 `/reset` `/clear`） | 开始新会话（清空上下文） |
 | `/compact` | 压缩会话历史（摘要替换旧记录，保留上下文） |
+| `/unarchive`（别名 `/restore`） | 取消归档当前会话（归档后消息不会被处理） |
 | `/model` | 查看或切换模型 |
 | `/preset` | 查看或切换 agent preset（新会话生效） |
 | `/sessions` | 按工作区分组查看会话（显示会话标题），点击序号切换会话或在指定工作区开新会话；其他 QQ 用户/群占用的会话会锁定 |
@@ -181,61 +187,6 @@ QQ 入站触发的回合始终被动回复；定时任务等服务回合始终�
 | `/bot-status` | 查看当前会话状态 |
 | `/pwd` | 显示当前位置（工作区 - 会话名，与回复头部同格式） |
 | `/bot-help` | 查看所有指令 |
-
-## 核心模块
-
-```
-src/
-├── index.ts                    # Cordis 插件入口（async apply）
-├── config.ts                   # 配置 Schema
-├── types.ts                    # 全局类型定义
-├── setup/                      # 凭据绑定（扫码）
-│   ├── index.ts                # 绑定编排（ensureCredentials）
-│   ├── binding-service.ts      # 扫码状态机（宿主内唯一事实源）
-│   ├── bind-routes.ts          # 端内绑定页路由（/qqbot/im-qqbot/bind）
-│   ├── presenters.ts           # 呈现策略（终端/浏览器降级）
-│   ├── qr-svg.ts               # 二维码 SVG 渲染（宿主侧）
-│   └── persist.ts              # 凭据写入 cordis.patch.yml
-├── client/                     # 浏览器半边（dsh.client Web Bundle）
-│   ├── index.ts                # 侧栏 Tab 注册 + 待绑定自动引导
-│   └── bind-page.ts             # 端内绑定页（二维码 + 状态轮询）
-├── gateway/                    # 网关装配
-│   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
-│   └── middleware-setup.ts     # 中间件链配置
-├── transport/                  # 传输层
-│   ├── inbound.ts              # QQ 入站消息 → agent.followup()
-│   ├── outbound.ts             # session/event → QQ sendMarkdown
-│   ├── outbound-buffer.ts      # 流式缓冲
-│   ├── streaming-writer.ts     # 流式写入
-│   ├── reply-target.ts         # 回复目标解析
-│   ├── msgid-cache.ts          # 被动回复 msgid 缓存
-│   ├── reply-limiter.ts        # 被动回复限流
-│   ├── tool-presenter.ts       # 工具调用展示
-│   └── chunker.ts              # Markdown 文本切分
-├── session/                    # 会话管理层
-│   ├── session-manager.ts      # QQ peer → Agent 映射
-│   └── idle-evictor.ts         # 闲置回收
-├── model/                      # 模型路由层
-│   ├── model-resolver.ts       # 路由解析
-│   ├── prefs-store.ts          # per-peer 偏好持久化
-│   └── settings-reader.ts      # settings.yaml 只读
-├── features/                   # 交互特性
-│   ├── question-channel.ts     # ask_user_question 问答通道
-│   ├── approval-channel.ts     # approval 审批确认通道
-│   └── answer-parser.ts        # 答案解析
-├── media/                      # 多媒体
-│   ├── vision-tool.ts          # 图片视觉理解
-│   ├── send-file-tool.ts       # 发送本地文件
-│   └── media-cleaner.ts        # 媒体 TTL 清理
-├── middleware/                 # 中间件
-│   ├── question-answer.ts      # 问答答案处理
-│   └── attachment.ts           # 附件处理
-├── shared/                     # 共享工具
-│   ├── utils.ts                # 通用函数
-│   ├── scope.ts                # scope/peer 提取
-│   └── send-helper.ts          # 分块发送
-└── commands/                   # 斜杠命令
-```
 
 ## 会话路由
 
