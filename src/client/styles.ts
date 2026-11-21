@@ -74,6 +74,12 @@ const BIND_PANEL_CSS = `
 }
 .imqb-status-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .imqb-status-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; }
+/* 版本：卡片第一行靠右的独立元信息行（不与标题/操作区同排） */
+.imqb-version-row {
+  flex: 1 1 100%; margin: 0; padding-top: 8px; text-align: right;
+  font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
 .imqb-status-sub { margin: 0; font-size: 12px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
 .imqb-status-actions { display: flex; align-items: center; gap: 8px; padding: 4px 0 12px; }
 .imqb-account {
@@ -175,6 +181,11 @@ const CONFIG_PANEL_CSS = `
   margin: 4px 0 2px; padding: 4px 8px;
   font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-tertiary);
   background: var(--dsw-alias-bg-layer-2);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+.imqb-combo-notice {
+  padding: 6px 8px; font-size: 12px; line-height: 1.5;
+  color: var(--dsw-alias-state-error-primary);
 }
 .imqb-combo-group:first-child { margin-top: 0; }
 .imqb-combo-option--disabled { opacity: .5; cursor: not-allowed; }

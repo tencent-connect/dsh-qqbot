@@ -16,6 +16,7 @@ import type { BindStateWire } from '../shared/bind-protocol.ts';
 import { BIND_METHODS, BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { Button, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives';
 import { rpcCall } from './rpc.ts';
+import { PLUGIN_VERSION } from './plugin-version.ts';
 import { getBindSnapshot, recheckBindState, subscribeBindStore, type BindSnapshot } from './store.ts';
 import { useBindPanelStyles } from './styles.ts';
 
@@ -194,6 +195,14 @@ function BoundView({ appId, recheck }: { appId: string; recheck: () => void }): 
 
   return createElement('div', { className: 'imqb-status' },
     createElement('div', { className: 'imqb-account' },
+      // 版本独占卡片第一行、靠右（不与标题同排）
+      PLUGIN_VERSION === 'unknown'
+        ? null
+        : createElement('p', {
+          className: 'imqb-version-row',
+          title: `插件版本 ${PLUGIN_VERSION}`,
+          'aria-label': `插件版本 ${PLUGIN_VERSION}`,
+        }, `v${PLUGIN_VERSION}`),
       createElement('div', { className: 'imqb-status-row' },
         createElement(QqBotIcon, { size: 28 }),
         createElement('div', { className: 'imqb-status-meta' },
