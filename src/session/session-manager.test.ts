@@ -79,6 +79,7 @@ function fakeAgent(id: string): DshAgent {
     session: { id, snapshotEvents: () => [] },
     cancel: vi.fn(),
     followup: vi.fn(),
+    steer: vi.fn(),
     whenIdle: vi.fn(async () => {}),
     runMaintenance: vi.fn(async (task: (signal: AbortSignal) => Promise<unknown>) => task(new AbortController().signal)),
   } as unknown as DshAgent;

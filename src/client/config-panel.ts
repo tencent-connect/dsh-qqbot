@@ -15,6 +15,7 @@ import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client
 import { rpcCall, RpcError } from './rpc.ts';
 import { BIND_METHODS, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
+import type { MessageHandlingMode } from '../config.ts';
 import { SlashCommandList } from './slash-command-list.ts';
 import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
 import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
@@ -41,6 +42,12 @@ const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
   { value: 'disabled', label: '关闭' },
+];
+
+/** 会话忙时新消息的处理方式（默认由 ConfigSchema 与表单共同兜底为 queue） */
+const MESSAGE_HANDLING_OPTIONS: ReadonlyArray<{ value: MessageHandlingMode; label: string }> = [
+  { value: 'queue', label: '排队' },
+  { value: 'interrupt', label: '插话' },
 ];
 
 const DRAFT_STORAGE_KEY = 'im-qqbot/config-draft/v1';
@@ -303,6 +310,20 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
           createElement('span', { className: 'imqb-cfg-label' }, label),
           createElement(Switch, { label, checked: form[key] ?? key !== 'showToolResults',
             onChange: (value: boolean) => patch(key, value) })))),
+      createElement('div', { className: 'imqb-cfg-field' },
+        createElement('div', { className: 'imqb-cfg-head' },
+          createElement('span', { className: 'imqb-cfg-label' }, '消息处理方式'),
+          createElement(SegmentedControl<MessageHandlingMode>, {
+            id: 'imqq-message-handling',
+            value: form.messageHandlingMode ?? 'queue',
+            options: MESSAGE_HANDLING_OPTIONS,
+            onChange: (value: MessageHandlingMode) => patch('messageHandlingMode', value),
+            label: '消息处理方式',
+            disabled: busy,
+          }),
+        ),
+        createElement('p', { className: 'imqb-cfg-hint' }, '任务进行中新消息的处理方式：排队在当前任务结束后处理，插话立即补充到当前任务。切换需保存并重载插件，会中断进行中的任务。'),
+      ),
       createElement('div', { className: 'imqb-cfg-group-title' }, '模型与提示词'),
       ...([
         ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],

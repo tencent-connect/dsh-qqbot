@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### New Features
 
+- **Switchable message handling mode**: a new message handling mode dropdown in settings defaults to **queue** (new messages are handled after the current task finishes); switch to **interrupt** to have new messages injected into the running task immediately instead of queuing.
 - **One shared state across surfaces**: the settings section, main panel, and sidebar bind page share a single status poller — multiple open pages no longer issue duplicate requests, phases stay consistent across surfaces during hot-reload windows, and polling pauses while the page is hidden.
 - **Pairing codes for allowlists**: generate a 10-minute code in account settings and have users send it to the bot in the matching chat to join the DM/group/command roster; one code admits multiple people, with manual OpenID bulk-adding and copy/export as well. After an identity is removed, codes issued before the removal can no longer re-add it.
 - **Independent slash-command access**: new `access.commandMode` (open / allowlist / disabled) checks commands by sender identity, managed separately from the chat admission allowlists.

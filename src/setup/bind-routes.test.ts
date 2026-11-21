@@ -340,4 +340,12 @@ describe('bind-rpc handler', () => {
     expect(await call(BIND_METHODS.configSet, { maxQueue: 50 })).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
     expect(await call(BIND_METHODS.configSet, { requireMention: 'yes' })).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('布尔') } });
   });
+
+  it('config.set：messageHandlingMode 合法值通过，非法值拒绝', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ onUpdateConfig });
+    expect(await call(BIND_METHODS.configSet, { messageHandlingMode: 'interrupt' })).toMatchObject({ ok: true });
+    expect(onUpdateConfig).toHaveBeenCalledWith({ messageHandlingMode: 'interrupt' });
+    expect(await call(BIND_METHODS.configSet, { messageHandlingMode: 'bogus' })).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
+  });
 });

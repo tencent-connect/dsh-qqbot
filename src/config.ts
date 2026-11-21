@@ -2,6 +2,7 @@
  * dsh-im-qqbot 插件配置 Schema
  */
 import Schema from '@deepseek-ai/schemastery';
+import { MESSAGE_HANDLING_MODES, type MessageHandlingMode } from './shared/message-handling-mode.ts';
 
 export interface AccessControlConfig {
   /** C2C 访问模式 */
@@ -55,6 +56,11 @@ export interface SendFileConfig {
 }
 
 /**
+ * 会话忙时新消息的处理方式（定义与枚举单一来源见 shared/message-handling-mode.ts）。
+ */
+export type { MessageHandlingMode } from './shared/message-handling-mode.ts';
+
+/**
  * 非 QQ 读者输入（如桌面端续聊 QQ 会话）的回合是否主动推送到 QQ。
  * - off：不推送，回复只留在发起的界面；
  * - c2c：只推送私聊会话（默认，避免桌面上的私人操作出现在群里）；
@@ -91,9 +97,11 @@ export interface ImQQBotConfig {
   streaming: boolean;
   /** 每会话最大闲置时长(ms)，超时自动回收；<=0 表示不回收 */
   sessionIdleTimeout: number;
-  /** 并发队列最大长度 */
+  /** 并发队列最大长度（queue 模式：忙时缓冲合并的上限） */
   maxQueue: number;
-  /** 处理超时(ms)，超时中断当前 LLM 调用 */
+  /** 消息处理方式：排队（当前任务结束后处理新消息）／插话（补充到当前任务） */
+  messageHandlingMode: MessageHandlingMode;
+  /** 处理超时(ms)，超时中断当前 turn；<=0 表示不超时 */
   processingTimeoutMs: number;
   /** 待答问题超时(ms)，超时自动拒绝并提示（ask_user_question） */
   askTimeoutMs: number;
@@ -138,7 +146,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
   sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)，<=0 不回收'),
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
-  processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
+  messageHandlingMode: Schema.union(MESSAGE_HANDLING_MODES).default('queue')
+    .description('消息处理方式：排队=当前任务结束后处理新消息，插话=新消息补充到当前任务'),
+  processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 turn；<=0 不超时'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
   access: AccessControlSchema.default({
