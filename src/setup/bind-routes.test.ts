@@ -329,10 +329,23 @@ describe('bind-rpc handler', () => {
     expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('凭据') } });
   });
 
-  it('config.set：cwd 只读字段被拒绝', async () => {
+  it('config.set：cwd 接受绝对路径、~ 开头与空串', async () => {
+    const onUpdateConfig = vi.fn(() => true);
+    const { call } = createHarness({ onUpdateConfig });
+    for (const cwd of ['/abs/ws', '~/work', '~', '']) {
+      expect((await call(BIND_METHODS.configSet, { cwd })).ok).toBe(true);
+    }
+    expect(onUpdateConfig).toHaveBeenLastCalledWith({ cwd: '' });
+  });
+
+  it('config.set：cwd 拒绝相对路径与非字符串', async () => {
     const { call } = createHarness();
-    const result = await call(BIND_METHODS.configSet, { cwd: '/etc' });
-    expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid', message: expect.stringContaining('只读') } });
+    expect(await call(BIND_METHODS.configSet, { cwd: 'relative/ws' })).toMatchObject({
+      ok: false, error: { code: 'config/invalid', message: expect.stringContaining('cwd') },
+    });
+    expect(await call(BIND_METHODS.configSet, { cwd: 42 })).toMatchObject({
+      ok: false, error: { code: 'config/invalid', message: expect.stringContaining('cwd') },
+    });
   });
 
   it('config.set：未知/类型错误字段被 Schema 拒绝', async () => {

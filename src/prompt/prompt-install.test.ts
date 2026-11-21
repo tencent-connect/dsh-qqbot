@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
-import type { AssembleContext, PromptContext, PromptSection, SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
+import type { AssembleContext, PromptContext, PromptPresentation, PromptSection, SystemPrompt } from '@deepseek-ai/dsh-system-prompt';
 import { installQQPrompt, turnMetaText, type QQPromptEntry, type QQTurnContext } from '../prompt/index.ts';
 import { EXTRA_MAX_CHARS as QQ_EXTRA_PROMPT_MAX_CHARS } from './extra.ts';
+import { RULES_TEXT } from './rules.ts';
+
+type AssembleListener = (assembly: PromptPresentation, context: AssembleContext, next: () => Promise<PromptPresentation>) => Promise<PromptPresentation>;
 
 function fakeSystemPrompt() {
   const sections = new Map<string, PromptSection>();
@@ -11,10 +14,24 @@ function fakeSystemPrompt() {
     section(s: PromptSection) { sections.set(s.name, s); return () => sections.delete(s.name); },
     context(c: PromptContext) { contexts.set(c.name, c); return () => contexts.delete(c.name); },
   } satisfies Pick<SystemPrompt, 'section' | 'context'>;
-  const ctx = { get: (n: string) => n === 'systemPrompt' ? service : undefined } as unknown as Context;
+  // 模拟宿主 waterfall：注册的监听器先跑，next() 返回内建组装结果（inner 原样）；
+  // dispose 拆除监听器后，组装直接返回 inner。
+  let assembleListener: AssembleListener | undefined;
+  const ctx = {
+    get: (n: string) => n === 'systemPrompt' ? service : undefined,
+    on: (name: string, listener: AssembleListener) => {
+      if (name !== 'system-prompt/assemble') throw new Error(`unexpected event: ${name}`);
+      assembleListener = listener;
+      return () => { assembleListener = undefined; return true; };
+    },
+  } as unknown as Context;
   const render = (map: ReadonlyMap<string, PromptSection | PromptContext>, c: AssembleContext) => [...map.values()].sort((a, b) => a.order - b.order)
     .map((s) => typeof s.text === 'function' ? s.text(c) : s.text).filter((t) => t.length > 0).join('NL');
-  return { ctx, sections, contexts, renderSections: (c: AssembleContext = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: AssembleContext = {}) => render(contexts, c) };
+  const dispatchAssemble = (inner: PromptPresentation) =>
+    assembleListener === undefined
+      ? Promise.resolve(inner)
+      : assembleListener(inner, {}, () => Promise.resolve(inner));
+  return { ctx, sections, contexts, renderSections: (c: AssembleContext = {}) => render(sections, c).split('NL').join('NL'), renderContexts: (c: AssembleContext = {}) => render(contexts, c), dispatchAssemble };
 }
 
 const NL = String.fromCharCode(10);
@@ -89,5 +106,75 @@ describe('installQQPrompt (DSH section/context 注册)', () => {
     current = undefined;
     expect(sp.renderContexts()).toBe('');
     h.dispose();
+  });
+});
+
+describe('installQQPrompt (system-prompt/assemble 合并)', () => {
+  const hostPersona = (name: string) => ({ name, text: 'HOST_PERSONA' });
+  const qqSections = [
+    { name: 'qqbot:rules', text: RULES_TEXT },
+    { name: 'qqbot:persona', text: 'QQ_PERSONA' },
+    { name: 'qqbot:extra', text: 'QQ_EXTRA' },
+  ];
+  const mergedPersonaText = ['HOST_PERSONA', RULES_TEXT, 'QQ_PERSONA', 'QQ_EXTRA'].join('\n\n---\n\n');
+
+  it.each(['deployment:persona-prefix', 'deployment:persona', 'persona'] as const)(
+    '含宿主 persona 段（%s）且 qqbot 有文本 → 按 rules→persona→extra 追加，独立 qqbot 段消失',
+    async (hostName) => {
+      const sp = fakeSystemPrompt();
+      const h = installQQPrompt(sp.ctx, entry());
+      const inner: PromptPresentation = {
+        sections: [hostPersona(hostName), ...qqSections, { name: 'plan:policy', text: 'POLICY' }],
+        contexts: [],
+        variables: {},
+      };
+      const out = await sp.dispatchAssemble(inner);
+      expect(out.sections.map((s) => s.name)).toEqual([hostName, 'plan:policy']);
+      expect(out.sections[0].text).toBe(mergedPersonaText);
+      // 幂等：只改当次副本，入参不受影响
+      expect(inner.sections).toHaveLength(5);
+      expect(inner.sections[0].text).toBe('HOST_PERSONA');
+      h.dispose();
+    },
+  );
+
+  it('无宿主 persona 段 → sections 原样保留 qqbot 独立段', async () => {
+    const sp = fakeSystemPrompt();
+    const h = installQQPrompt(sp.ctx, entry());
+    const inner: PromptPresentation = { sections: [...qqSections, { name: 'plan:policy', text: 'POLICY' }], contexts: [], variables: {} };
+    const out = await sp.dispatchAssemble(inner);
+    expect(out).toBe(inner);
+    h.dispose();
+  });
+
+  it('全部 qqbot 段为空文本 → 不追加、不改数组', async () => {
+    const sp = fakeSystemPrompt();
+    const h = installQQPrompt(sp.ctx, entry());
+    const inner: PromptPresentation = {
+      sections: [
+        hostPersona('deployment:persona'),
+        { name: 'qqbot:rules', text: '' },
+        { name: 'qqbot:persona', text: '   ' },
+        { name: 'qqbot:extra', text: '' },
+      ],
+      contexts: [],
+      variables: {},
+    };
+    const out = await sp.dispatchAssemble(inner);
+    expect(out).toBe(inner);
+    h.dispose();
+  });
+
+  it('handle.dispose() 后监听器不再生效（再触发 assemble 无合并）', async () => {
+    const sp = fakeSystemPrompt();
+    const h = installQQPrompt(sp.ctx, entry());
+    const inner: PromptPresentation = { sections: [hostPersona('deployment:persona'), ...qqSections], contexts: [], variables: {} };
+    const before = await sp.dispatchAssemble(inner);
+    expect(before.sections[0].text).toBe(mergedPersonaText);
+    h.dispose();
+    const after = await sp.dispatchAssemble(inner);
+    expect(after).toBe(inner);
+    expect(after.sections.map((s) => s.name)).toContain('qqbot:rules');
+    expect(after.sections[0].text).toBe('HOST_PERSONA');
   });
 });

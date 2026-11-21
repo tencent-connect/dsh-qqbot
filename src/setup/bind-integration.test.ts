@@ -142,6 +142,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
       model: 'deepseek-chat',
       groupPrompt: '群聊提示词',
       directPrompt: '私聊提示词',
+      cwd: '/tmp/im-qqbot-cfg-ws',
       accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: ['u1'], groupMode: 'open', groupAllow: [] },
     });
@@ -150,7 +151,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     const after = readFileSync(patchPath, 'utf8');
     for (const expected of [
       'requireMention: false', 'streaming: false', 'showToolResults: true', 'debug: true',
-      'provider: pi-ai', 'groupPrompt: 群聊提示词', 'directPrompt: 私聊提示词',
+      'provider: pi-ai', 'groupPrompt: 群聊提示词', 'directPrompt: 私聊提示词', 'cwd: /tmp/im-qqbot-cfg-ws',
       'c2cMode: allowlist', 'c2cAllow:', '- u1',
     ]) {
       expect(after).toContain(expected);
@@ -160,7 +161,6 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
 
   it.each([
     ['凭据字段', { appId: 'hack', requireMention: false }],
-    ['只读 cwd 字段', { cwd: '/tmp' }],
     ['未知字段', { timeoutMs: 100 }],
     ['类型错误（requireMention 传字符串）', { requireMention: 'yes' }],
   ])('配置保存拒绝：%s → 错误结果且文件不变', async (_name, payload) => {

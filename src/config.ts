@@ -84,7 +84,7 @@ export interface ImQQBotConfig {
   model?: string;
   /** Agent preset id */
   preset?: string;
-  /** Agent 工作目录（缺省 ~/.dsh-qqbot/workspace，不随宿主进程 cwd） */
+  /** Agent 工作目录（~ 或绝对路径；留空用默认 ~/.dsh-qqbot/workspace，不随宿主进程 cwd） */
   cwd?: string;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
@@ -138,7 +138,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
-  cwd: Schema.string().description('Agent working directory (default ~/.dsh-qqbot/workspace)'),
+  cwd: Schema.string().description('Agent 工作目录（~ 或绝对路径；留空用默认 ~/.dsh-qqbot/workspace）'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
