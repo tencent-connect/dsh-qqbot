@@ -31,7 +31,10 @@ export interface DshAgent {
     snapshotEvents(): readonly SessionEventLike[];
   };
   cancel(cause: { kind: string }): void;
+  /** 排队一个独立回合并唤醒 driver（宿主 `next-turn` 边界） */
   followup(message: unknown): void;
+  /** 向最近的下一步补充输入并唤醒 driver（宿主 `next-step` 边界，插话语义） */
+  steer(message: unknown): void;
   whenIdle(): Promise<void>;
   /** 运行一个非 turn 维护任务（compact 等需要 idle 时串行执行的操作） */
   runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;

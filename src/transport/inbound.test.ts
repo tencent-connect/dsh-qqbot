@@ -1,6 +1,12 @@
-import { describe, it, expect } from 'vitest';
-import { sessionFailureReply } from './inbound.ts';
+import { describe, it, expect, vi } from 'vitest';
+import { handleInbound, sessionFailureReply } from './inbound.ts';
 import { SessionArchivedError, SessionBusyError } from '../session/errors.ts';
+import type { ImQQBotConfig } from '../config.ts';
+import type { QqInputRegistry } from './qq-input-origin.ts';
+import type { SessionManager } from '../session/index.ts';
+import type { Logger } from '../types.ts';
+import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { DshAgent, SessionRecord } from '../session/types.ts';
 
 describe('sessionFailureReply', () => {
   it('归档：说清消息没处理，并给出两条下一步', () => {
@@ -48,5 +54,68 @@ describe('sessionFailureReply', () => {
         expect(text).not.toContain(jargon);
       }
     }
+  });
+});
+
+// ── handleInbound 消息处理方式分派 ──
+
+function makeAgent(status: 'idle' | 'running'): DshAgent {
+  return {
+    id: 's1',
+    ctx: {},
+    status,
+    session: { id: 's1', snapshotEvents: () => [] },
+    cancel: vi.fn(),
+    followup: vi.fn(),
+    steer: vi.fn(),
+    whenIdle: vi.fn(async () => {}),
+    runMaintenance: vi.fn(async () => undefined),
+  } as unknown as DshAgent;
+}
+
+function makeCtx(content: string): MiddlewareContext {
+  return {
+    message: { kind: 'c2c', senderId: 'U1', content, messageId: 'm1' },
+    state: {},
+    bot: { sendMarkdown: vi.fn(async () => {}) },
+  } as unknown as MiddlewareContext;
+}
+
+function makeManager(agent: DshAgent): SessionManager {
+  return {
+    getOrCreate: vi.fn(async () => ({ agent }) as SessionRecord),
+  } as unknown as SessionManager;
+}
+
+function makeConfig(mode: 'queue' | 'interrupt'): ImQQBotConfig {
+  return { messageHandlingMode: mode, appId: 'app1' } as ImQQBotConfig;
+}
+
+const logger: Logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as unknown as Logger;
+const inputs = { register: vi.fn() } as unknown as QqInputRegistry;
+
+describe('handleInbound 消息处理方式分派', () => {
+  it('queue 模式：followup 开启任务，不 steer，等待收敛', async () => {
+    const agent = makeAgent('idle');
+    await handleInbound(makeCtx('hello'), makeManager(agent), makeConfig('queue'), logger, inputs);
+    expect(agent.followup).toHaveBeenCalledTimes(1);
+    expect(agent.steer).not.toHaveBeenCalled();
+    expect(agent.whenIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('interrupt 模式 + idle：followup 开启新任务，不 steer', async () => {
+    const agent = makeAgent('idle');
+    await handleInbound(makeCtx('hello'), makeManager(agent), makeConfig('interrupt'), logger, inputs);
+    expect(agent.followup).toHaveBeenCalledTimes(1);
+    expect(agent.steer).not.toHaveBeenCalled();
+    expect(agent.whenIdle).toHaveBeenCalledTimes(1);
+  });
+
+  it('interrupt 模式 + running：steer 补充当前任务，不 followup、不阻塞', async () => {
+    const agent = makeAgent('running');
+    await handleInbound(makeCtx('补充'), makeManager(agent), makeConfig('interrupt'), logger, inputs);
+    expect(agent.steer).toHaveBeenCalledTimes(1);
+    expect(agent.followup).not.toHaveBeenCalled();
+    expect(agent.whenIdle).not.toHaveBeenCalled();
   });
 });

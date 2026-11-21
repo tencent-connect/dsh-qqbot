@@ -105,12 +105,17 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
 | `streaming` | boolean | `true` | 是否启用流式输出（群聊始终不启用） |
 | `sessionIdleTimeout` | number | `1800000` | 会话闲置超时(ms)，默认 30 分钟；`<=0` 表示不回收 |
-| `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 LLM 调用 |
-| `maxQueue` | number | `20` | 并发队列最大长度 |
+| `processingTimeoutMs` | number | `1800000` | 处理超时(ms)，超时中断当前 turn；`<=0` 表示不超时 |
+| `maxQueue` | number | `20` | 并发队列最大长度（queue 模式忙时缓冲合并上限） |
+| `messageHandlingMode` | `queue`/`interrupt` | `queue` | 消息处理方式：排队／插话 |
 | `historyLimit` | number | `10` | 群历史缓冲条数 |
 | `askTimeoutMs` | number | `300000` | 待答问题超时(ms)，默认 5 分钟（ask_user_question） |
 | `showToolResults` | boolean | `false` | 是否展示工具调用成功结果（错误始终展示） |
 | `debug` | boolean | `false` | 调试模式 |
+
+### 消息处理方式（messageHandlingMode）
+
+默认「排队」：当前任务结束后再处理新消息；切到「插话」后，任务进行中的新消息会立即补充到当前任务，不再排队。切换需保存并重载插件，会中断进行中的任务。
 
 ### 访问控制（access）
 

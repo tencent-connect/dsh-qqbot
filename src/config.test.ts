@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ConfigSchema } from './config.ts';
+import { MESSAGE_HANDLING_MODES } from './shared/message-handling-mode.ts';
 
 describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变量）', () => {
   it('完全省略 access → c2cMode open（子 schema 默认生效）', () => {
@@ -44,5 +45,16 @@ describe('ConfigSchema 默认值（内层外层默认必须对齐：#94-1 不变
     [{ proactiveDelivery: { externalTurns: 'all' } }, 'all'],
   ])('proactiveDelivery.externalTurns：%j → %s', (input, expected) => {
     expect(ConfigSchema(input).proactiveDelivery.externalTurns).toBe(expected);
+  });
+
+  it('messageHandlingMode 默认 queue，可显式切到 interrupt', () => {
+    expect(ConfigSchema({}).messageHandlingMode).toBe('queue');
+    expect(ConfigSchema({ messageHandlingMode: 'interrupt' }).messageHandlingMode).toBe('interrupt');
+  });
+
+  it('messageHandlingMode 枚举与共享常量一致（schema/服务端/客户端三处共用一份）', () => {
+    for (const mode of MESSAGE_HANDLING_MODES) {
+      expect(ConfigSchema({ messageHandlingMode: mode }).messageHandlingMode).toBe(mode);
+    }
   });
 });

@@ -22,6 +22,7 @@ import {
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
 import { AccessControlSchema } from '../config.ts';
+import { MESSAGE_HANDLING_MODES, type MessageHandlingMode } from '../shared/message-handling-mode.ts';
 import { BIND_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import type { BindStateWire } from '../shared/bind-protocol.ts';
 
@@ -72,6 +73,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
+  'messageHandlingMode',
   'access',
 ]);
 
@@ -86,8 +88,16 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   preset: stringSchema('preset'),
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
+  messageHandlingMode: messageHandlingModeSchema,
   access: (v) => AccessControlSchema(v as never),
 };
+
+function messageHandlingModeSchema(value: unknown): MessageHandlingMode {
+  if (typeof value !== 'string' || !MESSAGE_HANDLING_MODES.includes(value as MessageHandlingMode)) {
+    throw new TypeError(`messageHandlingMode 必须是 ${MESSAGE_HANDLING_MODES.join(' 或 ')}`);
+  }
+  return value as MessageHandlingMode;
+}
 
 function booleanSchema(value: unknown, name: string): boolean {
   if (typeof value !== 'boolean') throw new TypeError(`${name} 必须是布尔值`);
