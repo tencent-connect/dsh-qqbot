@@ -16,8 +16,10 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 import { BindingService } from './binding-service.ts';
 import { createBindRpcHandler } from './bind-routes.ts';
+import { createConfigRpcHandler } from '../runtime/config-routes.ts';
+import { createModelOptionsProvider } from '../runtime/model-options.ts';
 import { registerPluginRpc } from '../rpc-carrier.ts';
-import { BIND_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
+import { BIND_RPC_ENDPOINT, CONFIG_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
@@ -90,7 +92,15 @@ export async function ensureCredentials(
       service.dispose();
       return persistCredentials(credentials, logger);
     },
+  }));
+
+  // 未绑定态也提供配置回显（绑定完成前设置页可能预读）；命令清单与
+  // 模型候选由已绑定 fiber 的 CONFIG 端点提供
+  registerPluginRpc(ctx, CONFIG_RPC_ENDPOINT, createConfigRpcHandler(logger, {
     currentConfig: () => options.config,
+    boundAppId: () => null,
+    commands: () => [],
+    modelOptions: createModelOptionsProvider(ctx, logger),
   }));
 
   return service.start();
@@ -100,13 +110,13 @@ export async function ensureCredentials(
  * 凭据已配置的 fiber 注册常驻路由（状态回显 + 手动编辑/更换）。
  *
  * 在 apply 的 bootstrapGateway 之前调用；写入经同一 persist 路径，
- * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
+ * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。配置端点
+ * （config.get/set + 候选数据）由 bootstrapGateway 注册（需要 manager）。
  */
-export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
+export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string): void {
   registerPluginRpc(ctx, BIND_RPC_ENDPOINT, createBindRpcHandler(null, logger, {
     boundAppId: () => appId,
     onManualCredentials: (credentials) => persistCredentials(credentials, logger),
-    currentConfig: () => config,
   }));
 }
 

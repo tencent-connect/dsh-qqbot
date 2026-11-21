@@ -13,25 +13,46 @@
 /** 共享 Fetch 通道（宿主 connection 固定值） */
 export const RPC_CHANNEL = '/api';
 
-/** 绑定/配置端点（fetch 路由 path = `/api/dsh-qqbot/bind`） */
+/** 凭证生命周期端点（fetch 路由 path = `/api/dsh-qqbot/bind`） */
 export const BIND_RPC_ENDPOINT = 'dsh-qqbot/bind';
 
-/** 命令清单与配对端点（fetch 路由 path = `/api/dsh-qqbot/account`） */
+/** 配置页数据端点（fetch 路由 path = `/api/dsh-qqbot/config`） */
+export const CONFIG_RPC_ENDPOINT = 'dsh-qqbot/config';
+
+/** 访问控制端点（fetch 路由 path = `/api/dsh-qqbot/account`） */
 export const ACCOUNT_RPC_ENDPOINT = 'dsh-qqbot/account';
 
-/** 绑定端点的方法名 */
+/** 绑定端点的方法名（仅凭证生命周期） */
 export const BIND_METHODS = {
   state: 'bind.state',
   refresh: 'bind.refresh',
   manual: 'bind.manual',
   unbind: 'bind.unbind',
-  configGet: 'config.get',
-  configSet: 'config.set',
 } as const;
 
-/** 账号端点的方法名 */
-export const ACCOUNT_METHODS = {
+/** 配置端点的方法名（配置读写 + 配置页候选数据） */
+export const CONFIG_METHODS = {
+  configGet: 'config.get',
+  configSet: 'config.set',
   commands: 'commands.list',
+  modelOptions: 'model.options',
+  modelCatalog: 'model.catalog',
+} as const;
+
+/** model.catalog 的单个提供方条目 */
+export interface ModelCatalogProvider {
+  id: string;
+  name: string;
+  models: Array<{ id: string; name: string }>;
+}
+
+/** model.catalog 的返回载荷：一次聚合全部提供方及其公开模型 */
+export interface ModelCatalogResult {
+  providers: ModelCatalogProvider[];
+}
+
+/** 账号端点的方法名（仅访问控制：配对码与名单） */
+export const ACCOUNT_METHODS = {
   pairStatus: 'pair.status',
   pairIssue: 'pair.issue',
   pairEnd: 'pair.end',

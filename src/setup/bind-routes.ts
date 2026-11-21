@@ -1,12 +1,11 @@
 /**
- * 端内绑定 RPC 处理器 — /api/dsh-qqbot/bind
+ * 绑定端点 RPC 处理器 — /api/dsh-qqbot/bind
+ *
+ * 只负责凭据生命周期：扫码状态机、手动提交、解绑。配置读写与配置页候选
+ * 数据在 `/api/dsh-qqbot/config`（runtime/config-routes.ts）。
  *
  * 经宿主 Connection 共享通道调用（rpc-carrier.ts 注册）：来源围栏与浏览器
  * 认证由宿主在 handler 之前施加；本模块只做授权后的业务校验。
- *
- * - bind.state / bind.refresh：扫码状态机相位
- * - bind.manual / bind.unbind：凭据提交与移除（persist → HMR 重载生效）
- * - config.get / config.set：配置回显（appSecret 剔除）与白名单写入
  */
 import type { Logger } from '../types.ts';
 import type { BindingService } from './binding-service.ts';
@@ -15,14 +14,9 @@ import { rpcFailure, rpcOk } from '../rpc-carrier.ts';
 import {
   persistCredentialsToProfile,
   removeCredentialsFromProfile,
-  updateProfileConfig,
-  readProfileAccessSnapshot,
-  AccessConfigConflict,
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema } from '../config.ts';
-import { MESSAGE_HANDLING_MODES, type MessageHandlingMode } from '../shared/message-handling-mode.ts';
 import { BIND_METHODS, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import type { BindStateWire } from '../shared/bind-protocol.ts';
 
@@ -57,59 +51,6 @@ export interface BindRpcOptions {
    * 未绑定态调用返回 not-bound 错误，不触达本回调。
    */
   onUnbind?: () => UnbindResult;
-  /**
-   * 当前生效配置（apply 时 loader 合并后的值，含默认值填充），
-   * 用于 config.get 回显（appSecret 剔除后返回）。
-   */
-  currentConfig?: () => Record<string, unknown>;
-  /**
-   * 配置写入处理（默认：最小合并写入 profile patch）。
-   */
-  onUpdateConfig?: (config: Record<string, unknown>) => boolean;
-}
-
-/** 可经 UI 编辑的配置键（白名单：只收用户必要的字段，其余走 patch/env） */
-const EDITABLE_CONFIG_KEYS = new Set([
-  'requireMention', 'streaming', 'showToolResults', 'debug',
-  'provider', 'model', 'preset',
-  'groupPrompt', 'directPrompt',
-  'messageHandlingMode',
-  'access',
-]);
-
-/** 白名单键的子 Schema（服务端校验：客户端校验仅为体验） */
-const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
-  requireMention: (v) => booleanSchema(v, 'requireMention'),
-  streaming: (v) => booleanSchema(v, 'streaming'),
-  showToolResults: (v) => booleanSchema(v, 'showToolResults'),
-  debug: (v) => booleanSchema(v, 'debug'),
-  provider: stringSchema('provider'),
-  model: stringSchema('model'),
-  preset: stringSchema('preset'),
-  groupPrompt: stringSchema('groupPrompt'),
-  directPrompt: stringSchema('directPrompt'),
-  messageHandlingMode: messageHandlingModeSchema,
-  access: (v) => AccessControlSchema(v as never),
-};
-
-function messageHandlingModeSchema(value: unknown): MessageHandlingMode {
-  if (typeof value !== 'string' || !MESSAGE_HANDLING_MODES.includes(value as MessageHandlingMode)) {
-    throw new TypeError(`messageHandlingMode 必须是 ${MESSAGE_HANDLING_MODES.join(' 或 ')}`);
-  }
-  return value as MessageHandlingMode;
-}
-
-function booleanSchema(value: unknown, name: string): boolean {
-  if (typeof value !== 'boolean') throw new TypeError(`${name} 必须是布尔值`);
-  return value;
-}
-
-function stringSchema(name: string): (value: unknown) => unknown {
-  return (value) => {
-    if (typeof value !== 'string') throw new TypeError(`${name} 必须是字符串`);
-    if (value.length > 20000) throw new TypeError(`${name} 过长`);
-    return value;
-  };
 }
 
 /**
@@ -117,7 +58,7 @@ function stringSchema(name: string): (value: unknown) => unknown {
  *
  * @param service - 绑定状态机；已绑定 fiber 传 null（无扫码流程）
  * @param logger - 日志
- * @param options - 行为注入（bound 态回显、manual 处理）
+ * @param options - 行为注入（bound 态回显、manual/unbind 处理）
  */
 export function createBindRpcHandler(
   service: BindingService | null,
@@ -141,10 +82,6 @@ export function createBindRpcHandler(
         return handleManual(payload, handleManualSubmit);
       case BIND_METHODS.unbind:
         return handleUnbind(options);
-      case BIND_METHODS.configGet:
-        return handleConfigGet(options);
-      case BIND_METHODS.configSet:
-        return handleConfigSet(payload, options);
       default:
         return rpcFailure(RPC_ERROR_CODES.unknownMethod, `未知方法: ${method}`);
     }
@@ -208,83 +145,4 @@ function handleUnbind(options: BindRpcOptions): RpcResult {
   }
   // 移除后写入触发 HMR 重载，插件回到未绑定态（绑定流程重新可用）
   return rpcOk({ ok: true, message: '已解绑，插件将重载并重新进入绑定流程' });
-}
-
-/**
- * 配置回显：当前生效配置（appSecret 剔除，cwd 等只读字段正常返回）。
- */
-function handleConfigGet(options: BindRpcOptions): RpcResult {
-  const current = options.currentConfig?.() ?? {};
-  // Never return secrets or configuration belonging to the retired memory backend.
-  const { appSecret: _s, memory: _retired, ...safe } = current;
-  try {
-    const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { access, appId, revision } = readProfileAccessSnapshot(current.access, getProfileDir() ?? undefined, expectedAppId);
-    return rpcOk({ config: { ...safe, ...(appId ? { appId } : {}), access, accessRevision: revision } });
-  } catch (error) {
-    return rpcFailure('config/unreadable', error instanceof AccessConfigConflict ? error.message : '无法读取访问设置，请检查 profile 配置文件。');
-  }
-}
-
-/**
- * 配置写入：白名单 + 子 Schema 校验 → 最小写入 profile patch → HMR 重载。
- */
-function handleConfigSet(payload: Record<string, unknown>, options: BindRpcOptions): RpcResult {
-  if (payload.expectedAppId !== null && (
-    typeof payload.expectedAppId !== 'string'
-    || payload.expectedAppId.length === 0
-    || payload.expectedAppId.length > 128
-  )) {
-    return rpcFailure('config/invalid', '配置保存必须携带预期账号，请刷新配置后重试。');
-  }
-  // 白名单与凭据/只读字段拦截
-  for (const key of Object.keys(payload)) {
-    if (key !== 'accessRevision' && key !== 'expectedAppId' && !EDITABLE_CONFIG_KEYS.has(key)) {
-      const reason = key === 'appId' || key === 'appSecret'
-        ? '凭据请使用绑定/更换/解绑功能'
-        : key === 'cwd'
-          ? 'cwd 为只读字段'
-          : '不支持的字段';
-      return rpcFailure('config/invalid', `${reason}: ${key}`);
-    }
-  }
-
-  // 逐键 Schema 校验（非法值拒绝，返回首个错误）
-  let validated: Record<string, unknown>;
-  try {
-    validated = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'accessRevision' && key !== 'expectedAppId').map(([key, value]) => {
-      const check = EDITABLE_CONFIG_SCHEMAS[key];
-      if (check === undefined) throw new TypeError(`不支持的字段: ${key}`);
-      return [key, check(value)];
-    }));
-  } catch (err) {
-    return rpcFailure('config/invalid', err instanceof TypeError ? err.message : String(err));
-  }
-
-  let persisted: boolean;
-  try {
-    const profileDir = getProfileDir() ?? undefined;
-    const current = options.currentConfig?.() ?? {};
-    const expectedAppId = options.boundAppId?.() ?? (typeof current.appId === 'string' ? current.appId : undefined);
-    const { revision, appId } = readProfileAccessSnapshot(current.access, profileDir, expectedAppId);
-    if (payload.expectedAppId !== (appId.length === 0 ? null : appId)) {
-      return rpcFailure(RPC_ERROR_CODES.accountChanged, 'QQ 账号已变化，请刷新配置后重试。');
-    }
-    if (validated.access !== undefined && payload.accessRevision !== revision) {
-      return rpcFailure(RPC_ERROR_CODES.configConflict, new AccessConfigConflict().message);
-    }
-    persisted = options.onUpdateConfig === undefined
-      ? updateProfileConfig(validated, profileDir, undefined,
-        validated.access === undefined ? undefined : { revision, fallback: current.access, appId: expectedAppId })
-      : options.onUpdateConfig(validated);
-  } catch (error) {
-    if (error instanceof AccessConfigConflict) {
-      return rpcFailure(RPC_ERROR_CODES.configConflict, error.message);
-    }
-    return rpcFailure('config/persist-failed', '无法读取或保存配置，请检查 profile 配置文件。');
-  }
-  if (!persisted) {
-    return rpcFailure('config/persist-failed', '无法定位 profile 目录或写入失败');
-  }
-  return rpcOk({ ok: true, message: '配置已保存，插件将自动重载（进行中的机器人会话将重置）' });
 }

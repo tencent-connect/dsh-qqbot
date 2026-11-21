@@ -29,7 +29,7 @@ describe('account rpc handler', () => {
   it('applies manual member additions and renames through the account methods', async () => {
     const store = service();
     store.addManualMember('owner', 'alice:Alice');
-    const handler = createAccountRpcHandler(store, () => []);
+    const handler = createAccountRpcHandler(store);
 
     const manual = await handler(ACCOUNT_METHODS.pairManual, { purpose: 'owner', openid: 'bob:Bob' }, new AbortController().signal);
     expect(manual).toMatchObject({ ok: true });
@@ -43,7 +43,7 @@ describe('account rpc handler', () => {
 
   it('rejects invalid pairing payloads without touching the store', async () => {
     const store = service();
-    const handler = createAccountRpcHandler(store, () => []);
+    const handler = createAccountRpcHandler(store);
     const result = await handler(ACCOUNT_METHODS.pairManual, { purpose: 'owner' }, new AbortController().signal);
     expect(result).toMatchObject({ ok: false, error: { code: 'pair/invalid' } });
     expect(store.isOwner('alice')).toBe(false);
@@ -72,7 +72,7 @@ describe('account rpc handler', () => {
       return originalEffect(() => { void cleanup; }, label);
     }) as typeof ctx.effect);
 
-    registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(old, () => []));
+    registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(old));
     await new Promise(resolve => { setTimeout(resolve, 20); });
     const route = routes.get(`/api/${ACCOUNT_RPC_ENDPOINT}`);
     expect(route).toBeDefined();

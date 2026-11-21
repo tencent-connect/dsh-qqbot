@@ -24,8 +24,10 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { AccountAccessService } from '../runtime/account-service.ts';
 import { createAccountRpcHandler } from '../runtime/account-routes.ts';
+import { createConfigRpcHandler } from '../runtime/config-routes.ts';
+import { createModelOptionsProvider } from '../runtime/model-options.ts';
 import { registerPluginRpc } from '../rpc-carrier.ts';
-import { ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
+import { ACCOUNT_RPC_ENDPOINT, CONFIG_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { describeCommands } from '../commands/index.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { startMediaCleanup } from '../media/media-cleaner.ts';
@@ -57,7 +59,15 @@ export async function bootstrapGateway(
   const manager = new SessionManager(ctx, agents, config, logger);
 
   manager.accountAccess = new AccountAccessService(config, logger);
-  registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(manager.accountAccess, () => describeCommands({manager, config, logger})));
+  // 配置端点：配置读写 + 配置页候选数据（命令清单、模型/预设）
+  registerPluginRpc(ctx, CONFIG_RPC_ENDPOINT, createConfigRpcHandler(logger, {
+    currentConfig: () => config as unknown as Record<string, unknown>,
+    boundAppId: () => config.appId || null,
+    commands: () => describeCommands({ manager, config, logger }),
+    modelOptions: createModelOptionsProvider(ctx, logger),
+  }));
+  // 访问控制端点：配对码与名单
+  registerPluginRpc(ctx, ACCOUNT_RPC_ENDPOINT, createAccountRpcHandler(manager.accountAccess));
   // ── 回合归属：入站登记 + 回合跟踪，出站/提问/审批/发文件共享同一投递目标解析 ──
   const qqInputs = new QqInputRegistry({ ttlMs: inputOriginTtlMs(config.processingTimeoutMs) });
   const turnTracker = createTurnTracker(manager, config, logger, qqInputs);

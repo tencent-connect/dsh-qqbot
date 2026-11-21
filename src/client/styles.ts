@@ -154,6 +154,40 @@ const CONFIG_PANEL_CSS = `
 .imqb-cfg-note--ok { color: var(--dsw-alias-label-secondary); }
 /* cwd 只读行 */
 .imqb-cfg-readonly { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--dsw-alias-label-secondary); word-break: break-all; margin: 0; }
+/* 组合框：输入框 + 候选面板（模型 / 预设） */
+.imqb-combo { position: relative; }
+.imqb-combo-input { width: 100%; }
+.imqb-combo-panel {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20;
+  box-sizing: border-box; max-height: 320px; overflow-y: auto; padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+}
+.imqb-combo-option {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: var(--dsw-radius-sm); cursor: pointer; font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+.imqb-combo-option--active { background: var(--dsw-alias-bg-layer-3); }
+.imqb-combo-group {
+  position: sticky; top: -4px; z-index: 1;
+  margin: 4px 0 2px; padding: 4px 8px;
+  font-size: 12px; line-height: 1.4; color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+.imqb-combo-group:first-child { margin-top: 0; }
+.imqb-combo-option--disabled { opacity: .5; cursor: not-allowed; }
+.imqb-combo-option-main { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.imqb-combo-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.imqb-combo-option-hint {
+  flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.imqb-combo-option-check { flex: none; color: var(--dsw-alias-label-secondary); }
+.imqb-combo-option-badge { flex: none; font-size: 11px; color: var(--dsw-alias-state-error-primary); }
+.imqb-combo-empty { padding: 8px; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 `;
 
 const PAIRING_CSS = `

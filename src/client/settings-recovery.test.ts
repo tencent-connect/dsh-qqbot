@@ -1,6 +1,6 @@
 import { isValidElement, type ReactElement, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ACCOUNT_METHODS, BIND_METHODS, ACCOUNT_RPC_ENDPOINT, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
+import { ACCOUNT_METHODS, CONFIG_METHODS, ACCOUNT_RPC_ENDPOINT, CONFIG_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
 import type { PairChallenge } from '../shared/pairing-protocol.ts';
 import type { ConfigWire } from './config-form-state.ts';
 import { ConfigPanel } from './config-panel.ts';
@@ -111,6 +111,7 @@ function mount(component: () => ReactNode) {
 interface TestProps {
   children?: ReactNode;
   footer?: ReactNode;
+  id?: string;
   disabled?: boolean;
   label?: string;
   value?: string;
@@ -157,7 +158,7 @@ describe('QQ settings recovery', () => {
   it.each(['starting', 'waiting', 'saving'])('waits silently when config binds before the %s snapshot converges', async bindPhase => {
     vi.useFakeTimers();
     let account: string | null = null;
-    rpcBus.dispatch = async (_endpoint, method) => method === ACCOUNT_METHODS.commands
+    rpcBus.dispatch = async (_endpoint, method) => method === CONFIG_METHODS.commands
       ? { commands: [] }
       : { config: { appId: 'account-a', model: 'model-a' } };
     const render = mount(() => ConfigPanel({ bindPhase: account === null ? bindPhase : 'bound', appId: account }));
@@ -175,7 +176,7 @@ describe('QQ settings recovery', () => {
 
   it('refuses to display configuration read from a different bound account', async () => {
     vi.useFakeTimers();
-    rpcBus.dispatch = async (_endpoint, method) => method === ACCOUNT_METHODS.commands
+    rpcBus.dispatch = async (_endpoint, method) => method === CONFIG_METHODS.commands
       ? { commands: [] }
       : { config: { appId: 'account-b', model: 'private-model-b' } };
     const render = mount(() => ConfigPanel({ bindPhase: 'bound', appId: 'account-a' }));
@@ -193,9 +194,9 @@ describe('QQ settings recovery', () => {
       access: { c2cMode: 'allowlist', c2cAllow: ['kept', 'revoked'], groupMode: 'open', groupAllow: [], commandMode: 'open' },
     };
     rpcBus.dispatch = async (endpoint, method, payload) => {
-      expect(endpoint).toBe(BIND_RPC_ENDPOINT);
-      if (method === BIND_METHODS.configGet) return { config };
-      expect(method).toBe(BIND_METHODS.configSet);
+      expect(endpoint).toBe(CONFIG_RPC_ENDPOINT);
+      if (method === CONFIG_METHODS.configGet) return { config };
+      expect(method).toBe(CONFIG_METHODS.configSet);
       const patch = payload as unknown as ConfigWire;
       writes.push(patch);
       if (patch.accessRevision !== config.accessRevision) {
@@ -232,6 +233,46 @@ describe('QQ settings recovery', () => {
       accessRevision: 'after-revoke',
       access: { c2cAllow: ['kept'], groupMode: 'disabled', commandMode: 'disabled' },
     });
+  });
+
+  it('renders one merged model field and writes provider/model back as two keys', async () => {
+    vi.useFakeTimers();
+    const writes: ConfigWire[] = [];
+    let config: ConfigWire = { appId: 'bot', provider: 'deepseek', model: 'deepseek-chat' };
+    rpcBus.dispatch = async (_endpoint, method, payload) => {
+      switch (method) {
+        case CONFIG_METHODS.configGet:
+          return { config };
+        case CONFIG_METHODS.modelOptions:
+          return { providers: [], presets: [] };
+        case CONFIG_METHODS.modelCatalog:
+          return { providers: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }] }] };
+        case CONFIG_METHODS.commands:
+          return { commands: [] };
+        case CONFIG_METHODS.configSet: {
+          const patch = payload as unknown as ConfigWire;
+          writes.push(patch);
+          config = { ...config, ...patch };
+          return { ok: true };
+        }
+        default:
+          return {};
+      }
+    };
+
+    const render = mount(() => ConfigPanel({ bindPhase: 'bound', appId: 'bot' }));
+    const modelField = () => find(render(), props => props.id === 'imqq-model')!.props;
+    render();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(modelField().value).toBe('deepseek/deepseek-chat');
+    expect(find(render(), props => props.label === '模型提供方')).toBeUndefined();
+
+    modelField().onChange!('openai/gpt-4o');
+    find(render(), props => !!props.onSubmit)!.props.onSubmit!({ preventDefault() {} });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(writes[0]).toMatchObject({ expectedAppId: 'bot', provider: 'openai', model: 'gpt-4o' });
   });
 
   it('keeps a valid code usable through a missing endpoint and stops on a confirmed end', async () => {

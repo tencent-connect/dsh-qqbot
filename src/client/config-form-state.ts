@@ -62,6 +62,27 @@ export function isConfigDirty(baseline: ConfigWire, form: ConfigWire): boolean {
   return Object.keys(configPatch(baseline, form)).length > 0;
 }
 
+/**
+ * 设置页把「提供方」「模型」合并成一个输入项，值为 `provider/model`。
+ * 只有提供方时保留尾部斜杠（`provider/`），便于继续输入模型名。
+ */
+export function modelRefOf(form: ConfigWire): string {
+  const provider = form.provider ?? '';
+  return provider === '' ? form.model ?? '' : `${provider}/${form.model ?? ''}`;
+}
+
+/**
+ * 拆回宿主配置的两个键。不含斜杠时视为模型 id（提供方继承 DSH 默认），
+ * 空值则两者都继承；模型 id 自身可含斜杠（如 openrouter 的 `deepseek/deepseek-chat`）。
+ */
+export function parseModelRef(ref: string): { provider: string; model: string } {
+  const trimmed = ref.trim();
+  const slash = trimmed.indexOf('/');
+  return slash > 0
+    ? { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1) }
+    : { provider: '', model: trimmed };
+}
+
 /** Refresh untouched fields while preserving local edits, including individual access fields. */
 export function rebaseConfig(baseline: ConfigWire, form: ConfigWire, incoming: ConfigWire): ConfigWire {
   const rebased = { ...incoming };
