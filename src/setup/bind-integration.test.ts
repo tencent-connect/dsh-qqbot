@@ -11,9 +11,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { QrConnectCallbacks, QrConnectOptions } from '@tencent-connect/qqbot-connector';
 import { createBindRpcHandler } from './bind-routes.ts';
+import { createConfigRpcHandler } from '../runtime/config-routes.ts';
 import { BindingService } from './binding-service.ts';
 import { persistCredentialsToProfile, accessRevision, readProfileAccess } from './persist.ts';
-import { BIND_METHODS } from '../shared/rpc-protocol.ts';
+import { BIND_METHODS, CONFIG_METHODS } from '../shared/rpc-protocol.ts';
 import type { RpcResult } from '../rpc-carrier.ts';
 
 /** 默认 persist 依赖 getProfileDir：用可控 mock 替换（其余导出保留） */
@@ -40,17 +41,17 @@ const SHARED_PATCH = [
   '    baseURL: https://example.com/v1',
 ].join('\n');
 
-/** 直接构造处理器（默认 persist 处理器生效，真实落盘） */
+/** 直接构造处理器（默认 persist 处理器生效，真实落盘）：bind 管凭证，config 管配置 */
 function createRealHandler(boundAppId: () => string | null): (method: string, payload: Record<string, unknown>) => Promise<RpcResult> {
+  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const service = { wireState: () => ({ phase: 'starting' }), refresh: vi.fn() };
-  const handler = createBindRpcHandler(
-    service as never,
-    { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    { boundAppId },
-  );
-  return (method, payload = {}) => Promise.resolve(handler(method, method === BIND_METHODS.configSet
-    ? { expectedAppId: boundAppId(), ...payload }
-    : payload, new AbortController().signal));
+  const bind = createBindRpcHandler(service as never, logger, { boundAppId });
+  const config = createConfigRpcHandler(logger, { boundAppId, currentConfig: () => ({ appId: boundAppId() ?? undefined }) });
+  const configMethods = new Set<string>(Object.values(CONFIG_METHODS));
+  return (method, payload = {}) => {
+    const body = method === CONFIG_METHODS.configSet ? { expectedAppId: boundAppId(), ...payload } : payload;
+    return Promise.resolve((configMethods.has(method) ? config : bind)(method, body, new AbortController().signal));
+  };
 }
 
 /** 共享断言：其他插件的内容完整保留（im-qqbot 自身字段会被各链路合法修改，不在此断言） */
@@ -91,7 +92,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
       expectSharedPreserved(patchPath);
 
       // 2. 配置保存（默认处理器 → updateProfileConfig 真写盘）
-      const config = await call(BIND_METHODS.configSet, { requireMention: false });
+      const config = await call(CONFIG_METHODS.configSet, { requireMention: false });
       expect(config.ok).toBe(true);
       expect(readFileSync(patchPath, 'utf8')).toContain('requireMention: false');
       expect(readFileSync(patchPath, 'utf8')).toContain('appId: test-app');
@@ -133,7 +134,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     profileDirState.dir = dir;
 
     const call = createRealHandler(() => null);
-    const result = await call(BIND_METHODS.configSet, {
+    const result = await call(CONFIG_METHODS.configSet, {
       requireMention: false,
       streaming: false,
       showToolResults: true,
@@ -171,7 +172,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     const before = readFileSync(patchPath, 'utf8');
 
     const call = createRealHandler(() => null);
-    const result = await call(BIND_METHODS.configSet, payload as Record<string, unknown>);
+    const result = await call(CONFIG_METHODS.configSet, payload as Record<string, unknown>);
 
     expect(result).toMatchObject({ ok: false, error: { code: 'config/invalid' } });
     expect(readFileSync(patchPath, 'utf8')).toBe(before);
@@ -180,7 +181,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
   it('配置保存：无 profile 目录 → persist-failed', async () => {
     profileDirState.dir = undefined;
     const call = createRealHandler(() => null);
-    const result = await call(BIND_METHODS.configSet, { requireMention: false });
+    const result = await call(CONFIG_METHODS.configSet, { requireMention: false });
     expect(result).toMatchObject({ ok: false, error: { code: 'config/persist-failed' } });
     dir = mkdtempSync(join(tmpdir(), 'im-qqbot-bind-nodir-')); // 供 afterEach 清理
   });
@@ -192,14 +193,14 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     profileDirState.dir = dir;
 
     const call = createRealHandler(() => null);
-    expect((await call(BIND_METHODS.configSet, { requireMention: false })).ok).toBe(true);
+    expect((await call(CONFIG_METHODS.configSet, { requireMention: false })).ok).toBe(true);
 
     // 拉开 mtime 后重放同值提交
     const { statSync, utimesSync } = await import('node:fs');
     const past = new Date(Date.now() - 1000);
     utimesSync(patchPath, past, past);
 
-    expect((await call(BIND_METHODS.configSet, { requireMention: false })).ok).toBe(true);
+    expect((await call(CONFIG_METHODS.configSet, { requireMention: false })).ok).toBe(true);
     expect(statSync(patchPath).mtimeMs).toBe(past.getTime()); // 无变化 → 无写 → mtime 不动
   });
 
@@ -211,7 +212,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
 
     const call = createRealHandler(() => null);
     const longPrompt = '你是一个专业的 QQ 群助手。'.repeat(400); // ~8KB UTF-8
-    const result = await call(BIND_METHODS.configSet, { groupPrompt: longPrompt });
+    const result = await call(CONFIG_METHODS.configSet, { groupPrompt: longPrompt });
 
     expect(result.ok).toBe(true);
     expect(readFileSync(patchPath, 'utf8')).toContain('你是一个专业的 QQ 群助手。');
@@ -239,7 +240,7 @@ describe('绑定链路 × 真实 persist 落盘（#53 回归）', () => {
     profileDirState.dir = dir;
 
     const call = createRealHandler(() => null);
-    const result = await call(BIND_METHODS.configSet, {
+    const result = await call(CONFIG_METHODS.configSet, {
       accessRevision: accessRevision(readProfileAccess(undefined, dir)),
       access: { c2cMode: 'allowlist', c2cAllow: Array.from({ length: 5000 }, (_v, i) => `openid-${i}`), groupMode: 'open', groupAllow: [] },
     });

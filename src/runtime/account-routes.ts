@@ -1,8 +1,10 @@
 /**
  * 账号端点 RPC 处理器 — /api/dsh-qqbot/account
  *
- * 经宿主 Connection 共享通道调用（rpc-carrier.ts 注册）：命令清单与
- * 配对码管理（生成/关闭/手动添加/改名/撤销/状态查询）。来源围栏与
+ * 只负责访问控制：配对码管理（生成/关闭/手动添加/改名/撤销/状态查询）。
+ * 配置读写与配置页候选数据在 `/api/dsh-qqbot/config`（config-routes.ts）。
+ *
+ * 经宿主 Connection 共享通道调用（rpc-carrier.ts 注册）：来源围栏与
  * 浏览器认证由宿主施加；本模块只做业务校验。
  */
 import type { PairPurpose } from '../shared/pairing-protocol.ts';
@@ -24,17 +26,14 @@ function pairPurpose(payload: Record<string, unknown>): PairPurpose {
 }
 
 /**
- * 创建账号端点的方法处理器（src/index.ts 经 registerPluginRpc 注册）。
+ * 创建账号端点的方法处理器（bootstrap 经 registerPluginRpc 注册）。
  *
  * @param service - 账号访问服务（配对码与名单）
- * @param commands - 斜杠命令清单
  */
-export function createAccountRpcHandler(service: AccountAccessService, commands: () => unknown): RpcMethodHandler {
+export function createAccountRpcHandler(service: AccountAccessService): RpcMethodHandler {
   return async (method, payload): Promise<RpcResult> => {
     try {
       switch (method) {
-        case ACCOUNT_METHODS.commands:
-          return rpcOk({ commands: commands() });
         case ACCOUNT_METHODS.pairStatus:
           return rpcOk(service.pairStatus());
         case ACCOUNT_METHODS.pairIssue: {

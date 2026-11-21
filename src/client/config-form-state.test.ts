@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { configDraft, configPatch, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type ConfigWire } from './config-form-state.ts';
+import { configDraft, configPatch, isConfigDirty, modelRefOf, normalizeConfig, parseConfigDraft, parseModelRef, rebaseConfig, type ConfigWire } from './config-form-state.ts';
 
 function baseline(): ConfigWire {
   return {
@@ -91,6 +91,36 @@ describe('command-mode drafts', () => {
     expect(updated.access?.groupAllow).toEqual(['new-group']);
     expect(parseConfigDraft({ baseline: base, form: updated })).toBeDefined();
     expect(parseConfigDraft({ baseline: base, form: { ...updated, access: { ...updated.access, commandMode: 'unexpected' } } })).toBeUndefined();
+  });
+});
+
+describe('merged provider/model reference', () => {
+  it('renders provider and model as one reference', () => {
+    expect(modelRefOf({})).toBe('');
+    expect(modelRefOf({ model: 'm1' })).toBe('m1');
+    expect(modelRefOf({ provider: 'deepseek' })).toBe('deepseek/');
+    expect(modelRefOf({ provider: 'deepseek', model: 'deepseek-chat' })).toBe('deepseek/deepseek-chat');
+  });
+
+  it('splits on the first slash so model ids may contain slashes', () => {
+    expect(parseModelRef('deepseek/deepseek-chat')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    expect(parseModelRef('openrouter/deepseek/deepseek-chat')).toEqual({ provider: 'openrouter', model: 'deepseek/deepseek-chat' });
+    expect(parseModelRef('  deepseek/deepseek-chat  ')).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+  });
+
+  it('treats a bare value as a model id and empty as full inheritance', () => {
+    expect(parseModelRef('deepseek-chat')).toEqual({ provider: '', model: 'deepseek-chat' });
+    expect(parseModelRef('')).toEqual({ provider: '', model: '' });
+    expect(parseModelRef('   ')).toEqual({ provider: '', model: '' });
+    // 仅提供方（尾部斜杠）解析为继承该提供方的默认模型
+    expect(parseModelRef('deepseek/')).toEqual({ provider: 'deepseek', model: '' });
+  });
+
+  it('round-trips the displayed reference back into config keys', () => {
+    const form: ConfigWire = { provider: 'deepseek', model: 'deepseek-chat' };
+    expect(parseModelRef(modelRefOf(form))).toEqual({ provider: 'deepseek', model: 'deepseek-chat' });
+    const providerOnly: ConfigWire = { provider: 'deepseek', model: '' };
+    expect(parseModelRef(modelRefOf(providerOnly))).toEqual({ provider: 'deepseek', model: '' });
   });
 });
 

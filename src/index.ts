@@ -74,7 +74,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   // 已绑定：注册常驻路由（状态回显 + 手动编辑/更换凭据 + 配置编辑）
-  registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
+  registerBoundCredentialRoutes(ctx, logger, appId);
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 

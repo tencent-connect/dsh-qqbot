@@ -10,15 +10,15 @@
  * 保留上游的回复、模型与提示词设置，并管理账号访问范围。
  */
 import { createElement, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Button, Input, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
+import { Button, Switch, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 
 import { rpcCall, RpcError } from './rpc.ts';
-import { BIND_METHODS, BIND_RPC_ENDPOINT, RPC_ERROR_CODES } from '../shared/rpc-protocol.ts';
-import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, normalizeConfig, parseConfigDraft, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
+import { CONFIG_METHODS, CONFIG_RPC_ENDPOINT, RPC_ERROR_CODES, type ModelCatalogResult } from '../shared/rpc-protocol.ts';
+import { configDraft, configPatch, DEFAULT_ACCESS, isConfigDirty, modelRefOf, normalizeConfig, parseConfigDraft, parseModelRef, rebaseConfig, type AccessControlWire, type ConfigDraft, type ConfigWire } from './config-form-state.ts';
 import type { MessageHandlingMode } from '../config.ts';
 import { SlashCommandList } from './slash-command-list.ts';
+import { ComboboxField, type ComboboxOption } from './combobox-field.ts';
 import type { SlashCommandDescriptor } from '../shared/command-protocol.ts';
-import { ACCOUNT_METHODS, ACCOUNT_RPC_ENDPOINT } from '../shared/rpc-protocol.ts';
 import { PairClaimPanel } from './qq-pairing.ts';
 import { useConfigPanelStyles } from './styles.ts';
 
@@ -106,7 +106,7 @@ async function confirmSavedConfig(expected: PendingConfirmation, signal: AbortSi
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     try {
-      const { config } = await rpcCall<{ config: ConfigWire }>(BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, Math.min(1000, remaining), signal);
+      const { config } = await rpcCall<{ config: ConfigWire }>(CONFIG_RPC_ENDPOINT, CONFIG_METHODS.configGet, {}, Math.min(1000, remaining), signal);
       if (matchesSavedConfig(config, expected)) return config;
     } catch (_error) {
       // The route may disappear while the saved plugin is reloading.
@@ -129,7 +129,7 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
   useEffect(() => {
     const controller = new AbortController();
     if (bindPhase !== 'bound') return;
-    void rpcCall<{ commands: SlashCommandDescriptor[] }>(ACCOUNT_RPC_ENDPOINT, ACCOUNT_METHODS.commands, {}, 10_000, controller.signal)
+    void rpcCall<{ commands: SlashCommandDescriptor[] }>(CONFIG_RPC_ENDPOINT, CONFIG_METHODS.commands, {}, 10_000, controller.signal)
       .then(result => {
         if (controller.signal.aborted) return;
         setCommands(result.commands);
@@ -143,6 +143,60 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
   const mounted = useRef(true);
   const saveController = useRef<AbortController | null>(null);
   const pendingConfirmation = useRef<PendingConfirmation | null>(null);
+  const [presets, setPresets] = useState<ComboboxOption[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(false);
+  const [presetsError, setPresetsError] = useState(false);
+  const [modelChoices, setModelChoices] = useState<ComboboxOption[]>([]);
+  const [modelChoicesLoading, setModelChoicesLoading] = useState(false);
+  const [modelChoicesError, setModelChoicesError] = useState(false);
+
+  // 预设候选来自宿主 agentPresets 服务；不可用时降级为手输
+  useEffect(() => {
+    if (bindPhase !== 'bound') return;
+    const controller = new AbortController();
+    setPresetsLoading(true);
+    setPresetsError(false);
+    void rpcCall<{ presets: Array<{ id: string; name: string; description?: string; broken?: string }> }>(
+      CONFIG_RPC_ENDPOINT, CONFIG_METHODS.modelOptions, {}, 10_000, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setPresets(result.presets.map(preset => ({
+          value: preset.id,
+          label: preset.name,
+          ...(preset.description === undefined ? {} : { hint: preset.description }),
+          ...(preset.broken === undefined ? {} : { disabled: true, disabledReason: '不可用' }),
+        })));
+      })
+      .catch(() => { if (!controller.signal.aborted) setPresetsError(true); })
+      .finally(() => { if (!controller.signal.aborted) setPresetsLoading(false); });
+    return () => controller.abort();
+  }, [bindPhase, appId]);
+
+  // 模型候选：一次 RPC 取回全部提供方的公开模型（服务端聚合，避免 N 次往返），
+  // 合并成「提供方/模型」一项并按提供方分组；单个提供方失败只缺该组。
+  useEffect(() => {
+    if (bindPhase !== 'bound') {
+      setModelChoices([]);
+      setModelChoicesLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setModelChoicesLoading(true);
+    setModelChoicesError(false);
+    void rpcCall<ModelCatalogResult>(CONFIG_RPC_ENDPOINT, CONFIG_METHODS.modelCatalog, {}, 20_000, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setModelChoices(result.providers.flatMap(provider => provider.models.map(model => ({
+          value: `${provider.id}/${model.id}`,
+          label: model.name,
+          hint: `${provider.id}/${model.id}`,
+          group: provider.name,
+        }))));
+      })
+      .catch(() => { if (!controller.signal.aborted) setModelChoicesError(true); })
+      .finally(() => { if (!controller.signal.aborted) setModelChoicesLoading(false); });
+    return () => controller.abort();
+  }, [bindPhase, appId]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [reload, setReload] = useState(0);
@@ -167,7 +221,7 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
     let waitingForBinding = false;
     setLoading(true);
     setLoadError(null);
-    void rpcCall<{ config: ConfigWire }>(BIND_RPC_ENDPOINT, BIND_METHODS.configGet, {}, 10_000, controller.signal)
+    void rpcCall<{ config: ConfigWire }>(CONFIG_RPC_ENDPOINT, CONFIG_METHODS.configGet, {}, 10_000, controller.signal)
       .then(({ config }) => {
         if (stopped || saveController.current !== null) return;
         if (appId !== undefined && appId !== (config.appId || null)) {
@@ -209,6 +263,14 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
     setResult(null);
   }, [replaceDraft]);
 
+  // 合并字段：把「提供方/模型」拆回宿主配置的两个键
+  const applyModelRef = useCallback((value: string): void => {
+    const current = draftRef.current;
+    if (current === null) return;
+    replaceDraft({ ...current, form: { ...current.form, ...parseModelRef(value) } });
+    setResult(null);
+  }, [replaceDraft]);
+
   const submit = useCallback((event: FormEvent): void => {
     event.preventDefault();
     const current = draftRef.current;
@@ -224,7 +286,7 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
     saveController.current = controller;
     setBusy(true);
     setResult(null);
-    void rpcCall<{ ok: boolean; message?: string; error?: string }>(BIND_RPC_ENDPOINT, BIND_METHODS.configSet,
+    void rpcCall<{ ok: boolean; message?: string; error?: string }>(CONFIG_RPC_ENDPOINT, CONFIG_METHODS.configSet,
       { ...changed, expectedAppId: current.baseline.appId ?? null, ...(changed.access === undefined ? {} : { accessRevision: current.baseline.accessRevision }) }, 10_000, controller.signal)
       .then(async (body) => {
         if (!body.ok) throw new Error(body.error ?? '保存失败，请重试。');
@@ -270,6 +332,25 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
 
   const { baseline, form } = draft;
   const dirty = isConfigDirty(baseline, form);
+  // 合并后的显示值：提供方/模型；仅提供方时保留尾部斜杠，便于继续输入模型名
+  const modelRef = modelRefOf(form);
+  // 仅填了模型（提供方继承默认）且模型 id 自带斜杠：无法与「提供方/模型」区分
+  const bareModelWithSlash = (form.provider ?? '') === '' && (form.model ?? '').includes('/');
+  // 候选未就绪时不做目录外判断，避免加载期间误报
+  const modelRefKnown = modelRef === ''
+    || (form.model ?? '') === ''
+    || modelChoicesLoading
+    || modelChoices.length === 0
+    || modelChoices.some(option => option.value === modelRef);
+  const modelHelp = modelChoicesError
+    ? '候选加载失败，可直接输入「提供方/模型」，如 deepseek/deepseek-chat'
+    : modelRef === ''
+      ? '留空继承 DSH 默认模型；也可输入「提供方/模型」，如 deepseek/deepseek-chat'
+      : bareModelWithSlash
+        ? '当前值按模型 id 处理（提供方继承 DSH 默认）；如需指定提供方，请输入「提供方/模型」'
+        : modelRefKnown
+          ? '从候选选择，或直接输入「提供方/模型」；目录外的组合也可保存'
+          : `当前值「${modelRef}」不在宿主公开目录中；目录仅供参考，仍可保存`;
   const access = form.access ?? DEFAULT_ACCESS;
   const message = busy ? '正在保存配置…' : result?.message ?? (dirty
     ? draftNotice ?? '有未保存修改。保存会重载插件，并中断正在运行的 QQ 任务。'
@@ -325,12 +406,20 @@ export function ConfigPanel({ bindPhase, appId }: ConfigPanelProps = {}): ReactN
         createElement('p', { className: 'imqb-cfg-hint' }, '任务进行中新消息的处理方式：排队在当前任务结束后处理，插话立即补充到当前任务。切换需保存并重载插件，会中断进行中的任务。'),
       ),
       createElement('div', { className: 'imqb-cfg-group-title' }, '模型与提示词'),
-      ...([
-        ['provider', '模型提供方'], ['model', '模型'], ['preset', 'Agent 预设'],
-      ] as const).map(([key, label]) => createElement('div', { className: 'imqb-cfg-field', key },
-        createElement('label', { className: 'imqb-cfg-label', htmlFor: `imqq-${key}` }, label),
-        createElement(Input, { id: `imqq-${key}`, value: form[key] ?? '', placeholder: '留空继承 DSH 默认',
-          onChange: (event: React.ChangeEvent<HTMLInputElement>) => patch(key, event.target.value) }))),
+      createElement(ComboboxField, {
+        key: 'model', id: 'imqq-model', label: '模型', value: modelRef,
+        placeholder: '留空继承 DSH 默认', options: modelChoices, inheritLabel: '继承 DSH 默认',
+        loading: modelChoicesLoading, disabled: busy,
+        help: modelHelp,
+        onChange: applyModelRef,
+      }),
+      createElement(ComboboxField, {
+        key: 'preset', id: 'imqq-preset', label: 'Agent 预设', value: form.preset ?? '',
+        placeholder: '留空继承 DSH 默认', options: presets, inheritLabel: '继承 DSH 默认',
+        loading: presetsLoading, disabled: busy,
+        help: presetsError ? '候选加载失败，可直接手动输入' : '新会话使用的 Agent 预设；不可用项无法选择',
+        onChange: (value: string) => patch('preset', value),
+      }),
       ...([
         ['groupPrompt', '群聊补充提示词'], ['directPrompt', '私聊补充提示词'],
       ] as const).map(([key, label]) => createElement('div', { className: 'imqb-cfg-field', key },
