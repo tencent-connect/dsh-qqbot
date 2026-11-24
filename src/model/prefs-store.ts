@@ -1,5 +1,5 @@
 /**
- * PrefsStore — per-peer 会话偏好持久化（模型 + preset）
+ * PrefsStore — per-peer 会话偏好持久化（模型 + preset + 工作区 + 权限）
  *
  * 隔离文件 I/O 操作，便于单元测试时 mock。
  * 存储路径：~/.dsh-qqbot/model-prefs.json（全局共享，多实例/多进程共存）。
@@ -13,7 +13,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirS
 import { randomBytes } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { PLUGIN_HOME } from '../shared/dirs.ts';
-import type { ModelRoute } from './types.ts';
+import type { ModelRoute, PermissionPrefs } from './types.ts';
 
 /** 日志回调（可选） */
 type DebugFn = (msg: string) => void;
@@ -27,6 +27,10 @@ interface PrefsFile {
   sessionIds: Record<string, string>;
   /** sessionKey → preset id（per-peer preset 覆盖） */
   presets: Record<string, string>;
+  /** sessionKey → 工作区绝对路径（per-peer 下次 create 的工作区） */
+  workspaces: Record<string, string>;
+  /** sessionKey → 权限偏好（per-peer 新会话的 sandbox + approval 默认） */
+  permissions: Record<string, PermissionPrefs>;
 }
 
 /** 各段的删除墓碑（key 集合），合并时用于压住磁盘上的旧值 */
@@ -34,6 +38,8 @@ interface Tombstones {
   overrides: Set<string>;
   sessionIds: Set<string>;
   presets: Set<string>;
+  workspaces: Set<string>;
+  permissions: Set<string>;
 }
 
 export class PrefsStore {
@@ -45,8 +51,18 @@ export class PrefsStore {
   private sessionKeys = new Map<string, string>();
   /** per-peer preset 偏好（内存态） */
   private presets = new Map<string, string>();
+  /** per-peer 工作区偏好（内存态；下次 create 的 cwd） */
+  private workspaces = new Map<string, string>();
+  /** per-peer 权限偏好（内存态；新会话的 sandbox + approval 默认） */
+  private permissions = new Map<string, PermissionPrefs>();
   /** 本进程显式删除的 key（防止并发合并把删除复活） */
-  private deleted: Tombstones = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
+  private deleted: Tombstones = {
+    overrides: new Set(),
+    sessionIds: new Set(),
+    presets: new Set(),
+    workspaces: new Set(),
+    permissions: new Set(),
+  };
   /** 隔离偏好文件路径 */
   private readonly prefsPath: string;
   private readonly debugLog?: DebugFn;
@@ -98,6 +114,15 @@ export class PrefsStore {
     return this.sessionKeys.get(sessionId);
   }
 
+  /** 返回映射到同一会话的全部 sessionKey（跨 peer 占用保护需要识别多重绑定） */
+  findSessionKeys(sessionId: string): string[] {
+    const keys: string[] = [];
+    for (const [key, mappedId] of this.sessionIds.entries()) {
+      if (mappedId === sessionId) keys.push(key);
+    }
+    return keys;
+  }
+
   setSessionId(sessionKey: string, sessionId: string): void {
     this.unindexSessionId(sessionKey);
     this.sessionIds.set(sessionKey, sessionId);
@@ -137,6 +162,48 @@ export class PrefsStore {
     return deleted;
   }
 
+  // ── Workspace 操作 ──
+
+  getWorkspace(sessionKey: string): string | undefined {
+    return this.workspaces.get(sessionKey);
+  }
+
+  setWorkspace(sessionKey: string, path: string): void {
+    this.workspaces.set(sessionKey, path);
+    this.deleted.workspaces.delete(sessionKey);
+    this.write();
+  }
+
+  clearWorkspace(sessionKey: string): boolean {
+    const deleted = this.workspaces.delete(sessionKey);
+    if (deleted) {
+      this.deleted.workspaces.add(sessionKey);
+      this.write();
+    }
+    return deleted;
+  }
+
+  // ── Permission 操作 ──
+
+  getPermission(sessionKey: string): PermissionPrefs | undefined {
+    return this.permissions.get(sessionKey);
+  }
+
+  setPermission(sessionKey: string, prefs: PermissionPrefs): void {
+    this.permissions.set(sessionKey, { sandbox: prefs.sandbox, approval: prefs.approval });
+    this.deleted.permissions.delete(sessionKey);
+    this.write();
+  }
+
+  clearPermission(sessionKey: string): boolean {
+    const deleted = this.permissions.delete(sessionKey);
+    if (deleted) {
+      this.deleted.permissions.add(sessionKey);
+      this.write();
+    }
+    return deleted;
+  }
+
   // ── 私有方法 ──
 
   /** 移除 sessionKey 当前指向的反向索引（仅当索引仍归属该 key） */
@@ -171,6 +238,22 @@ export class PrefsStore {
         for (const [key, presetId] of Object.entries(data.presets)) {
           if (typeof presetId === 'string' && presetId) {
             this.presets.set(key, presetId);
+          }
+        }
+      }
+      if (data.workspaces && typeof data.workspaces === 'object') {
+        for (const [key, dir] of Object.entries(data.workspaces)) {
+          if (typeof dir === 'string' && dir) {
+            this.workspaces.set(key, dir);
+          }
+        }
+      }
+      if (data.permissions && typeof data.permissions === 'object') {
+        for (const [key, prefs] of Object.entries(data.permissions)) {
+          if (prefs && typeof prefs === 'object'
+            && typeof prefs.sandbox === 'string' && prefs.sandbox
+            && typeof prefs.approval === 'string' && prefs.approval) {
+            this.permissions.set(key, { sandbox: prefs.sandbox, approval: prefs.approval });
           }
         }
       }
@@ -238,6 +321,8 @@ export class PrefsStore {
       overrides: pick(this.overrides, disk?.overrides, this.deleted.overrides),
       sessionIds: pick(this.sessionIds, disk?.sessionIds, this.deleted.sessionIds),
       presets: pick(this.presets, disk?.presets, this.deleted.presets),
+      workspaces: pick(this.workspaces, disk?.workspaces, this.deleted.workspaces),
+      permissions: pick(this.permissions, disk?.permissions, this.deleted.permissions),
     };
   }
 

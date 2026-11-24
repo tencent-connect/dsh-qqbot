@@ -80,8 +80,6 @@ export function registerSendFileTool(
     return;
   }
 
-  const cwd = resolveAgentCwd(config.cwd);
-
   const definition = {
     name: SEND_FILE_TOOL_NAME,
     description: DESCRIPTION,
@@ -138,8 +136,18 @@ export function registerSendFileTool(
         throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
       }
 
-      // 2. 校验文件 + 路径白名单
-      const absPath = resolve(file_path);
+      // 2. 白名单跟随「文件所属 agent」的工作区；显式 target 只决定投递地址，
+      // 不能把发起方文件按接收方 cwd 解析。无 agent 上下文时回退到目标 peer。
+      const agentId = (exec.agent as { id?: unknown } | undefined)?.id;
+      const sourceRecord = exec.agent !== undefined
+        ? manager.findByAgent(exec.agent as DshAgent)
+          ?? (typeof agentId === 'string' ? manager.findBySessionId(agentId) : undefined)
+        : undefined;
+      const cwd = resolveAgentCwd(manager.workspacePathForPeer(
+        sourceRecord?.scope ?? replyTarget.scope,
+        sourceRecord?.peerId ?? replyTarget.targetId,
+      ));
+      const absPath = resolve(cwd, file_path);
       if (!isPathAllowed(absPath, config.sendFile, cwd)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);
       }

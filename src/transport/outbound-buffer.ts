@@ -26,6 +26,8 @@ export interface QQBotSender {
 
 export class OutboundBuffer {
   private buffer = '';
+  /** 回复标题头：置于全部文本之前；reset 不清除（LLM 重试重写仍保留定位） */
+  private prefix = '';
   private flushing = false;
   private readonly writer: StreamingWriter | null;
   private readonly bot: QQBotSender;
@@ -56,6 +58,12 @@ export class OutboundBuffer {
     this.writer?.append(text);
   }
 
+  /** 设置标题头（须在首个增量 append 前调用；text 取值不含 prefix，空判语义不变） */
+  public setPrefix(prefix: string): void {
+    this.prefix = prefix;
+    this.writer?.setPrefix(prefix);
+  }
+
   /** 获取当前累积文本 */
   public get text(): string {
     return this.buffer;
@@ -79,8 +87,9 @@ export class OutboundBuffer {
         if (!this.writer.shouldFallback) return;
       }
 
-      // 降级：静态发送（writer 不存在 or 流式失败）
-      const chunks = chunkMarkdownText(this.buffer, this.limit);
+      // 降级：静态发送（writer 不存在 or 流式失败；标题头随首块带出）
+      const text = this.prefix !== '' ? this.prefix + '\n\n' + this.buffer : this.buffer;
+      const chunks = chunkMarkdownText(text, this.limit);
       for (const chunk of chunks) {
         await this.bot.sendMarkdown(this.target, chunk);
       }

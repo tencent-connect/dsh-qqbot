@@ -18,5 +18,9 @@ export type {
   PresetSwitchOutcome,
   SessionRecord,
   SessionStatus,
+  SessionGroup,
+  SessionGroupEntry,
+  SwitchSessionOutcome,
+  StartNewOutcome,
   TokenUsageStats,
 } from './types.ts';

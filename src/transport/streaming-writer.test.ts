@@ -201,3 +201,39 @@ describe('StreamingWriter', () => {
     expect(writer.text).toBe('hello'); // 终态后 reset 无效
   });
 });
+
+describe('StreamingWriter 标题头前缀', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('setPrefix 后 update 携带前缀；reset（LLM 重试）不清除前缀', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
+
+    writer.setPrefix('**A 项目 - 登录页优化**');
+    writer.append('第一次回答');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenNthCalledWith(1, '**A 项目 - 登录页优化**\n\n第一次回答');
+
+    writer.reset(); // attempt 重试：前缀保留，正文全量重写
+    writer.append('重试后的回答');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenNthCalledWith(2, '**A 项目 - 登录页优化**\n\n重试后的回答');
+  });
+
+  it('未设置前缀时 update 语义不变', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const writer = new StreamingWriter({ bot, target, logger: createLogger(), throttleMs: 200 });
+
+    writer.append('plain');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenCalledWith('plain');
+  });
+});

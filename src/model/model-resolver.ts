@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
-import type { ModelRoute, ModelEntry } from './types.ts';
+import type { ModelRoute, ModelEntry, PermissionPrefs } from './types.ts';
 import { PrefsStore } from './prefs-store.ts';
 import { SettingsReader } from './settings-reader.ts';
 
@@ -110,6 +110,11 @@ export class ModelResolver {
     return this.prefs.findSessionKey(sessionId);
   }
 
+  /** sessionId → 全部绑定它的 sessionKey（用于拒绝跨 QQ peer 共用会话） */
+  findSessionKeys(sessionId: string): string[] {
+    return this.prefs.findSessionKeys(sessionId);
+  }
+
   /**
    * 记录指定 sessionKey 的最新 sessionId（fork 后调用）并持久化
    */
@@ -143,6 +148,48 @@ export class ModelResolver {
    */
   clearPreset(sessionKey: string): boolean {
     return this.prefs.clearPreset(sessionKey);
+  }
+
+  /**
+   * 获取指定 sessionKey 的 per-peer 工作区偏好（下次 create 的 cwd）
+   */
+  getWorkspace(sessionKey: string): string | undefined {
+    return this.prefs.getWorkspace(sessionKey);
+  }
+
+  /**
+   * 设置 per-peer 工作区偏好并持久化
+   */
+  setWorkspace(sessionKey: string, path: string): void {
+    this.prefs.setWorkspace(sessionKey, path);
+  }
+
+  /**
+   * 清除 per-peer 工作区偏好（回退 config.cwd / 默认目录）
+   */
+  clearWorkspace(sessionKey: string): boolean {
+    return this.prefs.clearWorkspace(sessionKey);
+  }
+
+  /**
+   * 获取指定 sessionKey 的 per-peer 权限偏好（新会话的 sandbox + approval 默认）
+   */
+  getPermission(sessionKey: string): PermissionPrefs | undefined {
+    return this.prefs.getPermission(sessionKey);
+  }
+
+  /**
+   * 设置 per-peer 权限偏好并持久化
+   */
+  setPermission(sessionKey: string, prefs: PermissionPrefs): void {
+    this.prefs.setPermission(sessionKey, prefs);
+  }
+
+  /**
+   * 清除 per-peer 权限偏好
+   */
+  clearPermission(sessionKey: string): boolean {
+    return this.prefs.clearPermission(sessionKey);
   }
 
   /**
