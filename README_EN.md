@@ -7,6 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/@tencent-connect/dsh-qqbot)](https://www.npmjs.com/package/@tencent-connect/dsh-qqbot)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/tencent-connect/dsh-qqbot)](https://github.com/tencent-connect/dsh-qqbot)
+[![GitHub forks](https://img.shields.io/github/forks/tencent-connect/dsh-qqbot?style=social)](https://github.com/tencent-connect/dsh-qqbot/forks?include=active)
 [![QQ Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.qq.com/wiki/)
 
 <br/>
@@ -204,22 +205,47 @@ Resolution strategy: in-process reuse → persisted resume → fresh create.
 - **Question interaction** — supports `ask_user_question` with inline keyboard buttons (mutually exclusive) or numbered replies, one question at a time with timeout
 - **Approval confirmation** — supports `approval/request` to ask for user confirmation on critical actions via allow/deny buttons
 
-## Local Development
+## Contributing / Forking
+
+Fork away — this repo is MIT licensed and happy to take changes.
 
 ```bash
-# Install dependencies
-pnpm install
+# 1. Fork, then clone
+git clone https://github.com/<your-username>/dsh-qqbot.git
+cd dsh-qqbot
 
-# Build
-pnpm build
+# 2. Install dependencies and build
+pnpm install && pnpm build
 
-# Dev mode (watch)
+# 3. Dev mode (watch, rebuilds on change)
 pnpm dev
 
-# Debug via --patch
-export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
-npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
+# 4. Debug in a real environment via --patch
+export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"
+npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
+
+# 5. Run tests
+pnpm test
 ```
+
+### Where your changes should go
+
+| Type of change | Suggested path |
+|----------------|----------------|
+| Bug fixes, general improvements | PR back to upstream |
+| Private customization (custom prompts, toolsets) | Maintain your own fork, or try presets (`agent-presets`) first — no code changes needed |
+
+### Publishing your own fork
+
+- The `@tencent-connect` npm scope is protected; publish under your own scope (e.g. `@yourname/dsh-qqbot-xxx`)
+- Update the `name`, `repository`, `homepage` and `bugs` fields in `package.json`
+- Keep the MIT license and the original copyright notice
+
+## Community Forks
+
+Curious what others built on top? GitHub's fork network can filter to forks with commits ahead of upstream:
+
+**[Browse active forks](https://github.com/tencent-connect/dsh-qqbot/forks?include=active&sort=stargazers)**
 
 ## License
 

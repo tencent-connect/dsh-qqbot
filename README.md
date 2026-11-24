@@ -7,6 +7,7 @@
 [![npm version](https://img.shields.io/npm/v/@tencent-connect/dsh-qqbot)](https://www.npmjs.com/package/@tencent-connect/dsh-qqbot)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/tencent-connect/dsh-qqbot)](https://github.com/tencent-connect/dsh-qqbot)
+[![GitHub forks](https://img.shields.io/github/forks/tencent-connect/dsh-qqbot?style=social)](https://github.com/tencent-connect/dsh-qqbot/forks?include=active)
 [![QQ Bot](https://img.shields.io/badge/QQ_Bot-API_v2-red)](https://bot.q.qq.com/wiki/)
 
 <br/>
@@ -206,22 +207,41 @@ QQ 群聊和私聊的补充提示词按当前 Agent 作用域加载，恢复会�
 - **问答互动** — 支持 `ask_user_question`，单选生成内联按钮（点一个其余变灰）、多选回复编号，逐题推进 + 问题级超时
 - **操作确认** — 支持 `approval/request`，关键操作通过「允许/拒绝」按钮请求用户确认
 
-## 本地开发
+## 二次开发
+
+欢迎 fork 本仓库进行改造。
 
 ```bash
-# 安装依赖
-pnpm install
+# 1. Fork 后 clone
+git clone https://github.com/<你的用户名>/dsh-qqbot.git
+cd dsh-qqbot
 
-# 构建
-pnpm build
+# 2. 安装依赖并构建
+pnpm install && pnpm build
 
-# 开发模式（watch）
+# 3. 开发模式（watch，改动即时生效）
 pnpm dev
 
-# 用 --patch 方式调试
-export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
-npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
+# 4. 用 --patch 在真实环境调试
+export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
+npx @deepseek-ai/dsh web --patch ./cordis.dev.yml
+
+# 5. 运行测试
+pnpm test
 ```
+
+### 改动去向
+
+| 改动类型 | 建议路径 |
+|---------|---------|
+| bug 修复、通用能力增强 | 提 PR 回上游 |
+| 私有定制（自定义 prompt、工具集） | fork 独立维护，或优先尝试 preset（`agent-presets`）免改代码 |
+
+## 社区衍生项目
+
+想看大家 fork 后做了什么？GitHub 的 fork 网络页支持只显示有独立提交的活跃 fork：
+
+**[查看活跃的 fork](https://github.com/tencent-connect/dsh-qqbot/forks?include=active&sort=stargazers)**
 
 ## License
 
